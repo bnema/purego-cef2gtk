@@ -55,3 +55,37 @@ func TestBuildMouseEventScaleDefault(t *testing.T) {
 		t.Fatalf("BuildMouseEvent coords = (%d,%d), want (10,2)", evt.X, evt.Y)
 	}
 }
+
+func TestMiddleClickHandlerStoredWithHost(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	called := false
+	ib.SetMiddleClickHandler(func(x, y float64) bool {
+		called = true
+		if x != 10 || y != 20 {
+			t.Fatalf("middle click coords=(%v,%v), want (10,20)", x, y)
+		}
+		return true
+	})
+
+	host, handler := ib.currentHostAndMiddleClickHandler()
+	if host != nil {
+		t.Fatalf("host = %v, want nil", host)
+	}
+	if handler == nil {
+		t.Fatalf("middle click handler nil")
+	}
+	if !handler(10, 20) || !called {
+		t.Fatalf("middle click handler not invoked/consuming")
+	}
+}
+
+func TestMiddleClickConsumedReleaseOnlyOnce(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	ib.setMiddleClickConsumed(true)
+	if !ib.consumeMiddleClickRelease() {
+		t.Fatalf("first release was not consumed")
+	}
+	if ib.consumeMiddleClickRelease() {
+		t.Fatalf("second release consumed unexpectedly")
+	}
+}

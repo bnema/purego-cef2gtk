@@ -46,9 +46,23 @@ func (h *renderHandler) GetViewRect(_ cef.Browser, rect *cef.Rect) {
 	rect.Width, rect.Height = h.view.cachedSize()
 }
 func (h *renderHandler) GetScreenPoint(cef.Browser, int32, int32, *int32, *int32) int32 { return 0 }
-func (h *renderHandler) GetScreenInfo(cef.Browser, *cef.ScreenInfo) int32               { return 0 }
-func (h *renderHandler) OnPopupShow(cef.Browser, int32)                                 {}
-func (h *renderHandler) OnPopupSize(cef.Browser, *cef.Rect)                             {}
+func (h *renderHandler) GetScreenInfo(_ cef.Browser, info *cef.ScreenInfo) int32 {
+	if info == nil || h.view == nil {
+		return 0
+	}
+	width, height := h.view.cachedSize()
+	rect := cef.Rect{X: 0, Y: 0, Width: width, Height: height}
+	si := cef.NewScreenInfo()
+	si.DeviceScaleFactor = h.view.DeviceScaleFactor()
+	si.Depth = 24
+	si.DepthPerComponent = 8
+	si.Rect = rect
+	si.AvailableRect = rect
+	*info = si
+	return 1
+}
+func (h *renderHandler) OnPopupShow(cef.Browser, int32)     {}
+func (h *renderHandler) OnPopupSize(cef.Browser, *cef.Rect) {}
 func (h *renderHandler) OnPaint(cef.Browser, cef.PaintElementType, []cef.Rect, []byte, int32, int32) {
 	if h.diag != nil {
 		h.diag.RecordUnsupportedPaint()
@@ -99,5 +113,10 @@ func (h *renderHandler) StartDragging(cef.Browser, cef.DragData, cef.DragOperati
 func (h *renderHandler) UpdateDragCursor(cef.Browser, cef.DragOperationsMask)             {}
 func (h *renderHandler) OnScrollOffsetChanged(cef.Browser, float64, float64)              {}
 func (h *renderHandler) OnImeCompositionRangeChanged(cef.Browser, *cef.Range, []cef.Rect) {}
-func (h *renderHandler) OnTextSelectionChanged(cef.Browser, string, *cef.Range)           {}
-func (h *renderHandler) OnVirtualKeyboardRequested(cef.Browser, cef.TextInputMode)        {}
+func (h *renderHandler) OnTextSelectionChanged(_ cef.Browser, selectedText string, selectedRange *cef.Range) {
+	hooks := h.hooks()
+	if hooks.OnTextSelectionChanged != nil {
+		hooks.OnTextSelectionChanged(selectedText, selectedRange)
+	}
+}
+func (h *renderHandler) OnVirtualKeyboardRequested(cef.Browser, cef.TextInputMode) {}

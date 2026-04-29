@@ -36,11 +36,26 @@ type InputBridge struct {
 	area        *gtk.GLArea
 	controllers []*gtk.EventController
 	callbacks   []any
+
+	onMiddleClick       func(x, y float64) bool
+	middleClickConsumed bool
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
 func NewInputBridge(host cef.BrowserHost, scale int32) *InputBridge {
 	return &InputBridge{host: host, scale: normalizeScale(scale)}
+}
+
+// SetMiddleClickHandler configures a callback for middle-button press events.
+// If the callback returns true, the press/release pair is consumed locally and
+// is not forwarded to CEF.
+func (ib *InputBridge) SetMiddleClickHandler(fn func(x, y float64) bool) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.onMiddleClick = fn
+	ib.mu.Unlock()
 }
 
 // SetHost updates the CEF browser host used for subsequent input dispatch.
@@ -190,6 +205,26 @@ func (ib *InputBridge) currentHost() cef.BrowserHost {
 	return ib.host
 }
 
+func (ib *InputBridge) currentHostAndMiddleClickHandler() (cef.BrowserHost, func(x, y float64) bool) {
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	return ib.host, ib.onMiddleClick
+}
+
+func (ib *InputBridge) setMiddleClickConsumed(consumed bool) {
+	ib.mu.Lock()
+	ib.middleClickConsumed = consumed
+	ib.mu.Unlock()
+}
+
+func (ib *InputBridge) consumeMiddleClickRelease() bool {
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	consumed := ib.middleClickConsumed
+	ib.middleClickConsumed = false
+	return consumed
+}
+
 func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 	ib.mu.Lock()
 	host := ib.host
@@ -209,12 +244,19 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 }
 
 func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount int) {
-	host := ib.currentHost()
+	host, consumeMiddle := ib.currentHostAndMiddleClickHandler()
 	if host == nil {
 		return
 	}
 	if button == 1 {
 		syncWindowlessBrowserFocus(host)
+	}
+	if button == 2 && consumeMiddle != nil && consumeMiddle(x, y) {
+		ib.setMiddleClickConsumed(true)
+		return
+	}
+	if button == 2 {
+		ib.setMiddleClickConsumed(false)
 	}
 	evt := BuildMouseEvent(x, y, mods, ib.scale)
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 0, int32(clickCount))
@@ -223,6 +265,9 @@ func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount 
 func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCount int) {
 	host := ib.currentHost()
 	if host == nil {
+		return
+	}
+	if button == 2 && ib.consumeMiddleClickRelease() {
 		return
 	}
 	evt := BuildMouseEvent(x, y, mods, ib.scale)

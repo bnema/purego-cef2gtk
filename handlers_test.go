@@ -100,3 +100,32 @@ func TestRenderSignalErrorHookAndDiagnostics(t *testing.T) {
 		t.Fatalf("unexpected diagnostics events: %+v", diag.Events)
 	}
 }
+
+func TestGetScreenInfoUsesViewSizeAndScale(t *testing.T) {
+	v := &View{}
+	v.cachedWidth.Store(640)
+	v.cachedHeight.Store(480)
+	v.scale.Store(2)
+	h := &renderHandler{view: v}
+	info := cef.NewScreenInfo()
+	if ok := h.GetScreenInfo(nil, &info); ok != 1 {
+		t.Fatalf("GetScreenInfo returned %d, want 1", ok)
+	}
+	if info.DeviceScaleFactor != 2 {
+		t.Fatalf("scale=%v, want 2", info.DeviceScaleFactor)
+	}
+	if info.Rect.Width != 640 || info.Rect.Height != 480 || info.AvailableRect.Width != 640 || info.AvailableRect.Height != 480 {
+		t.Fatalf("unexpected rects: rect=%+v available=%+v", info.Rect, info.AvailableRect)
+	}
+}
+
+func TestOnTextSelectionChangedHook(t *testing.T) {
+	var got string
+	h := &renderHandler{staticHooks: Hooks{OnTextSelectionChanged: func(selectedText string, _ *cef.Range) {
+		got = selectedText
+	}}}
+	h.OnTextSelectionChanged(nil, "hello", nil)
+	if got != "hello" {
+		t.Fatalf("selected text hook got %q, want hello", got)
+	}
+}

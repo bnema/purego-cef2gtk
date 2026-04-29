@@ -14,6 +14,9 @@ var ErrViewNotInitialized = errors.New("view not initialized")
 type InputOptions struct {
 	// Scale is the HiDPI scale factor applied to pointer coordinates. Values <= 0 use 1.
 	Scale int32
+	// OnMiddleClick is invoked when GTK receives a middle-button press. Returning
+	// true consumes the event before it is forwarded to CEF.
+	OnMiddleClick func(x, y float64) bool
 }
 
 func (o InputOptions) normalizedScale() int32 {
@@ -37,6 +40,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	}
 	v.inputScale = opts.normalizedScale()
 	v.input = gtkgl.NewInputBridge(host, v.inputScale)
+	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.Attach(v.area)
 	return nil
 }
