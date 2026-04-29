@@ -1,0 +1,103 @@
+package cef2gtk
+
+import (
+	"sync"
+	"time"
+)
+
+// DiagnosticEvent records notable rendering-path events and failures.
+type DiagnosticEvent struct {
+	Time    time.Time
+	Kind    string
+	Message string
+}
+
+const maxDiagnosticEvents = 256
+
+// Diagnostics is a snapshot of View rendering diagnostics. Events contains the
+// most recent diagnostic events, capped to avoid unbounded growth.
+type Diagnostics struct {
+	AcceleratedPaints      int
+	AcceleratedPaintErrors int
+	UnsupportedPaints      int
+	ImportFailures         int
+	RenderFailures         int
+	Events                 []DiagnosticEvent
+}
+
+type diagnosticsRecorder struct {
+	mu sync.Mutex
+	d  Diagnostics
+}
+
+func newDiagnosticsRecorder() *diagnosticsRecorder { return &diagnosticsRecorder{} }
+
+func (r *diagnosticsRecorder) Snapshot() Diagnostics {
+	if r == nil {
+		return Diagnostics{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.d
+	out.Events = append([]DiagnosticEvent(nil), r.d.Events...)
+	return out
+}
+
+func (r *diagnosticsRecorder) RecordAcceleratedPaint() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.d.AcceleratedPaints++
+	r.appendEventLocked(DiagnosticEvent{Time: time.Now(), Kind: "accelerated-paint"})
+}
+
+func (r *diagnosticsRecorder) RecordImportFailure(err error) {
+	if r == nil {
+		return
+	}
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.d.AcceleratedPaintErrors++
+	r.d.ImportFailures++
+	r.appendEventLocked(DiagnosticEvent{Time: time.Now(), Kind: "import-failure", Message: msg})
+}
+
+func (r *diagnosticsRecorder) RecordRenderFailure(err error) {
+	if r == nil {
+		return
+	}
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.d.AcceleratedPaintErrors++
+	r.d.RenderFailures++
+	r.appendEventLocked(DiagnosticEvent{Time: time.Now(), Kind: "render-failure", Message: msg})
+}
+
+func (r *diagnosticsRecorder) RecordUnsupportedPaint() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.d.UnsupportedPaints++
+	r.appendEventLocked(DiagnosticEvent{Time: time.Now(), Kind: "unsupported-paint"})
+}
+
+func (r *diagnosticsRecorder) appendEventLocked(event DiagnosticEvent) {
+	if len(r.d.Events) >= maxDiagnosticEvents {
+		copy(r.d.Events, r.d.Events[1:])
+		r.d.Events[len(r.d.Events)-1] = event
+		return
+	}
+	r.d.Events = append(r.d.Events, event)
+}
