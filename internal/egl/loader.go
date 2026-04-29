@@ -44,15 +44,20 @@ func defaultBackend() (backend, error) {
 
 func loadDynamicBackend() (ret backend, retErr error) {
 	var handle uintptr
-	var err error
+	errMsg := ""
 	for _, name := range []string{"libEGL.so.1", "libEGL.so"} {
+		var err error
 		handle, err = purego.Dlopen(name, purego.RTLD_LAZY|purego.RTLD_LOCAL)
 		if err == nil {
 			break
 		}
+		if errMsg != "" {
+			errMsg += "; "
+		}
+		errMsg += name + ": " + err.Error()
 	}
 	if handle == 0 {
-		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %s", ErrUnavailable, errMsg)
 	}
 	defer func() {
 		if retErr != nil {

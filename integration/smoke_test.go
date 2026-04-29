@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -27,11 +26,20 @@ func TestRuntimeSmokeGate(t *testing.T) {
 
 func projectRoot(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("could not resolve integration test path")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), ".."))
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find project root from %s", dir)
+		}
+		dir = parent
+	}
 }
 
 func runBounded(t *testing.T, dir string, timeout time.Duration, label string, name string, args ...string) {

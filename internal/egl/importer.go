@@ -2,6 +2,7 @@ package egl
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/bnema/purego"
 
@@ -148,7 +149,10 @@ func eglProc(handle uintptr, name string) uintptr {
 		return 0
 	}
 	purego.RegisterFunc(&getProcAddress, sym)
-	return getProcAddress(cStringBytes(name))
+	nameBytes := append([]byte(name), 0)
+	addr := getProcAddress(&nameBytes[0])
+	runtime.KeepAlive(nameBytes)
+	return addr
 }
 
 func registerEGLProc(fptr any, handle uintptr, name string) error {
@@ -158,11 +162,4 @@ func registerEGLProc(fptr any, handle uintptr, name string) error {
 	}
 	purego.RegisterFunc(fptr, sym)
 	return nil
-}
-
-// cStringBytes returns a pointer for immediate FFI calls only; callers must not
-// store the pointer after the backing Go slice may be collected.
-func cStringBytes(s string) *byte {
-	b := append([]byte(s), 0)
-	return &b[0]
 }

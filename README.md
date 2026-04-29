@@ -34,7 +34,7 @@ settings := cef.NewBrowserSettings()
 client := cef.NewClient(myClient{render: view.RenderHandler(cef2gtk.Hooks{})})
 cef.BrowserHostCreateBrowser(&info, client, "https://example.com/", &settings, nil, nil)
 
-// After OnAfterCreated provides the BrowserHost:
+// In OnAfterCreated(browser cef.Browser), attach the BrowserHost:
 _ = view.AttachInput(browser.GetHost(), cef2gtk.InputOptions{Scale: 1})
 ```
 

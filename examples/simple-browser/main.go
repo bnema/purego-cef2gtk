@@ -98,6 +98,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "prepare view:", err)
 		os.Exit(1)
 	}
+	// AttachInput starts before the asynchronous browser exists; OnAfterCreated
+	// later supplies the real host with SetInputHost(browser.GetHost()).
 	if err := view.AttachInput(nil, cef2gtk.InputOptions{Scale: 1}); err != nil {
 		fmt.Fprintln(os.Stderr, "attach input:", err)
 		os.Exit(1)
@@ -137,12 +139,16 @@ func urlArg() (string, error) {
 	if len(os.Args) > 1 {
 		raw = os.Args[1]
 	}
-	if parsed, err := url.Parse(raw); err == nil && parsed.Scheme == "" {
-		raw = "https://" + raw
-	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", err
+	}
+	if parsed.Scheme == "" {
+		raw = "https://" + raw
+		parsed, err = url.Parse(raw)
+		if err != nil {
+			return "", err
+		}
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)

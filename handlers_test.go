@@ -34,7 +34,7 @@ func (f *fakeRenderQueue) Close() {}
 func TestOnPaintFailLoudRecordsAndHooks(t *testing.T) {
 	d := newDiagnosticsRecorder()
 	called := false
-	h := &renderHandler{diag: d, hooks: Hooks{OnUnsupportedPaint: func() { called = true }}}
+	h := &renderHandler{diag: d, staticHooks: Hooks{OnUnsupportedPaint: func() { called = true }}}
 	h.OnPaint(nil, cef.PaintElementTypePetView, nil, []byte{1, 2}, 10, 10)
 	if !called {
 		t.Fatalf("unsupported paint hook not called")
@@ -49,7 +49,7 @@ func TestOnAcceleratedPaintErrorHook(t *testing.T) {
 	f := &fakeRenderQueue{err: want}
 	d := newDiagnosticsRecorder()
 	var got error
-	h := &renderHandler{renderer: f, diag: d, hooks: Hooks{OnError: func(err error) { got = err }}}
+	h := &renderHandler{renderer: f, diag: d, staticHooks: Hooks{OnError: func(err error) { got = err }}}
 	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
 	if !f.called {
 		t.Fatalf("accelerated renderer not called")

@@ -11,10 +11,10 @@ type acceleratedRenderQueue interface {
 }
 
 type renderHandler struct {
-	view     *View
-	renderer acceleratedRenderQueue
-	diag     *diagnosticsRecorder
-	hooks    Hooks
+	view        *View
+	renderer    acceleratedRenderQueue
+	diag        *diagnosticsRecorder
+	staticHooks Hooks
 }
 
 var _ cef.RenderHandler = (*renderHandler)(nil)
@@ -22,15 +22,13 @@ var _ cef.RenderHandler = (*renderHandler)(nil)
 // RenderHandler returns a CEF render handler adapter for this view.
 func (v *View) RenderHandler(hooks Hooks) cef.RenderHandler {
 	if v == nil {
-		return &renderHandler{hooks: hooks}
-	}
-	if v.handler != nil {
-		v.hooks = hooks
-		v.handler.hooks = hooks
-		return v.handler
+		return &renderHandler{staticHooks: hooks}
 	}
 	v.hooks = hooks
-	v.handler = &renderHandler{view: v, renderer: v.renderer, diag: v.diag, hooks: hooks}
+	if v.handler != nil {
+		return v.handler
+	}
+	v.handler = &renderHandler{view: v, renderer: v.renderer, diag: v.diag}
 	return v.handler
 }
 
@@ -58,8 +56,9 @@ func (h *renderHandler) OnPaint(cef.Browser, cef.PaintElementType, []cef.Rect, [
 	if h.diag != nil {
 		h.diag.RecordUnsupportedPaint()
 	}
-	if h.hooks.OnUnsupportedPaint != nil {
-		h.hooks.OnUnsupportedPaint()
+	hooks := h.hooks()
+	if hooks.OnUnsupportedPaint != nil {
+		hooks.OnUnsupportedPaint()
 	}
 }
 func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType, _ []cef.Rect, info *cef.AcceleratedPaintInfo) {
@@ -80,10 +79,21 @@ func (h *renderHandler) handleAcceleratedError(err error) {
 	if h.diag != nil {
 		h.diag.RecordImportFailure(err)
 	}
-	if h.hooks.OnError != nil {
-		h.hooks.OnError(err)
+	hooks := h.hooks()
+	if hooks.OnError != nil {
+		hooks.OnError(err)
 	}
 }
+func (h *renderHandler) hooks() Hooks {
+	if h != nil && h.view != nil {
+		return h.view.hooks
+	}
+	if h != nil {
+		return h.staticHooks
+	}
+	return Hooks{}
+}
+
 func (h *renderHandler) GetTouchHandleSize(cef.Browser, cef.HorizontalAlignment, *cef.Size) {}
 func (h *renderHandler) OnTouchHandleStateChanged(cef.Browser, *cef.TouchHandleState)       {}
 func (h *renderHandler) StartDragging(cef.Browser, cef.DragData, cef.DragOperationsMask, int32, int32) int32 {

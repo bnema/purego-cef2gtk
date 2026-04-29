@@ -344,9 +344,36 @@ func (ib *InputBridge) pasteFromClipboard() {
 		if frame == nil {
 			return
 		}
-		frame.ExecuteJavaScript("document.execCommand('insertText',false,"+jsString(text)+")", "", 0)
+		frame.ExecuteJavaScript(pasteJavaScript(text), "", 0)
 	})
 	cb.ReadTextAsync(nil, &asyncCb, 0)
+}
+
+func pasteJavaScript(text string) string {
+	quoted := jsString(text)
+	return `(function(text){
+const active=document.activeElement;
+if(active && (active.tagName==='TEXTAREA' || (active.tagName==='INPUT' && 'value' in active))){
+  const start=active.selectionStart ?? active.value.length;
+  const end=active.selectionEnd ?? start;
+  active.value=active.value.slice(0,start)+text+active.value.slice(end);
+  const next=start+text.length;
+  active.selectionStart=next; active.selectionEnd=next;
+  active.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
+  return;
+}
+const selection=window.getSelection && window.getSelection();
+if(selection && selection.rangeCount){
+  const range=selection.getRangeAt(0);
+  range.deleteContents();
+  const node=document.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node); range.collapse(true);
+  selection.removeAllRanges(); selection.addRange(range);
+  return;
+}
+if(document.execCommand){ document.execCommand('insertText',false,text); }
+})(` + quoted + `);`
 }
 
 func jsString(s string) string {

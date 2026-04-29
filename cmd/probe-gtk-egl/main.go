@@ -45,6 +45,7 @@ func main() {
 		os.Exit(1)
 	}
 	win.SetChild(&area.Widget)
+	cleanup := func() { win.Destroy() }
 	win.Realize()
 	area.Realize()
 
@@ -57,9 +58,11 @@ func main() {
 			code = 2
 		}
 		write(output{Status: status, Error: err.Error(), Probe: &probe})
+		cleanup()
 		os.Exit(code)
 	}
 	write(output{Status: "ok", Probe: &probe})
+	cleanup()
 }
 
 func write(v output) {
