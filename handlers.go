@@ -38,15 +38,11 @@ func (h *renderHandler) GetViewRect(_ cef.Browser, rect *cef.Rect) {
 	if rect == nil {
 		return
 	}
-	if h.view != nil {
-		rect.Width, rect.Height = h.view.cachedSize()
+	if h.view == nil {
+		rect.Width, rect.Height = 1, 1
+		return
 	}
-	if rect.Width <= 0 {
-		rect.Width = 1
-	}
-	if rect.Height <= 0 {
-		rect.Height = 1
-	}
+	rect.Width, rect.Height = h.view.cachedSize()
 }
 func (h *renderHandler) GetScreenPoint(cef.Browser, int32, int32, *int32, *int32) int32 { return 0 }
 func (h *renderHandler) GetScreenInfo(cef.Browser, *cef.ScreenInfo) int32               { return 0 }

@@ -416,6 +416,8 @@ func programInfoLog(gl Driver, program uint32) string {
 	return strings.TrimRight(string(buf), "\x00")
 }
 
+// cStringBytes returns a pointer to a null-terminated byte slice for immediate
+// OpenGL calls. The returned pointer must not be stored or used later.
 func cStringBytes(s string) *byte {
 	b := append([]byte(s), 0)
 	return &b[0]

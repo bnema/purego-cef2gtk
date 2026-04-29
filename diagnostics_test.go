@@ -2,6 +2,7 @@ package cef2gtk
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -25,6 +26,27 @@ func TestDiagnosticsRecorderSnapshot(t *testing.T) {
 		if d.Events[i].Kind != wantKinds[i] || d.Events[i].Message != wantMessages[i] {
 			t.Fatalf("event[%d]=%+v, want kind %q message %q", i, d.Events[i], wantKinds[i], wantMessages[i])
 		}
+	}
+	d.Events[0].Kind = "mutated"
+	if got := r.Snapshot().Events[0].Kind; got == "mutated" {
+		t.Fatalf("snapshot events alias recorder storage")
+	}
+}
+
+func TestDiagnosticsRecorderRingBufferWraparound(t *testing.T) {
+	r := newDiagnosticsRecorder()
+	for i := 0; i < maxDiagnosticEvents+3; i++ {
+		r.RecordImportFailure(fmt.Errorf("err-%03d", i))
+	}
+	d := r.Snapshot()
+	if len(d.Events) != maxDiagnosticEvents {
+		t.Fatalf("events=%d, want %d", len(d.Events), maxDiagnosticEvents)
+	}
+	if d.Events[0].Message != "err-003" {
+		t.Fatalf("first event message=%q, want err-003", d.Events[0].Message)
+	}
+	if d.Events[len(d.Events)-1].Message != fmt.Sprintf("err-%03d", maxDiagnosticEvents+2) {
+		t.Fatalf("last event message=%q", d.Events[len(d.Events)-1].Message)
 	}
 	d.Events[0].Kind = "mutated"
 	if got := r.Snapshot().Events[0].Kind; got == "mutated" {

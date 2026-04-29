@@ -18,8 +18,11 @@ type InputOptions struct {
 // AttachInput attaches GTK event controllers to the view and forwards input to host.
 // Call from the GTK/main thread; GTK controller attachment is not goroutine-safe.
 func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
-	if v == nil || v.area == nil {
+	if v == nil {
 		return ErrNilView
+	}
+	if v.area == nil {
+		return ErrInputNotAttached
 	}
 	if v.input != nil {
 		v.input.Detach()

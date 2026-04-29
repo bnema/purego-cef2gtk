@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/bnema/purego-cef2gtk/internal/egl"
@@ -55,7 +56,7 @@ func (r ContextProbeResult) Validate() error {
 	if r.EGLDisplay == "" || r.EGLDisplay == egl.NoDisplay.String() {
 		return ErrMissingEGLDisplay
 	}
-	if !r.DMABUFImportSupport && !contains(r.EGLExtensions, egl.ExtensionDMABUFImport) {
+	if !r.DMABUFImportSupport && !slices.Contains(r.EGLExtensions, egl.ExtensionDMABUFImport) {
 		return ErrMissingDMABUFImport
 	}
 	if strings.TrimSpace(r.GLVersion) == "" || strings.TrimSpace(r.GLVendor) == "" || strings.TrimSpace(r.GLRenderer) == "" {
@@ -163,13 +164,4 @@ func glAPIName(areaAPI, contextAPI gdk.GLAPI) string {
 	default:
 		return "unknown"
 	}
-}
-
-func contains(names []string, want string) bool {
-	for _, name := range names {
-		if name == want {
-			return true
-		}
-	}
-	return false
 }

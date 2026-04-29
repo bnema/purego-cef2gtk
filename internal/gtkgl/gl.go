@@ -58,12 +58,19 @@ func loadGLBackend() (*glBackend, error) {
 	if handle == 0 {
 		return nil, fmt.Errorf("%w: %s", ErrGLUnavailable, errMsg)
 	}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = purego.Dlclose(handle)
+		}
+	}()
 	b := &glBackend{}
 	sym, err := purego.Dlsym(handle, "glGetString")
 	if err != nil {
 		return nil, fmt.Errorf("%w: missing glGetString: %w", ErrGLUnavailable, err)
 	}
 	purego.RegisterFunc(&b.glGetString, sym)
+	initialized = true
 	return b, nil
 }
 

@@ -48,9 +48,11 @@ func DMABUFImageAttributes(frame dmabuf.BorrowedFrame, extensions Extensions) ([
 		return nil, fmt.Errorf("build EGL DMABUF image attributes: %w: %d", ErrInvalidStrideAttribute, frame.Planes[0].Stride)
 	}
 
-	// EGL expects these values as EGLint attributes. FourCC and modifier hi/lo
-	// values are raw bit patterns, so casts to Attribute intentionally preserve
-	// those bits even when their unsigned representation exceeds MaxInt32.
+	// EGL expects these values as EGLint attributes. File descriptors are kernel
+	// ints and already validated positive by dmabuf.BorrowedFrame.Validate.
+	// FourCC and modifier hi/lo values are raw bit patterns, so casts to Attribute
+	// intentionally preserve those bits even when their unsigned representation
+	// exceeds MaxInt32.
 	attrs := []Attribute{
 		attributeWidth, Attribute(frame.CodedSize.Width),
 		attributeHeight, Attribute(frame.CodedSize.Height),

@@ -377,6 +377,8 @@ if(document.execCommand){ document.execCommand('insertText',false,text); }
 
 func jsString(s string) string {
 	q := strconv.Quote(s)
+	q = strings.ReplaceAll(q, "\\u2028", "\\\\u2028")
+	q = strings.ReplaceAll(q, "\\u2029", "\\\\u2029")
 	return strings.ReplaceAll(q, "</", "<\\/")
 }
 
