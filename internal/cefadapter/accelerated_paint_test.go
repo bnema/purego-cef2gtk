@@ -90,24 +90,13 @@ func TestBorrowedFrameFromAcceleratedPaintRejectsNilInfo(t *testing.T) {
 	}
 }
 
-func TestBorrowedFrameFromAcceleratedPaintRejectsPlaneCountBounds(t *testing.T) {
-	for _, planeCount := range []int32{0, -1, 5} {
+func TestBorrowedFrameFromAcceleratedPaintRejectsNonSinglePlaneCounts(t *testing.T) {
+	for _, planeCount := range []int32{0, -1, 2, 5} {
 		info := validAcceleratedPaintInfo()
 		info.PlaneCount = planeCount
-		if _, err := BorrowedFrameFromAcceleratedPaint(&info); !errors.Is(err, ErrInvalidPlaneCount) {
-			t.Fatalf("BorrowedFrameFromAcceleratedPaint plane count %d error = %v, want %v", planeCount, err, ErrInvalidPlaneCount)
+		if _, err := BorrowedFrameFromAcceleratedPaint(&info); !errors.Is(err, dmabuf.ErrUnsupportedPlanes) {
+			t.Fatalf("BorrowedFrameFromAcceleratedPaint plane count %d error = %v, want %v", planeCount, err, dmabuf.ErrUnsupportedPlanes)
 		}
-	}
-}
-
-func TestBorrowedFrameFromAcceleratedPaintPropagatesUnsupportedPlanesValidation(t *testing.T) {
-	info := validAcceleratedPaintInfo()
-	info.PlaneCount = 2
-	info.Planes[1].Fd = testSecondPlaneFD
-	info.Planes[1].Stride = testSecondPlaneStride
-
-	if _, err := BorrowedFrameFromAcceleratedPaint(&info); !errors.Is(err, dmabuf.ErrUnsupportedPlanes) {
-		t.Fatalf("BorrowedFrameFromAcceleratedPaint multi-plane error = %v, want %v", err, dmabuf.ErrUnsupportedPlanes)
 	}
 }
 

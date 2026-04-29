@@ -38,6 +38,7 @@ func (h *renderHandler) GetViewRect(_ cef.Browser, rect *cef.Rect) {
 	if rect == nil {
 		return
 	}
+	rect.X, rect.Y = 0, 0
 	if h.view == nil {
 		rect.Width, rect.Height = 1, 1
 		return

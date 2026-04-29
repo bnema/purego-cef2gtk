@@ -135,9 +135,10 @@ func (v *View) GLArea() *gtk.GLArea {
 
 // PrepareOnGTKThread initializes renderer GL/EGL resources. Call on GTK main thread.
 func (v *View) PrepareOnGTKThread() error {
-	if v == nil || v.renderer == nil {
+	if v == nil || v.renderer == nil || v.area == nil {
 		return ErrNilView
 	}
+	v.area.MakeCurrent()
 	return v.renderer.InitializeOnGTKThread()
 }
 
@@ -175,6 +176,9 @@ func (v *View) Destroy() error {
 		}
 	}
 	if v.renderer != nil {
+		if v.area != nil {
+			v.area.MakeCurrent()
+		}
 		v.renderer.Close()
 		v.renderer = nil
 	}

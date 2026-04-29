@@ -24,7 +24,8 @@ func TestNewViewWidgetGLAreaBasics(t *testing.T) {
 	if v.Widget() == nil {
 		t.Fatalf("Widget nil")
 	}
-	if d := v.Diagnostics(); d.AcceleratedPaints != 0 || d.UnsupportedPaints != 0 {
+	if d := v.Diagnostics(); d.AcceleratedPaints != 0 || d.UnsupportedPaints != 0 ||
+		d.AcceleratedPaintErrors != 0 || d.ImportFailures != 0 || d.RenderFailures != 0 {
 		t.Fatalf("unexpected initial diagnostics: %+v", d)
 	}
 }

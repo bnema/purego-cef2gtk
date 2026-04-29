@@ -218,8 +218,10 @@ func (r *AcceleratedRenderer) Close() {
 		}
 		r.gl = nil
 	}
-	if closer, ok := r.egl.(eglCloser); ok {
-		_ = closer.Close()
+	if r.egl != nil {
+		if closer, ok := r.egl.(eglCloser); ok {
+			_ = closer.Close()
+		}
+		r.egl = nil
 	}
-	r.egl = nil
 }

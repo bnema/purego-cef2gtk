@@ -10,12 +10,7 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
 )
 
-const maxAcceleratedPaintPlanes = 4
-
-var (
-	ErrNilAcceleratedPaintInfo = errors.New("nil accelerated paint info")
-	ErrInvalidPlaneCount       = errors.New("invalid accelerated paint plane count")
-)
+var ErrNilAcceleratedPaintInfo = errors.New("nil accelerated paint info")
 
 // BorrowedFrameFromAcceleratedPaint converts CEF accelerated paint metadata to a
 // callback-scoped borrowed DMABUF frame description.
@@ -23,8 +18,8 @@ func BorrowedFrameFromAcceleratedPaint(info *cef.AcceleratedPaintInfo) (dmabuf.B
 	if info == nil {
 		return dmabuf.BorrowedFrame{}, ErrNilAcceleratedPaintInfo
 	}
-	if info.PlaneCount <= 0 || info.PlaneCount > maxAcceleratedPaintPlanes {
-		return dmabuf.BorrowedFrame{}, fmt.Errorf("%w: %d", ErrInvalidPlaneCount, info.PlaneCount)
+	if info.PlaneCount != 1 {
+		return dmabuf.BorrowedFrame{}, fmt.Errorf("%w: got %d, want 1", dmabuf.ErrUnsupportedPlanes, info.PlaneCount)
 	}
 
 	planeCount := int(info.PlaneCount)

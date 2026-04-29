@@ -91,8 +91,8 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 	ib.addController(area, &click.EventController, &pressedCb, &releasedCb)
 
 	scroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollBothAxesValue | gtk.EventControllerScrollKineticValue)
-	scrollCb := func(_ gtk.EventControllerScroll, dx, dy float64) bool {
-		ib.onScroll(dx, dy)
+	scrollCb := func(g gtk.EventControllerScroll, dx, dy float64) bool {
+		ib.onScroll(dx, dy, uint(g.GetCurrentEventState()))
 		return true
 	}
 	scroll.ConnectScroll(&scrollCb)
@@ -229,14 +229,14 @@ func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCoun
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 1, int32(clickCount))
 }
 
-func (ib *InputBridge) onScroll(dx, dy float64) {
+func (ib *InputBridge) onScroll(dx, dy float64, mods uint) {
 	ib.mu.Lock()
 	host, x, y := ib.host, ib.lastX, ib.lastY
 	ib.mu.Unlock()
 	if host == nil {
 		return
 	}
-	evt := BuildMouseEvent(x, y, 0, ib.scale)
+	evt := BuildMouseEvent(x, y, mods, ib.scale)
 	deltaX, deltaY := TranslateScrollDeltas(dx, dy)
 	host.SendMouseWheelEvent(&evt, deltaX, deltaY)
 }
@@ -377,8 +377,6 @@ if(document.execCommand){ document.execCommand('insertText',false,text); }
 
 func jsString(s string) string {
 	q := strconv.Quote(s)
-	q = strings.ReplaceAll(q, "\\u2028", "\\\\u2028")
-	q = strings.ReplaceAll(q, "\\u2029", "\\\\u2029")
 	return strings.ReplaceAll(q, "</", "<\\/")
 }
 

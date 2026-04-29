@@ -99,5 +99,6 @@ func (b *dynamicBackend) currentDisplay() Display {
 
 func (b *dynamicBackend) queryString(d Display, name int32) string {
 	ptr := b.eglQueryString(uintptr(d), name)
-	return cutil.CString(ptr)
+	s := cutil.CString(ptr)
+	return string([]byte(s))
 }

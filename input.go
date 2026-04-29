@@ -8,6 +8,7 @@ import (
 )
 
 var ErrInputNotAttached = errors.New("input bridge is not attached")
+var ErrViewNotInitialized = errors.New("view not initialized")
 
 // InputOptions configures GTK-to-CEF input forwarding.
 type InputOptions struct {
@@ -29,7 +30,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 		return ErrNilView
 	}
 	if v.area == nil {
-		return ErrInputNotAttached
+		return ErrViewNotInitialized
 	}
 	if v.input != nil {
 		v.input.Detach()
@@ -53,9 +54,8 @@ func (v *View) DetachInput() error {
 }
 
 // SetInputHost updates the CEF browser host used by the attached input bridge.
-// Call from the GTK/main thread; fallback bridge creation/attachment is not
-// goroutine-safe. If no bridge exists yet, SetInputHost creates and attaches one
-// when the view still has a GtkGLArea; otherwise it returns ErrInputNotAttached.
+// Must be called on the GTK/main thread. Returns ErrInputNotAttached when v.input
+// is nil. Callers must call AttachInput first.
 func (v *View) SetInputHost(host cef.BrowserHost) error {
 	if v == nil {
 		return ErrNilView

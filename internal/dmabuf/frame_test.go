@@ -71,13 +71,16 @@ func TestBorrowedFrameValidateRejectsPlaneCountsOtherThanOne(t *testing.T) {
 	}
 }
 
-func TestBorrowedFrameValidateRejectsInvalidPlaneFD(t *testing.T) {
+func TestBorrowedFrameValidateAcceptsFDZero(t *testing.T) {
 	frame := validFrame()
 	frame.Planes[0].FD = 0
-	if err := frame.Validate(); !errors.Is(err, ErrInvalidPlaneFD) {
-		t.Fatalf("Validate error = %v, want %v", err, ErrInvalidPlaneFD)
+	if err := frame.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil", err)
 	}
-	// Also reject negative FD.
+}
+
+func TestBorrowedFrameValidateRejectsInvalidPlaneFD(t *testing.T) {
+	frame := validFrame()
 	frame.Planes[0].FD = -1
 	if err := frame.Validate(); !errors.Is(err, ErrInvalidPlaneFD) {
 		t.Fatalf("Validate error = %v, want %v", err, ErrInvalidPlaneFD)

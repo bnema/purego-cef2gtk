@@ -58,7 +58,7 @@ type BorrowedFrame struct {
 }
 
 // Validate enforces the intentionally small initial support matrix: exactly one
-// plane, one of four RGB formats, positive coded size, valid fd, and non-zero stride.
+// plane, one of four RGB formats, positive coded size, non-negative fd, and non-zero stride.
 func (f BorrowedFrame) Validate() error {
 	if !f.CodedSize.Valid() {
 		return fmt.Errorf("%w: %dx%d", ErrInvalidCodedSize, f.CodedSize.Width, f.CodedSize.Height)
@@ -70,7 +70,7 @@ func (f BorrowedFrame) Validate() error {
 		return fmt.Errorf("%w: got %d, want %d", ErrUnsupportedPlanes, len(f.Planes), supportedPlaneCount)
 	}
 	plane := f.Planes[0]
-	if plane.FD <= 0 {
+	if plane.FD < 0 {
 		return fmt.Errorf("%w: %d", ErrInvalidPlaneFD, plane.FD)
 	}
 	if plane.Stride == 0 {

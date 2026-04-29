@@ -10,5 +10,5 @@ func glibErrorMessage(err *glib.Error) string {
 	if err == nil {
 		return "unknown GTK/GLib error"
 	}
-	return fmt.Sprintf("domain=%d code=%d message_ptr=0x%x", err.Domain, err.Code, err.Message)
+	return fmt.Sprintf("domain=%d code=%d message=%q", err.Domain, err.Code, err.MessageGo())
 }

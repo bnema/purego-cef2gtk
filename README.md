@@ -28,8 +28,9 @@ if err := view.PrepareOnGTKThread(); err != nil {
 }
 
 info := cef.NewWindowInfo()
-// Set WindowInfoOptions.Parent to the native GTK window handle once the widget has been realized.
-cef2gtk.ConfigureWindowInfo(&info, cef2gtk.WindowInfoOptions{Parent: /* native GTK window handle */})
+// After the GTK widget/surface is realized, extract its native platform handle
+// with the appropriate GTK/platform API and pass that handle as Parent.
+cef2gtk.ConfigureWindowInfo(&info, cef2gtk.WindowInfoOptions{Parent: /* realized native handle */})
 settings := cef.NewBrowserSettings()
 client := cef.NewClient(myClient{render: view.RenderHandler(cef2gtk.Hooks{})})
 cef.BrowserHostCreateBrowser(&info, client, "https://example.com/", &settings, nil, nil)

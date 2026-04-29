@@ -130,6 +130,7 @@ func DetectBackendFromDisplay(display *gdk.Display) string {
 		if strings.Contains(name, "wayland") {
 			return BackendWayland
 		}
+		// X11 display names typically start with :N (or hostname:N).
 		if strings.HasPrefix(name, ":") || strings.Contains(name, "x11") {
 			return BackendX11
 		}
