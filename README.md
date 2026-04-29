@@ -4,7 +4,7 @@ GTK4 widget bridge for [`purego-cef`](https://github.com/bnema/purego-cef) accel
 
 ## Status
 
-Early bootstrap. The intended renderer is Wayland-only and GPU-first:
+Early bootstrap. The renderer is Wayland-only and GPU-first:
 
 - CEF accelerated OSR with shared textures/DMABUFs
 - GTK4 `GtkGLArea`
@@ -13,7 +13,37 @@ Early bootstrap. The intended renderer is Wayland-only and GPU-first:
 - no `--disable-gpu` or software rendering fallback
 - CEF `OnPaint` is treated as a diagnostic/error path, not as a renderer
 
+## Usage sketch
+
+```go
+// In cef.App.OnBeforeCommandLineProcessing:
+cef2gtk.ConfigureCommandLine(commandLine, cef2gtk.CommandLineOptions{})
+
+view := cef2gtk.NewView()
+window.SetChild(view.Widget())
+window.Present()
+view.Widget().Realize()
+if err := view.PrepareOnGTKThread(); err != nil {
+    return err
+}
+
+info := cef.NewWindowInfo()
+// Set WindowInfoOptions.Parent to the native GTK window handle once the widget has been realized.
+cef2gtk.ConfigureWindowInfo(&info, cef2gtk.WindowInfoOptions{Parent: /* native GTK window handle */})
+settings := cef.NewBrowserSettings()
+client := cef.NewClient(myClient{render: view.RenderHandler(cef2gtk.Hooks{})})
+cef.BrowserHostCreateBrowser(&info, client, "https://example.com/", &settings, nil, nil)
+
+// After OnAfterCreated provides the BrowserHost:
+_ = view.AttachInput(browser.GetHost(), cef2gtk.InputOptions{Scale: 1})
+```
+
+See `examples/simple-browser` for a complete accelerated-only GTK+CEF setup.
+
 ## Development
+
+The module depends on the published `github.com/bnema/puregotk` module. During local puregotk development,
+you can temporarily add your own `replace github.com/bnema/puregotk => ../puregotk` directive.
 
 ```sh
 rtk make check
