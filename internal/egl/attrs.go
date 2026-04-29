@@ -26,6 +26,7 @@ const (
 var (
 	ErrInvalidOffset          = errors.New("invalid EGL DMABUF plane offset")
 	ErrInvalidStrideAttribute = errors.New("invalid EGL DMABUF plane stride attribute")
+	ErrInvalidFDAttribute     = errors.New("invalid EGL DMABUF plane fd attribute")
 )
 
 // Attribute is an EGLint image attribute key or value.
@@ -40,6 +41,9 @@ func DMABUFImageAttributes(frame dmabuf.BorrowedFrame, extensions Extensions) ([
 	}
 	if !extensions.Has(ExtensionDMABUFImport) {
 		return nil, fmt.Errorf("build EGL DMABUF image attributes: %w: %s", ErrMissingDisplaySupport, ExtensionDMABUFImport)
+	}
+	if frame.Planes[0].FD > math.MaxInt32 {
+		return nil, fmt.Errorf("build EGL DMABUF image attributes: %w: %d", ErrInvalidFDAttribute, frame.Planes[0].FD)
 	}
 	if frame.Planes[0].Offset > math.MaxInt32 {
 		return nil, fmt.Errorf("build EGL DMABUF image attributes: %w: %d", ErrInvalidOffset, frame.Planes[0].Offset)

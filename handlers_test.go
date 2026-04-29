@@ -11,13 +11,14 @@ import (
 // fakeRenderQueue keeps handler tests small and records queue/error behavior
 // directly; generated mocks would add noise for this package-local interface.
 type fakeRenderQueue struct {
-	err    error
-	called bool
-	queued bool
+	err          error
+	importCalled bool
+	renderCalled bool
+	queued       bool
 }
 
 func (f *fakeRenderQueue) ImportCopyAndQueue(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
-	f.called = true
+	f.importCalled = true
 	if f.err != nil {
 		return gtkgl.QueuedFrame{}, f.err
 	}
@@ -26,7 +27,7 @@ func (f *fakeRenderQueue) ImportCopyAndQueue(*cef.AcceleratedPaintInfo) (gtkgl.Q
 func (f *fakeRenderQueue) QueueRender()                 { f.queued = true }
 func (f *fakeRenderQueue) InitializeOnGTKThread() error { return nil }
 func (f *fakeRenderQueue) RenderQueuedOnGTKThread() error {
-	f.called = true
+	f.renderCalled = true
 	return f.err
 }
 func (f *fakeRenderQueue) Close() {}
@@ -51,7 +52,7 @@ func TestOnAcceleratedPaintErrorHook(t *testing.T) {
 	var got error
 	h := &renderHandler{renderer: f, diag: d, staticHooks: Hooks{OnError: func(err error) { got = err }}}
 	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
-	if !f.called {
+	if !f.importCalled {
 		t.Fatalf("accelerated renderer not called")
 	}
 	if !errors.Is(got, want) {
@@ -70,8 +71,8 @@ func TestOnAcceleratedPaintQueuesRenderOnSuccess(t *testing.T) {
 	f := &fakeRenderQueue{}
 	h := &renderHandler{renderer: f, diag: newDiagnosticsRecorder()}
 	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
-	if !f.called || !f.queued {
-		t.Fatalf("called=%v queued=%v, want both true", f.called, f.queued)
+	if !f.importCalled || !f.queued {
+		t.Fatalf("importCalled=%v queued=%v, want both true", f.importCalled, f.queued)
 	}
 }
 
@@ -85,7 +86,7 @@ func TestRenderSignalErrorHookAndDiagnostics(t *testing.T) {
 	if ok := v.renderOnGTKThread(); ok {
 		t.Fatalf("renderOnGTKThread returned true after render error")
 	}
-	if !f.called {
+	if !f.renderCalled {
 		t.Fatalf("renderer not called")
 	}
 	if !errors.Is(got, want) {

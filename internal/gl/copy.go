@@ -3,6 +3,7 @@ package gl
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -205,9 +206,15 @@ func NewTexturedQuadCopierForAPI(driver Driver, glAPI string) (*TexturedQuadCopi
 		return nil, err
 	}
 	c := &TexturedQuadCopier{gl: driver, program: uint32(program)}
-	c.samplLoc = driver.GetUniformLocation(c.program, cStringBytes("u_texture"))
-	c.posLoc = driver.GetAttribLocation(c.program, cStringBytes("a_pos"))
-	c.uvLoc = driver.GetAttribLocation(c.program, cStringBytes("a_uv"))
+	samplerName := cStringBytes("u_texture")
+	c.samplLoc = driver.GetUniformLocation(c.program, &samplerName[0])
+	runtime.KeepAlive(samplerName)
+	posName := cStringBytes("a_pos")
+	c.posLoc = driver.GetAttribLocation(c.program, &posName[0])
+	runtime.KeepAlive(posName)
+	uvName := cStringBytes("a_uv")
+	c.uvLoc = driver.GetAttribLocation(c.program, &uvName[0])
+	runtime.KeepAlive(uvName)
 	if c.posLoc < 0 || c.uvLoc < 0 || c.samplLoc < 0 {
 		driver.DeleteProgram(c.program)
 		return nil, fmt.Errorf("initialize textured quad copier: missing shader locations")
@@ -416,12 +423,7 @@ func programInfoLog(gl Driver, program uint32) string {
 	return strings.TrimRight(string(buf), "\x00")
 }
 
-// cStringBytes returns a pointer to a null-terminated byte slice for immediate
-// OpenGL calls. The returned pointer must not be stored or used later.
-func cStringBytes(s string) *byte {
-	b := append([]byte(s), 0)
-	return &b[0]
-}
+func cStringBytes(s string) []byte { return append([]byte(s), 0) }
 
 func texturedQuadShadersForAPI(glAPI string) (vertex, fragment string) {
 	if glAPI == GLAPIOpenGLES {

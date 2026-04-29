@@ -4,6 +4,7 @@ package gl
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"unsafe"
 
 	"github.com/bnema/purego"
@@ -232,5 +233,8 @@ func (l *Loader) extensionProc(name string) uintptr {
 		return 0
 	}
 	purego.RegisterFunc(&eglGetProcAddress, proc)
-	return eglGetProcAddress(cStringBytes(name))
+	nameBytes := cStringBytes(name)
+	addr := eglGetProcAddress(&nameBytes[0])
+	runtime.KeepAlive(nameBytes)
+	return addr
 }

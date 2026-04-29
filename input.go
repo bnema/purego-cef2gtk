@@ -15,6 +15,13 @@ type InputOptions struct {
 	Scale int32
 }
 
+func (o InputOptions) normalizedScale() int32 {
+	if o.Scale <= 0 {
+		return 1
+	}
+	return o.Scale
+}
+
 // AttachInput attaches GTK event controllers to the view and forwards input to host.
 // Call from the GTK/main thread; GTK controller attachment is not goroutine-safe.
 func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
@@ -27,10 +34,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	if v.input != nil {
 		v.input.Detach()
 	}
-	v.inputScale = opts.Scale
-	if v.inputScale <= 0 {
-		v.inputScale = 1
-	}
+	v.inputScale = opts.normalizedScale()
 	v.input = gtkgl.NewInputBridge(host, v.inputScale)
 	v.input.Attach(v.area)
 	return nil
@@ -57,16 +61,7 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 		return ErrNilView
 	}
 	if v.input == nil {
-		if v.area == nil {
-			return ErrInputNotAttached
-		}
-		scale := v.inputScale
-		if scale <= 0 {
-			scale = 1 // default if AttachInput was never called
-		}
-		v.input = gtkgl.NewInputBridge(host, scale)
-		v.input.Attach(v.area)
-		return nil
+		return ErrInputNotAttached
 	}
 	v.input.SetHost(host)
 	return nil
