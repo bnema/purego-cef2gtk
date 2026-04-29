@@ -16,6 +16,7 @@ type InputOptions struct {
 }
 
 // AttachInput attaches GTK event controllers to the view and forwards input to host.
+// Call from the GTK/main thread; GTK controller attachment is not goroutine-safe.
 func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	if v == nil || v.area == nil {
 		return ErrNilView
@@ -45,8 +46,9 @@ func (v *View) DetachInput() error {
 }
 
 // SetInputHost updates the CEF browser host used by the attached input bridge.
-// If no bridge exists yet, SetInputHost creates and attaches one when the view
-// still has a GtkGLArea; otherwise it returns ErrInputNotAttached.
+// Call from the GTK/main thread; fallback bridge creation/attachment is not
+// goroutine-safe. If no bridge exists yet, SetInputHost creates and attaches one
+// when the view still has a GtkGLArea; otherwise it returns ErrInputNotAttached.
 func (v *View) SetInputHost(host cef.BrowserHost) error {
 	if v == nil {
 		return ErrNilView

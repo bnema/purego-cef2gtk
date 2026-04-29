@@ -149,7 +149,8 @@ func (v *View) Diagnostics() Diagnostics {
 	return v.diag.Snapshot()
 }
 
-// Destroy releases GL resources owned by the view.
+// Destroy releases GL resources owned by the view. Call on the GTK main thread;
+// it disconnects GTK signal handlers and is not safe for concurrent use.
 func (v *View) Destroy() error {
 	if v == nil {
 		return ErrNilView

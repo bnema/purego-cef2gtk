@@ -47,8 +47,9 @@ type QueuedFrame struct {
 	Size    dmabuf.Size
 }
 
-// AcceleratedRenderer owns the internal Phase 4 DMABUF import/copy lifecycle.
-// Public View wiring and CEF RenderHandler integration are intentionally Phase 5.
+// AcceleratedRenderer owns the internal DMABUF import/copy lifecycle. All
+// methods must be called from the GTK main thread because it owns GtkGLArea and
+// current-context GL/EGL state.
 type AcceleratedRenderer struct {
 	area     *gtk.GLArea
 	egl      eglImporter
@@ -85,6 +86,9 @@ func (r *AcceleratedRenderer) InitializeOnGTKThread() error {
 func defaultAcceleratedRendererInit(area *gtk.GLArea) (eglImporter, glImporter, textureCopier, error) {
 	probe, err := ProbeCurrentGLAreaContext(area)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := probe.Validate(); err != nil {
 		return nil, nil, nil, err
 	}
 	eglImporter, err := egl.NewImporterFromCurrentDisplay()

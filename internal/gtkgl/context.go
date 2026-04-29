@@ -58,7 +58,7 @@ func (r ContextProbeResult) Validate() error {
 	if !r.DMABUFImportSupport && !contains(r.EGLExtensions, egl.ExtensionDMABUFImport) {
 		return ErrMissingDMABUFImport
 	}
-	if r.GLVersion == "" || r.GLVendor == "" || r.GLRenderer == "" {
+	if strings.TrimSpace(r.GLVersion) == "" || strings.TrimSpace(r.GLVendor) == "" || strings.TrimSpace(r.GLRenderer) == "" {
 		return ErrMissingGLAreaCapability
 	}
 	return nil
@@ -138,6 +138,9 @@ func DetectBackendFromDisplay(display *gdk.Display) string {
 
 // DetectRuntimeBackend returns the likely backend from environment when no GDK display is available.
 func DetectRuntimeBackend() string {
+	if os.Getenv("GDK_BACKEND") == BackendWayland {
+		return BackendWayland
+	}
 	if os.Getenv("WAYLAND_DISPLAY") != "" && os.Getenv("GDK_BACKEND") != "x11" {
 		return BackendWayland
 	}

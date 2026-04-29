@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 
 	"github.com/bnema/purego-cef/cef"
 	cef2gtk "github.com/bnema/purego-cef2gtk"
@@ -67,6 +68,7 @@ func (l *lifeSpan) OnBeforeDevToolsPopup(cef.Browser, *cef.WindowInfo, *cef.RawC
 }
 
 func main() {
+	runtime.LockOSThread()
 	gtk.Init()
 
 	if err := cef.InitWithApp(cef.DefaultSettings(), app{}); err != nil {

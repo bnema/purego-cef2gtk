@@ -32,8 +32,8 @@ type Rect struct {
 	Height int32
 }
 
-// Empty reports whether the rectangle has no area.
-func (r Rect) Empty() bool { return r.Width == 0 || r.Height == 0 }
+// Empty reports whether the rectangle has no area. Negative dimensions are treated as empty/invalid.
+func (r Rect) Empty() bool { return r.Width <= 0 || r.Height <= 0 }
 
 // Plane describes one borrowed native pixmap plane. The FD remains owned by CEF.
 type Plane struct {

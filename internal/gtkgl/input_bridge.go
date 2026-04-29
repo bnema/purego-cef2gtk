@@ -40,10 +40,7 @@ type InputBridge struct {
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
 func NewInputBridge(host cef.BrowserHost, scale int32) *InputBridge {
-	if scale <= 0 {
-		scale = 1
-	}
-	return &InputBridge{host: host, scale: scale}
+	return &InputBridge{host: host, scale: normalizeScale(scale)}
 }
 
 // SetHost updates the CEF browser host used for subsequent input dispatch.
@@ -130,7 +127,7 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 	}
 	keyPressCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) bool {
 		mods := uint(state)
-		if mods&uint(gdk.ControlMaskValue) != 0 && (keyval == gdkKeyLowercaseV || keyval == gdkKeyUppercaseV) {
+		if mods&(uint(gdk.ControlMaskValue)|uint(gdk.MetaMaskValue)) != 0 && (keyval == gdkKeyLowercaseV || keyval == gdkKeyUppercaseV) {
 			ib.pasteFromClipboard()
 			return true
 		}
@@ -372,6 +369,8 @@ if(selection && selection.rangeCount){
   selection.removeAllRanges(); selection.addRange(range);
   return;
 }
+// document.execCommand is deprecated but retained as a compatibility fallback
+// for older/locked-down CEF pages where Selection/Range insertion is unavailable.
 if(document.execCommand){ document.execCommand('insertText',false,text); }
 })(` + quoted + `);`
 }
@@ -382,10 +381,15 @@ func jsString(s string) string {
 }
 
 func BuildMouseEvent(x, y float64, gdkMods uint, scale int32) cef.MouseEvent {
-	if scale <= 0 {
-		scale = 1
-	}
+	scale = normalizeScale(scale)
 	return cef.MouseEvent{X: int32(x * float64(scale)), Y: int32(y * float64(scale)), Modifiers: TranslateModifiers(gdkMods)}
+}
+
+func normalizeScale(scale int32) int32 {
+	if scale <= 0 {
+		return 1
+	}
+	return scale
 }
 
 func BuildKeyEvent(keyval, keycode, gdkMods uint, eventType cef.KeyEventType) cef.KeyEvent {

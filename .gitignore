@@ -1,6 +1,7 @@
 /simple-browser
 /probe-gtk-egl
 /probe-import-copy
+/probe-*
 *.test
 coverage.out
 
