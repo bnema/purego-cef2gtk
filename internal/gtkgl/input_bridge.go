@@ -39,6 +39,8 @@ type InputBridge struct {
 
 	onMiddleClick       func(x, y float64) bool
 	middleClickConsumed bool
+	selectionText       func() string
+	onClipboardShortcut func(action, text string)
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
@@ -55,6 +57,18 @@ func (ib *InputBridge) SetMiddleClickHandler(fn func(x, y float64) bool) {
 	}
 	ib.mu.Lock()
 	ib.onMiddleClick = fn
+	ib.mu.Unlock()
+}
+
+// SetClipboardShortcutHandler configures callbacks used to mirror explicit
+// Ctrl+C/Ctrl+X shortcuts to application-level clipboard orchestration.
+func (ib *InputBridge) SetClipboardShortcutHandler(selectionText func() string, onShortcut func(action, text string)) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.selectionText = selectionText
+	ib.onClipboardShortcut = onShortcut
 	ib.mu.Unlock()
 }
 
@@ -142,6 +156,7 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 	}
 	keyPressCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) bool {
 		mods := uint(state)
+		ib.mirrorClipboardShortcut(keyval, mods)
 		if mods&(uint(gdk.ControlMaskValue)|uint(gdk.MetaMaskValue)) != 0 && (keyval == gdkKeyLowercaseV || keyval == gdkKeyUppercaseV) {
 			ib.pasteFromClipboard()
 			return true
@@ -209,6 +224,12 @@ func (ib *InputBridge) currentHostAndMiddleClickHandler() (cef.BrowserHost, func
 	ib.mu.Lock()
 	defer ib.mu.Unlock()
 	return ib.host, ib.onMiddleClick
+}
+
+func (ib *InputBridge) currentClipboardShortcutHandlers() (func() string, func(action, text string)) {
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	return ib.selectionText, ib.onClipboardShortcut
 }
 
 func (ib *InputBridge) setMiddleClickConsumed(consumed bool) {
@@ -290,6 +311,39 @@ func (ib *InputBridge) onFocusIn() { syncWindowlessBrowserFocus(ib.currentHost()
 func (ib *InputBridge) onFocusOut() {
 	if h := ib.currentHost(); h != nil {
 		h.SetFocus(0)
+	}
+}
+
+func (ib *InputBridge) mirrorClipboardShortcut(keyval, mods uint) {
+	action, ok := clipboardShortcutAction(keyval, mods)
+	if !ok {
+		return
+	}
+	selectionText, onShortcut := ib.currentClipboardShortcutHandlers()
+	if selectionText == nil || onShortcut == nil {
+		return
+	}
+	text := selectionText()
+	if text == "" {
+		return
+	}
+	onShortcut(action, text)
+}
+
+func clipboardShortcutAction(keyval, mods uint) (string, bool) {
+	if mods&uint(gdk.ControlMaskValue) == 0 {
+		return "", false
+	}
+	if mods&uint(gdk.ShiftMaskValue) != 0 || mods&uint(gdk.AltMaskValue) != 0 {
+		return "", false
+	}
+	switch keyval {
+	case gdkKeyLowercaseC, gdkKeyUppercaseC:
+		return "copy", true
+	case gdkKeyLowercaseX, gdkKeyUppercaseX:
+		return "cut", true
+	default:
+		return "", false
 	}
 }
 
@@ -499,8 +553,12 @@ const (
 	gdkKeyEnd             = 0xff57
 	gdkKeyPageUp          = 0xff55
 	gdkKeyPageDown        = 0xff56
+	gdkKeyLowercaseC      = 0x063
+	gdkKeyUppercaseC      = 0x043
 	gdkKeyLowercaseV      = 0x076
 	gdkKeyUppercaseV      = 0x056
+	gdkKeyLowercaseX      = 0x078
+	gdkKeyUppercaseX      = 0x058
 	gdkKeyLowercaseAStart = 0x061
 	gdkKeyLowercaseAEnd   = 0x07a
 	gdkKeyUppercaseAStart = 0x041

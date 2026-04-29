@@ -89,3 +89,27 @@ func TestMiddleClickConsumedReleaseOnlyOnce(t *testing.T) {
 		t.Fatalf("second release consumed unexpectedly")
 	}
 }
+
+func TestClipboardShortcutAction(t *testing.T) {
+	if action, ok := clipboardShortcutAction(gdkKeyLowercaseC, uint(gdk.ControlMaskValue)); !ok || action != "copy" {
+		t.Fatalf("ctrl-c action=(%q,%v), want copy,true", action, ok)
+	}
+	if action, ok := clipboardShortcutAction(gdkKeyUppercaseX, uint(gdk.ControlMaskValue)); !ok || action != "cut" {
+		t.Fatalf("ctrl-x action=(%q,%v), want cut,true", action, ok)
+	}
+	if _, ok := clipboardShortcutAction(gdkKeyLowercaseC, uint(gdk.ControlMaskValue|gdk.ShiftMaskValue)); ok {
+		t.Fatalf("ctrl-shift-c unexpectedly matched")
+	}
+}
+
+func TestMirrorClipboardShortcut(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var gotAction, gotText string
+	ib.SetClipboardShortcutHandler(func() string { return "selected" }, func(action, text string) {
+		gotAction, gotText = action, text
+	})
+	ib.mirrorClipboardShortcut(gdkKeyLowercaseC, uint(gdk.ControlMaskValue))
+	if gotAction != "copy" || gotText != "selected" {
+		t.Fatalf("shortcut=(%q,%q), want copy,selected", gotAction, gotText)
+	}
+}

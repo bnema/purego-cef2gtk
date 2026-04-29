@@ -17,6 +17,13 @@ type InputOptions struct {
 	// OnMiddleClick is invoked when GTK receives a middle-button press. Returning
 	// true consumes the event before it is forwarded to CEF.
 	OnMiddleClick func(x, y float64) bool
+	// SelectionText returns the current browser selection for explicit clipboard
+	// shortcuts. When set with OnClipboardShortcut, Ctrl+C/Ctrl+X can be mirrored
+	// to application-level clipboard orchestration before forwarding to CEF.
+	SelectionText func() string
+	// OnClipboardShortcut is invoked for explicit Ctrl+C/Ctrl+X shortcuts when
+	// SelectionText returns non-empty text. action is "copy" or "cut".
+	OnClipboardShortcut func(action, text string)
 }
 
 func (o InputOptions) normalizedScale() int32 {
@@ -41,6 +48,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	v.inputScale = opts.normalizedScale()
 	v.input = gtkgl.NewInputBridge(host, v.inputScale)
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
+	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.Attach(v.area)
 	return nil
 }
