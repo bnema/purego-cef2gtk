@@ -22,7 +22,7 @@ type Hooks struct {
 
 type acceleratedRenderer interface {
 	InitializeOnGTKThread() error
-	ImportCopyAndQueue(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
+	ImportCopyAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
 	QueueRender()
 	RenderQueuedOnGTKThread() error
 	Close()

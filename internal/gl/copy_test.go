@@ -9,14 +9,15 @@ import (
 )
 
 type fakeDriver struct {
-	calls         []string
-	nextTexture   uint32
-	nextBuffer    uint32
-	nextVAO       uint32
-	nextFBO       uint32
-	fbStatus      uint32
-	glErr         uint32
-	shaderSources []string
+	calls          []string
+	nextTexture    uint32
+	nextBuffer     uint32
+	nextVAO        uint32
+	nextFBO        uint32
+	fbStatus       uint32
+	glErr          uint32
+	shaderSources  []string
+	lastBufferData []float32
 }
 
 func newFakeDriver() *fakeDriver {
@@ -44,6 +45,10 @@ func (f *fakeDriver) DeleteBuffers(n int32, buffers *uint32)  { f.call("DeleteBu
 func (f *fakeDriver) BindBuffer(target uint32, buffer uint32) { f.call("BindBuffer") }
 func (f *fakeDriver) BufferData(target uint32, size int64, data unsafe.Pointer, usage uint32) {
 	f.call("BufferData")
+	if data != nil && size%4 == 0 {
+		values := unsafe.Slice((*float32)(data), int(size/4))
+		f.lastBufferData = append(f.lastBufferData[:0], values...)
+	}
 }
 func (f *fakeDriver) CreateShader(shaderType uint32) uint32 {
 	f.call("CreateShader")
@@ -208,6 +213,33 @@ func TestCopyImportedToOwnedChecksFramebufferBeforeDraw(t *testing.T) {
 	assertContainsCall(t, fd.calls, "DrawArrays")
 	assertCallBefore(t, fd.calls, "CheckFramebufferStatus", "DrawArrays")
 	assertCallBefore(t, fd.calls, "DrawArrays", "GetError")
+	assertFloat32sEqual(t, fd.lastBufferData, quadVerticesRotate180)
+}
+
+func TestDrawTextureToCurrentFramebufferUsesIdentityQuad(t *testing.T) {
+	fd := newFakeDriver()
+	copier, err := NewTexturedQuadCopier(fd)
+	if err != nil {
+		t.Fatalf("NewTexturedQuadCopier: %v", err)
+	}
+	fd.calls = nil
+	if err := copier.DrawTextureToCurrentFramebuffer(Texture(7), dmabuf.Size{Width: 16, Height: 8}); err != nil {
+		t.Fatalf("DrawTextureToCurrentFramebuffer: %v", err)
+	}
+	assertContainsCall(t, fd.calls, "DrawArrays")
+	assertFloat32sEqual(t, fd.lastBufferData, quadVerticesIdentity)
+}
+
+func assertFloat32sEqual(t *testing.T, got, want []float32) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d, len(want)=%d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("value[%d]=%v, want %v; got=%v want=%v", i, got[i], want[i], got, want)
+		}
+	}
 }
 
 func TestCopyImportedToOwnedPropagatesIncompleteFramebuffer(t *testing.T) {

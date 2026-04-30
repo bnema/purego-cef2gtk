@@ -17,7 +17,7 @@ type fakeRenderQueue struct {
 	queued       bool
 }
 
-func (f *fakeRenderQueue) ImportCopyAndQueue(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
+func (f *fakeRenderQueue) ImportCopyAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
 	f.importCalled = true
 	if f.err != nil {
 		return gtkgl.QueuedFrame{}, f.err

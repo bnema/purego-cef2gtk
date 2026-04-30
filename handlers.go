@@ -6,7 +6,7 @@ import (
 )
 
 type acceleratedRenderQueue interface {
-	ImportCopyAndQueue(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
+	ImportCopyAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
 	QueueRender()
 }
 
@@ -80,7 +80,7 @@ func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType
 		h.handleAcceleratedError(gtkgl.ErrNilAcceleratedRenderer)
 		return
 	}
-	if _, err := h.renderer.ImportCopyAndQueue(info); err != nil {
+	if _, err := h.renderer.ImportCopyAndQueueOnGTKThread(info); err != nil {
 		h.handleAcceleratedError(err)
 		return
 	}

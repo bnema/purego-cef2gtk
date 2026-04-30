@@ -113,9 +113,32 @@ func defaultAcceleratedRendererInit(area *gtk.GLArea) (eglImporter, glImporter, 
 	return eglImporter, glBackend, copier, nil
 }
 
+// ImportCopyAndQueueOnGTKThread imports and copies callback-scoped CEF DMABUF
+// metadata on the GTK main context before returning. OnAcceleratedPaint callers
+// must not return to CEF until this method completes because CEF owns the DMABUF
+// resources only for the duration of the callback.
+func (r *AcceleratedRenderer) ImportCopyAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (queued QueuedFrame, retErr error) {
+	RunOnGTKThreadSync(func() {
+		if r == nil {
+			retErr = ErrNilAcceleratedRenderer
+			return
+		}
+		if r.area != nil {
+			r.area.MakeCurrent()
+			if gerr := r.area.GetError(); gerr != nil {
+				retErr = fmt.Errorf("gtk gl area error: %s", glibErrorMessage(gerr))
+				return
+			}
+		}
+		queued, retErr = r.ImportCopyAndQueue(info)
+	})
+	return queued, retErr
+}
+
 // ImportCopyAndQueue imports a CEF accelerated-paint DMABUF, binds it to a
 // temporary GL texture, copies it to an owned texture, queues the owned texture,
-// and destroys callback-scoped resources before returning.
+// and destroys callback-scoped resources before returning. Call on the GTK main
+// thread with the GtkGLArea context current.
 func (r *AcceleratedRenderer) ImportCopyAndQueue(info *cef.AcceleratedPaintInfo) (queued QueuedFrame, retErr error) {
 	if r == nil {
 		return QueuedFrame{}, ErrNilAcceleratedRenderer

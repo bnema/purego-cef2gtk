@@ -219,12 +219,11 @@ func NewTexturedQuadCopierForAPI(driver Driver, glAPI string) (*TexturedQuadCopi
 		driver.DeleteProgram(c.program)
 		return nil, fmt.Errorf("initialize textured quad copier: missing shader locations")
 	}
-	var vertices = []float32{-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1}
 	driver.GenVertexArrays(1, &c.vao)
 	driver.BindVertexArray(c.vao)
 	driver.GenBuffers(1, &c.vbo)
 	driver.BindBuffer(ArrayBuffer, c.vbo)
-	driver.BufferData(ArrayBuffer, int64(len(vertices)*4), unsafe.Pointer(&vertices[0]), StaticDraw)
+	uploadQuadVertices(driver, quadVerticesIdentity)
 	driver.EnableVertexAttribArray(uint32(c.posLoc))
 	driver.VertexAttribPointer(uint32(c.posLoc), 2, Float, false, 16, 0)
 	driver.EnableVertexAttribArray(uint32(c.uvLoc))
@@ -290,6 +289,10 @@ func (c *TexturedQuadCopier) CopyImportedToOwned(src Texture, size dmabuf.Size, 
 		return 0, fmt.Errorf("copy imported texture to owned texture: framebuffer incomplete: 0x%x", status)
 	}
 	c.gl.Viewport(0, 0, size.Width, size.Height)
+	// CEF's imported NativePixmap samples appear 180° rotated in GL texture
+	// coordinates. Correct that once while copying into our owned texture; the
+	// later GtkGLArea presentation keeps identity coordinates.
+	c.uploadQuadVertices(quadVerticesRotate180)
 	c.gl.UseProgram(c.program)
 	c.gl.ActiveTexture(Texture0)
 	c.gl.BindTexture(Texture2D, uint32(src))
@@ -312,6 +315,7 @@ func (c *TexturedQuadCopier) DrawTextureToCurrentFramebuffer(src Texture, size d
 		return fmt.Errorf("%w: %dx%d", ErrInvalidSize, size.Width, size.Height)
 	}
 	c.gl.Viewport(0, 0, size.Width, size.Height)
+	c.uploadQuadVertices(quadVerticesIdentity)
 	c.gl.UseProgram(c.program)
 	c.gl.ActiveTexture(Texture0)
 	c.gl.BindTexture(Texture2D, uint32(src))
@@ -320,6 +324,33 @@ func (c *TexturedQuadCopier) DrawTextureToCurrentFramebuffer(src Texture, size d
 	c.gl.DrawArrays(TriangleStrip, 0, 4)
 	c.gl.BindVertexArray(0)
 	return CheckError(c.gl, "draw queued texture to GtkGLArea")
+}
+
+var (
+	quadVerticesIdentity = []float32{
+		-1, -1, 0, 0,
+		1, -1, 1, 0,
+		-1, 1, 0, 1,
+		1, 1, 1, 1,
+	}
+	quadVerticesRotate180 = []float32{
+		-1, -1, 1, 1,
+		1, -1, 0, 1,
+		-1, 1, 1, 0,
+		1, 1, 0, 0,
+	}
+)
+
+func (c *TexturedQuadCopier) uploadQuadVertices(vertices []float32) {
+	if c == nil || c.gl == nil {
+		return
+	}
+	c.gl.BindBuffer(ArrayBuffer, c.vbo)
+	uploadQuadVertices(c.gl, vertices)
+}
+
+func uploadQuadVertices(driver Driver, vertices []float32) {
+	driver.BufferData(ArrayBuffer, int64(len(vertices)*4), unsafe.Pointer(&vertices[0]), StaticDraw)
 }
 
 func setTextureParameters(gl Driver, target uint32) {
