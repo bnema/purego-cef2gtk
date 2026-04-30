@@ -289,10 +289,10 @@ func (c *TexturedQuadCopier) CopyImportedToOwned(src Texture, size dmabuf.Size, 
 		return 0, fmt.Errorf("copy imported texture to owned texture: framebuffer incomplete: 0x%x", status)
 	}
 	c.gl.Viewport(0, 0, size.Width, size.Height)
-	// CEF's imported NativePixmap samples appear 180° rotated in GL texture
-	// coordinates. Correct that once while copying into our owned texture; the
-	// later GtkGLArea presentation keeps identity coordinates.
-	c.uploadQuadVertices(quadVerticesRotate180)
+	// CEF's imported NativePixmap samples use the opposite image-origin
+	// convention from GL texture coordinates. Normalize once at the import/copy
+	// boundary; the later GtkGLArea presentation keeps identity coordinates.
+	c.uploadQuadVertices(quadVerticesFlipY)
 	c.gl.UseProgram(c.program)
 	c.gl.ActiveTexture(Texture0)
 	c.gl.BindTexture(Texture2D, uint32(src))
@@ -333,11 +333,11 @@ var (
 		-1, 1, 0, 1,
 		1, 1, 1, 1,
 	}
-	quadVerticesRotate180 = []float32{
-		-1, -1, 1, 1,
-		1, -1, 0, 1,
-		-1, 1, 1, 0,
-		1, 1, 0, 0,
+	quadVerticesFlipY = []float32{
+		-1, -1, 0, 1,
+		1, -1, 1, 1,
+		-1, 1, 0, 0,
+		1, 1, 1, 0,
 	}
 )
 

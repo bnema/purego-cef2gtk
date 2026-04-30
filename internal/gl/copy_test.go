@@ -213,7 +213,7 @@ func TestCopyImportedToOwnedChecksFramebufferBeforeDraw(t *testing.T) {
 	assertContainsCall(t, fd.calls, "DrawArrays")
 	assertCallBefore(t, fd.calls, "CheckFramebufferStatus", "DrawArrays")
 	assertCallBefore(t, fd.calls, "DrawArrays", "GetError")
-	assertFloat32sEqual(t, fd.lastBufferData, quadVerticesRotate180)
+	assertFloat32sEqual(t, fd.lastBufferData, quadVerticesFlipY)
 }
 
 func TestDrawTextureToCurrentFramebufferUsesIdentityQuad(t *testing.T) {
