@@ -99,6 +99,13 @@ type Loader struct {
 	drawArrays func(mode uint32, first, count int32)
 	getError   func() uint32
 
+	genQueries          func(n int32, ids *uint32)
+	deleteQueries       func(n int32, ids *uint32)
+	beginQuery          func(target uint32, id uint32)
+	endQuery            func(target uint32)
+	getQueryObjectuiv   func(id uint32, pname uint32, params *uint32)
+	getQueryObjectui64v func(id uint32, pname uint32, params *uint64)
+
 	eglImageTargetTexture2DOES func(target uint32, image uintptr)
 }
 
@@ -198,6 +205,13 @@ func (l *Loader) registerAll() (retErr error) {
 	register(&l.drawArrays, "glDrawArrays")
 	register(&l.getError, "glGetError")
 
+	l.registerOptional("glGenQueries", &l.genQueries)
+	l.registerOptional("glDeleteQueries", &l.deleteQueries)
+	l.registerOptional("glBeginQuery", &l.beginQuery)
+	l.registerOptional("glEndQuery", &l.endQuery)
+	l.registerOptional("glGetQueryObjectuiv", &l.getQueryObjectuiv)
+	l.registerOptional("glGetQueryObjectui64v", &l.getQueryObjectui64v)
+
 	// glEGLImageTargetTexture2DOES is extension-provided on some stacks. Keep the
 	// core loader usable when absent; import callers return a clear error instead.
 	if sym := l.extensionProc("glEGLImageTargetTexture2DOES"); sym != 0 {
@@ -205,6 +219,12 @@ func (l *Loader) registerAll() (retErr error) {
 	}
 
 	return nil
+}
+
+func (l *Loader) registerOptional(name string, dst any) {
+	if sym := l.extensionProc(name); sym != 0 {
+		purego.RegisterFunc(dst, sym)
+	}
 }
 
 func (l *Loader) extensionProc(name string) uintptr {

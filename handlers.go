@@ -2,6 +2,7 @@ package cef2gtk
 
 import (
 	"errors"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
@@ -69,6 +70,10 @@ func (h *renderHandler) OnPaint(cef.Browser, cef.PaintElementType, []cef.Rect, [
 	if h.diag != nil {
 		h.diag.RecordUnsupportedPaint()
 	}
+	if h.view != nil {
+		h.view.recordProfileUnsupportedPaint()
+		h.view.emitProfileIfDue(time.Now())
+	}
 	hooks := h.hooks()
 	if hooks.OnUnsupportedPaint != nil {
 		hooks.OnUnsupportedPaint()
@@ -77,6 +82,9 @@ func (h *renderHandler) OnPaint(cef.Browser, cef.PaintElementType, []cef.Rect, [
 func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType, _ []cef.Rect, info *cef.AcceleratedPaintInfo) {
 	if h.diag != nil {
 		h.diag.RecordAcceleratedPaint()
+	}
+	if h.view != nil {
+		h.view.recordProfileFrameReceived()
 	}
 	if h.renderer == nil {
 		h.handleAcceleratedError(gtkgl.ErrNilAcceleratedRenderer)
@@ -87,10 +95,18 @@ func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType
 		return
 	}
 	h.renderer.QueueRender()
+	if h.view != nil {
+		h.view.recordProfileFrameQueued()
+		h.view.emitProfileIfDue(time.Now())
+	}
 }
 func (h *renderHandler) handleAcceleratedError(err error) {
 	if h.diag != nil {
 		h.diag.RecordImportFailure(err)
+	}
+	if h.view != nil {
+		h.view.recordProfileImportFailure()
+		h.view.emitProfileIfDue(time.Now())
 	}
 	if isTransientGLAreaLifecycleError(err) {
 		return

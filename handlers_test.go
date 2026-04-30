@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 )
 
 // fakeRenderQueue keeps handler tests small and records queue/error behavior
@@ -30,8 +31,9 @@ func (f *fakeRenderQueue) RenderQueuedOnGTKThread() error {
 	f.renderCalled = true
 	return f.err
 }
-func (f *fakeRenderQueue) InvalidateOnGTKThread() {}
-func (f *fakeRenderQueue) Close()                 {}
+func (f *fakeRenderQueue) InvalidateOnGTKThread()                {}
+func (f *fakeRenderQueue) SetProfiler(*internalprofile.Recorder) {}
+func (f *fakeRenderQueue) Close()                                {}
 
 func TestOnPaintFailLoudRecordsAndHooks(t *testing.T) {
 	d := newDiagnosticsRecorder()

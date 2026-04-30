@@ -158,6 +158,19 @@ func (l *Loader) CheckFramebufferStatus(target uint32) uint32 {
 func (l *Loader) Viewport(x, y, width, height int32)         { l.viewport(x, y, width, height) }
 func (l *Loader) DrawArrays(mode uint32, first, count int32) { l.drawArrays(mode, first, count) }
 func (l *Loader) GetError() uint32                           { return l.getError() }
+func (l *Loader) TimerQuerySupported() bool {
+	return l != nil && l.genQueries != nil && l.deleteQueries != nil && l.beginQuery != nil && l.endQuery != nil && l.getQueryObjectuiv != nil && l.getQueryObjectui64v != nil
+}
+func (l *Loader) GenQueries(n int32, ids *uint32)     { l.genQueries(n, ids) }
+func (l *Loader) DeleteQueries(n int32, ids *uint32)  { l.deleteQueries(n, ids) }
+func (l *Loader) BeginQuery(target uint32, id uint32) { l.beginQuery(target, id) }
+func (l *Loader) EndQuery(target uint32)              { l.endQuery(target) }
+func (l *Loader) GetQueryObjectuiv(id uint32, pname uint32, params *uint32) {
+	l.getQueryObjectuiv(id, pname, params)
+}
+func (l *Loader) GetQueryObjectui64v(id uint32, pname uint32, params *uint64) {
+	l.getQueryObjectui64v(id, pname, params)
+}
 
 // NewBackendFromCurrentContext returns a Loader-backed GL driver. Callers must
 // invoke it only while the intended GL context is current on this OS thread.

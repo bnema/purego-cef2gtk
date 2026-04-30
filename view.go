@@ -4,9 +4,11 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
@@ -26,6 +28,7 @@ type acceleratedRenderer interface {
 	QueueRender()
 	RenderQueuedOnGTKThread() error
 	InvalidateOnGTKThread()
+	SetProfiler(*internalprofile.Recorder)
 	Close()
 }
 
@@ -52,6 +55,10 @@ type View struct {
 	sizeHooksMu        sync.Mutex
 	sizeHooks          map[uint64]func(width, height int32)
 	nextSizeHookID     uint64
+	profileMu          sync.Mutex
+	profileEnabled     atomic.Bool
+	profile            *internalprofile.Recorder
+	profileOptions     ProfileOptions
 }
 
 // NewView creates a GtkGLArea-backed accelerated CEF view.
@@ -190,11 +197,15 @@ func (v *View) renderOnGTKThread() bool {
 	}
 	if err := v.renderer.RenderQueuedOnGTKThread(); err != nil {
 		v.diag.RecordRenderFailure(err)
+		v.recordProfileRenderFailure()
 		if v.hooks.OnError != nil {
 			v.hooks.OnError(err)
 		}
+		v.emitProfileIfDue(time.Now())
 		return false
 	}
+	v.recordProfileFrameRendered()
+	v.emitProfileIfDue(time.Now())
 	return true
 }
 
@@ -242,6 +253,99 @@ func (v *View) PrepareOnGTKThread() error {
 	}
 	v.area.MakeCurrent()
 	return v.renderer.InitializeOnGTKThread()
+}
+
+// ConfigureProfiling enables or disables development-only render profiling.
+// When enabled, snapshots are emitted at opts.Interval through opts.OnSnapshot
+// and/or opts.Writer. Rendering continues if snapshot writing fails.
+func (v *View) ConfigureProfiling(opts ProfileOptions) error {
+	if v == nil || v.renderer == nil {
+		return ErrNilView
+	}
+	v.profileMu.Lock()
+	defer v.profileMu.Unlock()
+	if !opts.Enabled {
+		v.profileEnabled.Store(false)
+		v.profile = nil
+		v.profileOptions = ProfileOptions{}
+		v.renderer.SetProfiler(nil)
+		return nil
+	}
+	recorder := internalprofile.NewRecorder()
+	recorder.Start(time.Now())
+	v.profile = recorder
+	v.profileOptions = opts
+	v.profileEnabled.Store(true)
+	v.renderer.SetProfiler(recorder)
+	return nil
+}
+
+func (v *View) profileRecorder() *internalprofile.Recorder {
+	if v == nil || !v.profileEnabled.Load() {
+		return nil
+	}
+	v.profileMu.Lock()
+	defer v.profileMu.Unlock()
+	return v.profile
+}
+
+func (v *View) recordProfileFrameReceived() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordFrameReceived()
+	}
+}
+
+func (v *View) recordProfileFrameQueued() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordFrameQueued()
+	}
+}
+
+func (v *View) recordProfileFrameRendered() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordFrameRendered()
+	}
+}
+
+func (v *View) recordProfileImportFailure() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordImportFailure()
+	}
+}
+
+func (v *View) recordProfileRenderFailure() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordRenderFailure()
+	}
+}
+
+func (v *View) recordProfileUnsupportedPaint() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordUnsupportedPaint()
+	}
+}
+
+func (v *View) emitProfileIfDue(now time.Time) {
+	if v == nil || !v.profileEnabled.Load() {
+		return
+	}
+	v.profileMu.Lock()
+	p := v.profile
+	opts := v.profileOptions
+	v.profileMu.Unlock()
+	if p == nil || !opts.Enabled {
+		return
+	}
+	snap, ok := p.MaybeSnapshot(now, opts.normalizedInterval())
+	if !ok {
+		return
+	}
+	onSnapshot := opts.OnSnapshot
+	writer := opts.Writer
+	if onSnapshot != nil {
+		onSnapshot(snap)
+	}
+	_ = writeProfileSnapshot(writer, snap)
 }
 
 // Diagnostics returns a point-in-time diagnostics snapshot.
@@ -293,6 +397,11 @@ func (v *View) Destroy() error {
 	v.sizeHooksMu.Lock()
 	v.sizeHooks = nil
 	v.sizeHooksMu.Unlock()
+	v.profileMu.Lock()
+	v.profileEnabled.Store(false)
+	v.profile = nil
+	v.profileOptions = ProfileOptions{}
+	v.profileMu.Unlock()
 	v.handler = nil
 	v.area = nil
 	return nil

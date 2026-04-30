@@ -13,6 +13,8 @@ type fakeCommandLine struct {
 	switches map[string]string
 }
 
+var _ cef.CommandLine = (*fakeCommandLine)(nil)
+
 func newFakeCommandLine() *fakeCommandLine {
 	return &fakeCommandLine{switches: make(map[string]string)}
 }
@@ -42,7 +44,7 @@ func (f *fakeCommandLine) AppendArgument(argument string)                  {}
 func (f *fakeCommandLine) PrependWrapper(wrapper string)                   {}
 func (f *fakeCommandLine) RemoveSwitch(name string)                        { delete(f.switches, name) }
 
-func TestConfigureCommandLineAddsWaylandOzonePlatform(t *testing.T) {
+func TestConfigureCommandLineAddsWaylandGLAngleSwitches(t *testing.T) {
 	commandLine := newFakeCommandLine()
 
 	ConfigureCommandLine(commandLine, CommandLineOptions{})
@@ -50,22 +52,59 @@ func TestConfigureCommandLineAddsWaylandOzonePlatform(t *testing.T) {
 	if got := commandLine.GetSwitchValue("ozone-platform"); got != "wayland" {
 		t.Fatalf("ozone-platform = %q, want wayland", got)
 	}
+	if got := commandLine.GetSwitchValue("use-angle"); got != "gl-egl" {
+		t.Fatalf("use-angle = %q, want gl-egl", got)
+	}
 	assertForbiddenSwitchesAbsent(t, commandLine)
 }
 
-func TestConfigureCommandLineDoesNotOverrideExistingOzonePlatform(t *testing.T) {
-	commandLine := newFakeCommandLine()
-	commandLine.AppendSwitchWithValue("ozone-platform", "x11")
-
-	ConfigureCommandLine(commandLine, CommandLineOptions{})
-
-	if got := commandLine.GetSwitchValue("ozone-platform"); got != "x11" {
-		t.Fatalf("ozone-platform = %q, want existing x11", got)
+func TestConfigureCommandLineDoesNotOverrideExistingPlatformSwitches(t *testing.T) {
+	tests := []struct {
+		name      string
+		existing  map[string]string
+		want      map[string]string
+		wantCount int
+	}{
+		{
+			name:      "both switches exist",
+			existing:  map[string]string{"ozone-platform": "x11", "use-angle": "vulkan"},
+			want:      map[string]string{"ozone-platform": "x11", "use-angle": "vulkan"},
+			wantCount: 2,
+		},
+		{
+			name:      "only ozone exists",
+			existing:  map[string]string{"ozone-platform": "x11"},
+			want:      map[string]string{"ozone-platform": "x11", "use-angle": "gl-egl"},
+			wantCount: 2,
+		},
+		{
+			name:      "only angle exists",
+			existing:  map[string]string{"use-angle": "vulkan"},
+			want:      map[string]string{"ozone-platform": "wayland", "use-angle": "vulkan"},
+			wantCount: 2,
+		},
 	}
-	if len(commandLine.switches) != 1 {
-		t.Fatalf("switch count = %d, want 1", len(commandLine.switches))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commandLine := newFakeCommandLine()
+			for name, value := range tt.existing {
+				commandLine.AppendSwitchWithValue(name, value)
+			}
+
+			ConfigureCommandLine(commandLine, CommandLineOptions{})
+
+			for name, want := range tt.want {
+				if got := commandLine.GetSwitchValue(name); got != want {
+					t.Fatalf("%s = %q, want %q", name, got, want)
+				}
+			}
+			if len(commandLine.switches) != tt.wantCount {
+				t.Fatalf("switch count = %d, want %d", len(commandLine.switches), tt.wantCount)
+			}
+			assertForbiddenSwitchesAbsent(t, commandLine)
+		})
 	}
-	assertForbiddenSwitchesAbsent(t, commandLine)
 }
 
 func TestConfigureCommandLineNilSafe(t *testing.T) {

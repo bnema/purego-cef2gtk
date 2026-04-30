@@ -3,12 +3,15 @@ package gtkgl
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/cefadapter"
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
 	"github.com/bnema/purego-cef2gtk/internal/egl"
 	"github.com/bnema/purego-cef2gtk/internal/gl"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -58,6 +61,9 @@ type AcceleratedRenderer struct {
 	queued     QueuedFrame
 	contextPtr uintptr
 	initFunc   func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
+	profiler   atomic.Pointer[internalprofile.Recorder]
+	copyTimer  *gl.TimerQueryRecorder
+	drawTimer  *gl.TimerQueryRecorder
 }
 
 func NewAcceleratedRenderer(area *gtk.GLArea) *AcceleratedRenderer {
@@ -95,6 +101,13 @@ func (r *AcceleratedRenderer) InitializeOnGTKThread() error {
 	r.gl = glBackend
 	r.copier = copier
 	r.contextPtr = contextPtr
+	if tq, ok := glBackend.(gl.TimerQueryDriver); ok && tq.TimerQuerySupported() {
+		r.copyTimer = gl.NewTimerQueryRecorder(tq)
+		r.drawTimer = gl.NewTimerQueryRecorder(tq)
+	} else {
+		r.copyTimer = nil
+		r.drawTimer = nil
+	}
 	return nil
 }
 
@@ -133,11 +146,14 @@ func defaultAcceleratedRendererInit(area *gtk.GLArea) (eglImporter, glImporter, 
 // must not return to CEF until this method completes because CEF owns the DMABUF
 // resources only for the duration of the callback.
 func (r *AcceleratedRenderer) ImportCopyAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (queued QueuedFrame, retErr error) {
+	start := time.Now()
 	RunOnGTKThreadSync(func() {
 		if r == nil {
 			retErr = ErrNilAcceleratedRenderer
 			return
 		}
+		r.recordGTKWait(time.Since(start))
+		defer func(begin time.Time) { r.recordImportCopyCPU(time.Since(begin)) }(time.Now())
 		if r.area != nil {
 			if !r.area.GetRealized() {
 				retErr = ErrGLAreaNotRealized
@@ -174,7 +190,9 @@ func (r *AcceleratedRenderer) ImportCopyAndQueue(info *cef.AcceleratedPaintInfo)
 		return QueuedFrame{}, err
 	}
 
+	importStart := time.Now()
 	image, err := r.egl.ImportDMABUF(frame)
+	r.recordImportCPU(time.Since(importStart))
 	if err != nil {
 		return QueuedFrame{}, err
 	}
@@ -187,7 +205,9 @@ func (r *AcceleratedRenderer) ImportCopyAndQueue(info *cef.AcceleratedPaintInfo)
 		}
 	}()
 
+	importStart = time.Now()
 	imported, err := r.gl.ImportEGLImageToTexture(uintptr(image))
+	r.recordImportCPU(time.Since(importStart))
 	if err != nil {
 		return QueuedFrame{}, err
 	}
@@ -196,7 +216,12 @@ func (r *AcceleratedRenderer) ImportCopyAndQueue(info *cef.AcceleratedPaintInfo)
 		r.gl.DeleteTextures(1, &id)
 	}()
 
+	copyStart := time.Now()
+	copyQuery, copyQueryOK := r.beginTimer(r.copyTimer)
 	owned, err := r.copier.CopyImportedToOwned(imported, frame.CodedSize, 0)
+	r.endTimer(r.copyTimer, copyQuery, copyQueryOK)
+	r.recordCopyCPU(time.Since(copyStart))
+	r.collectCopyGPU()
 	if err != nil {
 		return QueuedFrame{}, err
 	}
@@ -251,7 +276,13 @@ func (r *AcceleratedRenderer) RenderQueuedOnGTKThread() error {
 	if r.copier == nil {
 		return ErrRendererNotInitialized
 	}
-	return r.copier.DrawTextureToCurrentFramebuffer(queued.Texture, queued.Size)
+	drawStart := time.Now()
+	drawQuery, drawQueryOK := r.beginTimer(r.drawTimer)
+	err := r.copier.DrawTextureToCurrentFramebuffer(queued.Texture, queued.Size)
+	r.endTimer(r.drawTimer, drawQuery, drawQueryOK)
+	r.recordRenderCPU(time.Since(drawStart))
+	r.collectDrawGPU()
+	return err
 }
 
 func (r *AcceleratedRenderer) currentContextPointer() uintptr {
@@ -282,6 +313,10 @@ func (r *AcceleratedRenderer) discardContextResources() {
 		return
 	}
 	r.queued = QueuedFrame{}
+	// Do not delete timer queries here for the same reason copier.Close is avoided:
+	// they are GL object names owned by the context that may already be gone.
+	r.copyTimer = nil
+	r.drawTimer = nil
 	// Do not call copier.Close here: it deletes VBO/VAO/program names that were
 	// created in the old GL context. On context loss those names are invalid in
 	// the new/current context and are reclaimed by the driver with the old one.
@@ -301,9 +336,95 @@ func (r *AcceleratedRenderer) discardContextResources() {
 	r.contextPtr = 0
 }
 
+func (r *AcceleratedRenderer) SetProfiler(profiler *internalprofile.Recorder) {
+	if r == nil {
+		return
+	}
+	r.profiler.Store(profiler)
+}
+
+func (r *AcceleratedRenderer) beginTimer(timer *gl.TimerQueryRecorder) (gl.TimerQuery, bool) {
+	if timer == nil {
+		return 0, false
+	}
+	return timer.Begin()
+}
+
+func (r *AcceleratedRenderer) endTimer(timer *gl.TimerQueryRecorder, query gl.TimerQuery, ok bool) {
+	if timer == nil || !ok {
+		return
+	}
+	timer.End(query)
+}
+
+func (r *AcceleratedRenderer) profileRecorder() *internalprofile.Recorder {
+	if r == nil {
+		return nil
+	}
+	return r.profiler.Load()
+}
+
+func (r *AcceleratedRenderer) collectCopyGPU() {
+	profiler := r.profileRecorder()
+	if profiler == nil || r.copyTimer == nil {
+		return
+	}
+	for _, d := range r.copyTimer.Collect() {
+		profiler.RecordCopyGPU(d)
+	}
+}
+
+func (r *AcceleratedRenderer) collectDrawGPU() {
+	profiler := r.profileRecorder()
+	if profiler == nil || r.drawTimer == nil {
+		return
+	}
+	for _, d := range r.drawTimer.Collect() {
+		profiler.RecordDrawGPU(d)
+	}
+}
+
+func (r *AcceleratedRenderer) recordGTKWait(d time.Duration) {
+	if profiler := r.profileRecorder(); profiler != nil {
+		profiler.RecordGTKWait(d)
+	}
+}
+
+func (r *AcceleratedRenderer) recordImportCopyCPU(d time.Duration) {
+	if profiler := r.profileRecorder(); profiler != nil {
+		profiler.RecordImportCopyCPU(d)
+	}
+}
+
+func (r *AcceleratedRenderer) recordImportCPU(d time.Duration) {
+	if profiler := r.profileRecorder(); profiler != nil {
+		profiler.RecordImportCPU(d)
+	}
+}
+
+func (r *AcceleratedRenderer) recordCopyCPU(d time.Duration) {
+	if profiler := r.profileRecorder(); profiler != nil {
+		profiler.RecordCopyCPU(d)
+	}
+}
+
+func (r *AcceleratedRenderer) recordRenderCPU(d time.Duration) {
+	if profiler := r.profileRecorder(); profiler != nil {
+		profiler.RecordRenderCPU(d)
+	}
+}
+
 func (r *AcceleratedRenderer) Close() {
 	if r == nil {
 		return
+	}
+	if r.copyTimer != nil {
+		r.copyTimer.Close()
+		r.copyTimer = nil
+	}
+	if r.drawTimer != nil {
+		r.drawTimer.Close()
+		r.drawTimer = nil
 	}
 	if r.queued.Texture != 0 && r.gl != nil {
 		id := uint32(r.queued.Texture)
