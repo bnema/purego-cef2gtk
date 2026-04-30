@@ -237,6 +237,9 @@ func (v *View) PrepareOnGTKThread() error {
 	if v == nil || v.renderer == nil || v.area == nil {
 		return ErrNilView
 	}
+	if !v.area.GetRealized() {
+		return gtkgl.ErrGLAreaNotRealized
+	}
 	v.area.MakeCurrent()
 	return v.renderer.InitializeOnGTKThread()
 }
@@ -279,10 +282,12 @@ func (v *View) Destroy() error {
 		}
 	}
 	if v.renderer != nil {
-		if v.area != nil {
+		if v.area != nil && v.area.GetRealized() {
 			v.area.MakeCurrent()
+			v.renderer.Close()
+		} else {
+			v.renderer.InvalidateOnGTKThread()
 		}
-		v.renderer.Close()
 		v.renderer = nil
 	}
 	v.sizeHooksMu.Lock()

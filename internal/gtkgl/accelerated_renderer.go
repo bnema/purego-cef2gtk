@@ -139,6 +139,10 @@ func (r *AcceleratedRenderer) ImportCopyAndQueueOnGTKThread(info *cef.Accelerate
 			return
 		}
 		if r.area != nil {
+			if !r.area.GetRealized() {
+				retErr = ErrGLAreaNotRealized
+				return
+			}
 			r.area.MakeCurrent()
 			if gerr := r.area.GetError(); gerr != nil {
 				retErr = fmt.Errorf("gtk gl area error: %s", glibErrorMessage(gerr))
@@ -231,23 +235,27 @@ func (r *AcceleratedRenderer) RenderQueuedOnGTKThread() error {
 	if r == nil {
 		return ErrNilAcceleratedRenderer
 	}
+	if r.area != nil && !r.area.GetRealized() {
+		r.discardContextResources()
+		return nil
+	}
 	contextPtr := r.currentContextPointer()
 	if r.contextPtr != 0 && contextPtr != 0 && r.contextPtr != contextPtr {
 		r.discardContextResources()
 		return nil
 	}
-	if r.copier == nil {
-		return ErrRendererNotInitialized
-	}
 	queued, ok := r.QueuedFrame()
 	if !ok {
 		return nil
+	}
+	if r.copier == nil {
+		return ErrRendererNotInitialized
 	}
 	return r.copier.DrawTextureToCurrentFramebuffer(queued.Texture, queued.Size)
 }
 
 func (r *AcceleratedRenderer) currentContextPointer() uintptr {
-	if r == nil || r.area == nil {
+	if r == nil || r.area == nil || !r.area.GetRealized() {
 		return 0
 	}
 	ctx := r.area.GetContext()

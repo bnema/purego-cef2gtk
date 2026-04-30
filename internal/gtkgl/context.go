@@ -27,6 +27,7 @@ var (
 	ErrMissingEGLDisplay       = errors.New("missing EGLDisplay")
 	ErrMissingDMABUFImport     = errors.New("missing EGL_EXT_image_dma_buf_import")
 	ErrMissingGLAreaContext    = errors.New("missing GtkGLArea context")
+	ErrGLAreaNotRealized       = errors.New("GtkGLArea is not realized")
 	ErrMissingGLAreaCurrent    = errors.New("GtkGLArea context is not current")
 	ErrMissingGLAreaCapability = errors.New("missing GLArea capability")
 )
@@ -73,6 +74,9 @@ func ProbeCurrentGLAreaContext(area *gtk.GLArea) (ContextProbeResult, error) {
 	}
 
 	result := ContextProbeResult{Backend: DetectBackendFromDisplay(area.GetDisplay())}
+	if !area.GetRealized() {
+		return result, ErrGLAreaNotRealized
+	}
 	if strings.ToLower(result.Backend) != BackendWayland {
 		return result, result.Validate()
 	}

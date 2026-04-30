@@ -141,6 +141,13 @@ func validPaintInfoForRenderer() cef.AcceleratedPaintInfo {
 	return info
 }
 
+func TestAcceleratedRendererRenderQueuedIgnoresEmptyQueueAfterInvalidation(t *testing.T) {
+	r := &AcceleratedRenderer{}
+	if err := r.RenderQueuedOnGTKThread(); err != nil {
+		t.Fatalf("RenderQueuedOnGTKThread() error = %v, want nil", err)
+	}
+}
+
 func TestAcceleratedRendererImportCopyAndQueueLifecycle(t *testing.T) {
 	calls := []string{}
 	r := &AcceleratedRenderer{

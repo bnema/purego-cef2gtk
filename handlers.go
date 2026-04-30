@@ -1,6 +1,8 @@
 package cef2gtk
 
 import (
+	"errors"
+
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 )
@@ -90,10 +92,17 @@ func (h *renderHandler) handleAcceleratedError(err error) {
 	if h.diag != nil {
 		h.diag.RecordImportFailure(err)
 	}
+	if isTransientGLAreaLifecycleError(err) {
+		return
+	}
 	hooks := h.hooks()
 	if hooks.OnError != nil {
 		hooks.OnError(err)
 	}
+}
+
+func isTransientGLAreaLifecycleError(err error) bool {
+	return errors.Is(err, gtkgl.ErrGLAreaNotRealized) || errors.Is(err, gtkgl.ErrMissingGLAreaContext)
 }
 func (h *renderHandler) hooks() Hooks {
 	if h != nil && h.view != nil {

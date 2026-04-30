@@ -77,6 +77,26 @@ func TestOnAcceleratedPaintQueuesRenderOnSuccess(t *testing.T) {
 	}
 }
 
+func TestOnAcceleratedPaintSuppressesTransientGLAreaLifecycleHook(t *testing.T) {
+	f := &fakeRenderQueue{err: gtkgl.ErrGLAreaNotRealized}
+	d := newDiagnosticsRecorder()
+	called := false
+	h := &renderHandler{renderer: f, diag: d, staticHooks: Hooks{OnError: func(error) { called = true }}}
+
+	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+
+	if !f.importCalled {
+		t.Fatal("accelerated renderer not called")
+	}
+	if called {
+		t.Fatal("OnError called for transient GtkGLArea lifecycle error")
+	}
+	diag := d.Snapshot()
+	if diag.AcceleratedPaints != 1 || diag.ImportFailures != 1 {
+		t.Fatalf("unexpected diagnostics: %+v", diag)
+	}
+}
+
 func TestRenderSignalErrorHookAndDiagnostics(t *testing.T) {
 	want := errors.New("render failed")
 	f := &fakeRenderQueue{err: want}
