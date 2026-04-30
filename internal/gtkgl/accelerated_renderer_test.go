@@ -110,6 +110,26 @@ func (f fakeCopier) DrawTextureToCurrentFramebuffer(src gl.Texture, size dmabuf.
 }
 func (f fakeCopier) Close() { *f.calls = append(*f.calls, "copier.Close") }
 
+func TestAcceleratedRendererInvalidateDropsContextResourcesWithoutGLDeletes(t *testing.T) {
+	calls := []string{}
+	r := &AcceleratedRenderer{
+		egl:        fakeEGLImporter{calls: &calls, image: 11},
+		gl:         fakeGLImporter{calls: &calls, texture: 22},
+		copier:     fakeCopier{calls: &calls, texture: 33},
+		queued:     QueuedFrame{Texture: 44, Size: dmabuf.Size{Width: 16, Height: 8}},
+		contextPtr: 55,
+	}
+
+	r.InvalidateOnGTKThread()
+
+	if r.egl != nil || r.gl != nil || r.copier != nil || r.queued.Texture != 0 || r.contextPtr != 0 {
+		t.Fatalf("renderer not invalidated: %+v", r)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("InvalidateOnGTKThread issued GL cleanup calls %v; stale context resources must be dropped only", calls)
+	}
+}
+
 func validPaintInfoForRenderer() cef.AcceleratedPaintInfo {
 	info := cef.NewAcceleratedPaintInfo()
 	info.PlaneCount = 1

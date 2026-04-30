@@ -25,30 +25,33 @@ type acceleratedRenderer interface {
 	ImportCopyAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
 	QueueRender()
 	RenderQueuedOnGTKThread() error
+	InvalidateOnGTKThread()
 	Close()
 }
 
 // View is a GTK GtkGLArea-backed CEF OSR view.
 type View struct {
-	area            *gtk.GLArea
-	renderer        acceleratedRenderer
-	input           *gtkgl.InputBridge
-	inputScale      int32
-	diag            *diagnosticsRecorder
-	hooks           Hooks
-	handler         *renderHandler
-	renderFunc      func(gtk.GLArea, uintptr) bool
-	renderHandlerID uint
-	widthNotify     func(gobject.Object, *gobject.ParamSpec)
-	heightNotify    func(gobject.Object, *gobject.ParamSpec)
-	widthHandlerID  uint
-	heightHandlerID uint
-	cachedWidth     atomic.Int32
-	cachedHeight    atomic.Int32
-	scale           atomic.Int32
-	sizeHooksMu     sync.Mutex
-	sizeHooks       map[uint64]func(width, height int32)
-	nextSizeHookID  uint64
+	area               *gtk.GLArea
+	renderer           acceleratedRenderer
+	input              *gtkgl.InputBridge
+	inputScale         int32
+	diag               *diagnosticsRecorder
+	hooks              Hooks
+	handler            *renderHandler
+	renderFunc         func(gtk.GLArea, uintptr) bool
+	unrealizeFunc      func(gtk.Widget)
+	renderHandlerID    uint
+	unrealizeHandlerID uint
+	widthNotify        func(gobject.Object, *gobject.ParamSpec)
+	heightNotify       func(gobject.Object, *gobject.ParamSpec)
+	widthHandlerID     uint
+	heightHandlerID    uint
+	cachedWidth        atomic.Int32
+	cachedHeight       atomic.Int32
+	scale              atomic.Int32
+	sizeHooksMu        sync.Mutex
+	sizeHooks          map[uint64]func(width, height int32)
+	nextSizeHookID     uint64
 }
 
 // NewView creates a GtkGLArea-backed accelerated CEF view.
@@ -78,6 +81,12 @@ func (v *View) connectRenderSignal() {
 		return v.renderOnGTKThread()
 	}
 	v.renderHandlerID = v.area.ConnectRender(&v.renderFunc)
+	v.unrealizeFunc = func(gtk.Widget) {
+		if v.renderer != nil {
+			v.renderer.InvalidateOnGTKThread()
+		}
+	}
+	v.unrealizeHandlerID = v.area.ConnectUnrealize(&v.unrealizeFunc)
 }
 
 func (v *View) updateCachedSizeOnGTKThread() {
@@ -263,6 +272,10 @@ func (v *View) Destroy() error {
 		if v.heightHandlerID != 0 {
 			gobject.SignalHandlerDisconnect(obj, v.heightHandlerID)
 			v.heightHandlerID = 0
+		}
+		if v.unrealizeHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(obj, v.unrealizeHandlerID)
+			v.unrealizeHandlerID = 0
 		}
 	}
 	if v.renderer != nil {

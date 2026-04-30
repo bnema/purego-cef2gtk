@@ -51,12 +51,13 @@ type QueuedFrame struct {
 // methods must be called from the GTK main thread because it owns GtkGLArea and
 // current-context GL/EGL state.
 type AcceleratedRenderer struct {
-	area     *gtk.GLArea
-	egl      eglImporter
-	gl       glImporter
-	copier   textureCopier
-	queued   QueuedFrame
-	initFunc func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
+	area       *gtk.GLArea
+	egl        eglImporter
+	gl         glImporter
+	copier     textureCopier
+	queued     QueuedFrame
+	contextPtr uintptr
+	initFunc   func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
 }
 
 func NewAcceleratedRenderer(area *gtk.GLArea) *AcceleratedRenderer {
@@ -69,6 +70,19 @@ func (r *AcceleratedRenderer) InitializeOnGTKThread() error {
 	if r == nil {
 		return ErrNilAcceleratedRenderer
 	}
+	contextPtr := r.currentContextPointer()
+	if r.readyForContext(contextPtr) {
+		return nil
+	}
+	if r.contextPtr != 0 && contextPtr != 0 && r.contextPtr != contextPtr {
+		// Gtk may recreate a GtkGLArea context when a widget is reparented or
+		// unrealized/realized. Resource names from the old context are invalid in
+		// the new context, so drop references without issuing GL deletes against the
+		// wrong current context.
+		r.discardContextResources()
+	} else {
+		r.Close()
+	}
 	init := r.initFunc
 	if init == nil {
 		init = defaultAcceleratedRendererInit
@@ -80,6 +94,7 @@ func (r *AcceleratedRenderer) InitializeOnGTKThread() error {
 	r.egl = eglImporter
 	r.gl = glBackend
 	r.copier = copier
+	r.contextPtr = contextPtr
 	return nil
 }
 
@@ -129,6 +144,10 @@ func (r *AcceleratedRenderer) ImportCopyAndQueueOnGTKThread(info *cef.Accelerate
 				retErr = fmt.Errorf("gtk gl area error: %s", glibErrorMessage(gerr))
 				return
 			}
+		}
+		if err := r.InitializeOnGTKThread(); err != nil {
+			retErr = err
+			return
 		}
 		queued, retErr = r.ImportCopyAndQueue(info)
 	})
@@ -212,6 +231,11 @@ func (r *AcceleratedRenderer) RenderQueuedOnGTKThread() error {
 	if r == nil {
 		return ErrNilAcceleratedRenderer
 	}
+	contextPtr := r.currentContextPointer()
+	if r.contextPtr != 0 && contextPtr != 0 && r.contextPtr != contextPtr {
+		r.discardContextResources()
+		return nil
+	}
 	if r.copier == nil {
 		return ErrRendererNotInitialized
 	}
@@ -220,6 +244,53 @@ func (r *AcceleratedRenderer) RenderQueuedOnGTKThread() error {
 		return nil
 	}
 	return r.copier.DrawTextureToCurrentFramebuffer(queued.Texture, queued.Size)
+}
+
+func (r *AcceleratedRenderer) currentContextPointer() uintptr {
+	if r == nil || r.area == nil {
+		return 0
+	}
+	ctx := r.area.GetContext()
+	if ctx == nil {
+		return 0
+	}
+	return ctx.GoPointer()
+}
+
+func (r *AcceleratedRenderer) readyForContext(contextPtr uintptr) bool {
+	return r != nil && r.egl != nil && r.gl != nil && r.copier != nil && r.contextPtr != 0 && r.contextPtr == contextPtr
+}
+
+// InvalidateOnGTKThread drops renderer state after GtkGLArea unrealize/context
+// loss. Call on the GTK thread. No GL deletes are issued because the old context
+// may already be gone; the next import will recreate resources for the current
+// context.
+func (r *AcceleratedRenderer) InvalidateOnGTKThread() {
+	r.discardContextResources()
+}
+
+func (r *AcceleratedRenderer) discardContextResources() {
+	if r == nil {
+		return
+	}
+	r.queued = QueuedFrame{}
+	// Do not call copier.Close here: it deletes VBO/VAO/program names that were
+	// created in the old GL context. On context loss those names are invalid in
+	// the new/current context and are reclaimed by the driver with the old one.
+	r.copier = nil
+	if r.gl != nil {
+		if closer, ok := r.gl.(glCloser); ok {
+			_ = closer.Close()
+		}
+		r.gl = nil
+	}
+	if r.egl != nil {
+		if closer, ok := r.egl.(eglCloser); ok {
+			_ = closer.Close()
+		}
+		r.egl = nil
+	}
+	r.contextPtr = 0
 }
 
 func (r *AcceleratedRenderer) Close() {
@@ -247,4 +318,5 @@ func (r *AcceleratedRenderer) Close() {
 		}
 		r.egl = nil
 	}
+	r.contextPtr = 0
 }

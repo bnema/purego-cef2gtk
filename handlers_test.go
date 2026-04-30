@@ -30,7 +30,8 @@ func (f *fakeRenderQueue) RenderQueuedOnGTKThread() error {
 	f.renderCalled = true
 	return f.err
 }
-func (f *fakeRenderQueue) Close() {}
+func (f *fakeRenderQueue) InvalidateOnGTKThread() {}
+func (f *fakeRenderQueue) Close()                 {}
 
 func TestOnPaintFailLoudRecordsAndHooks(t *testing.T) {
 	d := newDiagnosticsRecorder()
