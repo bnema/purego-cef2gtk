@@ -30,13 +30,13 @@ const (
 	testPlaneSize         uint64 = 1 << 20
 	testSecondPlaneFD     int32  = 24
 	testSecondPlaneStride uint32 = 2048
-	testBadFormat         int32  = 0x3231564e // NV12, intentionally unsupported in phase 2.
+	testBadColorType      int32  = 99
 )
 
 func validAcceleratedPaintInfo() cef.AcceleratedPaintInfo {
 	info := cef.NewAcceleratedPaintInfo()
 	info.PlaneCount = 1
-	info.Format = int32(dmabuf.FormatARGB8888)
+	info.Format = int32(cef.ColorTypeBgra8888)
 	info.Modifier = testModifier
 	info.Planes[0].Fd = testPlaneFD
 	info.Planes[0].Stride = testPlaneStride
@@ -100,11 +100,24 @@ func TestBorrowedFrameFromAcceleratedPaintRejectsNonSinglePlaneCounts(t *testing
 	}
 }
 
-func TestBorrowedFrameFromAcceleratedPaintPropagatesUnsupportedFormatValidation(t *testing.T) {
+func TestBorrowedFrameFromAcceleratedPaintMapsRGBAColorType(t *testing.T) {
 	info := validAcceleratedPaintInfo()
-	info.Format = testBadFormat
+	info.Format = int32(cef.ColorTypeRgba8888)
 
-	if _, err := BorrowedFrameFromAcceleratedPaint(&info); !errors.Is(err, dmabuf.ErrUnsupportedFormat) {
-		t.Fatalf("BorrowedFrameFromAcceleratedPaint bad format error = %v, want %v", err, dmabuf.ErrUnsupportedFormat)
+	got, err := BorrowedFrameFromAcceleratedPaint(&info)
+	if err != nil {
+		t.Fatalf("BorrowedFrameFromAcceleratedPaint error = %v", err)
+	}
+	if got.Format != dmabuf.FormatABGR8888 {
+		t.Fatalf("format = %s, want %s", got.Format, dmabuf.FormatABGR8888)
+	}
+}
+
+func TestBorrowedFrameFromAcceleratedPaintRejectsUnsupportedColorType(t *testing.T) {
+	info := validAcceleratedPaintInfo()
+	info.Format = testBadColorType
+
+	if _, err := BorrowedFrameFromAcceleratedPaint(&info); !errors.Is(err, ErrUnsupportedColorType) {
+		t.Fatalf("BorrowedFrameFromAcceleratedPaint bad color type error = %v, want %v", err, ErrUnsupportedColorType)
 	}
 }

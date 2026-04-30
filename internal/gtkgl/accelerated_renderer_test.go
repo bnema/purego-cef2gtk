@@ -113,7 +113,7 @@ func (f fakeCopier) Close() { *f.calls = append(*f.calls, "copier.Close") }
 func validPaintInfoForRenderer() cef.AcceleratedPaintInfo {
 	info := cef.NewAcceleratedPaintInfo()
 	info.PlaneCount = 1
-	info.Format = int32(dmabuf.FormatARGB8888)
+	info.Format = int32(cef.ColorTypeBgra8888)
 	info.Planes[0].Fd = 9
 	info.Planes[0].Stride = 128
 	info.Extra.CodedSize.Width = 16

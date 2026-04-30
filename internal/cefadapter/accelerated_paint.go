@@ -10,7 +10,10 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
 )
 
-var ErrNilAcceleratedPaintInfo = errors.New("nil accelerated paint info")
+var (
+	ErrNilAcceleratedPaintInfo = errors.New("nil accelerated paint info")
+	ErrUnsupportedColorType    = errors.New("unsupported CEF color type")
+)
 
 // BorrowedFrameFromAcceleratedPaint converts CEF accelerated paint metadata to a
 // callback-scoped borrowed DMABUF frame description.
@@ -55,12 +58,28 @@ func BorrowedFrameFromAcceleratedPaint(info *cef.AcceleratedPaintInfo) (dmabuf.B
 			Width:  info.Extra.SourceSize.Width,
 			Height: info.Extra.SourceSize.Height,
 		},
-		Format:   dmabuf.FourCC(uint32(info.Format)),
+		Format:   dmabufFormatFromCEFColorType(cef.ColorType(info.Format)),
 		Modifier: info.Modifier,
 		Planes:   planes,
+	}
+	if frame.Format == 0 {
+		return dmabuf.BorrowedFrame{}, fmt.Errorf("%w: %d", ErrUnsupportedColorType, info.Format)
 	}
 	if err := frame.Validate(); err != nil {
 		return dmabuf.BorrowedFrame{}, err
 	}
 	return frame, nil
+}
+
+func dmabufFormatFromCEFColorType(colorType cef.ColorType) dmabuf.FourCC {
+	switch colorType {
+	case cef.ColorTypeBgra8888:
+		// CEF BGRA byte order corresponds to DRM_FORMAT_ARGB8888 on little-endian Linux.
+		return dmabuf.FormatARGB8888
+	case cef.ColorTypeRgba8888:
+		// CEF RGBA byte order corresponds to DRM_FORMAT_ABGR8888 on little-endian Linux.
+		return dmabuf.FormatABGR8888
+	default:
+		return 0
+	}
 }
