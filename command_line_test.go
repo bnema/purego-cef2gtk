@@ -84,7 +84,7 @@ func TestConfigureCommandLineAngleBackendOverrides(t *testing.T) {
 	}{
 		{name: "gl egl", env: "gl-egl", want: map[string]string{"ozone-platform": "wayland", "use-gl": "angle", "use-angle": "gl-egl"}},
 		{name: "vulkan", env: "vulkan", want: map[string]string{"ozone-platform": "wayland", "use-gl": "angle", "use-angle": "vulkan", "enable-features": "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"}},
-		{name: "none", env: "none", want: map[string]string{"ozone-platform": "wayland"}},
+		{name: "none", env: "none", want: map[string]string{"ozone-platform": "wayland", "use-angle": "none"}},
 		{name: "unknown defaults to gl egl", env: "swiftshader", want: map[string]string{"ozone-platform": "wayland", "use-gl": "angle", "use-angle": "gl-egl"}},
 	}
 	for _, tt := range tests {
@@ -103,6 +103,53 @@ func TestConfigureCommandLineAngleBackendOverrides(t *testing.T) {
 				t.Fatalf("switches = %+v, want only %+v", commandLine.switches, tt.want)
 			}
 		})
+	}
+}
+
+func TestConfigureCommandLineExplicitAngleEnvOverridesExistingUseAngle(t *testing.T) {
+	t.Setenv("PUREGO_CEF2GTK_ANGLE_BACKEND", "vulkan")
+	commandLine := newFakeCommandLine()
+	commandLine.AppendSwitchWithValue("use-angle", "gl-egl")
+	commandLine.AppendSwitchWithValue("enable-features", "ExistingFeature")
+
+	ConfigureCommandLine(commandLine, CommandLineOptions{})
+
+	if got := commandLine.GetSwitchValue("use-angle"); got != "vulkan" {
+		t.Fatalf("use-angle = %q, want vulkan", got)
+	}
+	if got := commandLine.GetSwitchValue("enable-features"); got != "ExistingFeature,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" {
+		t.Fatalf("enable-features = %q, want Vulkan features appended", got)
+	}
+}
+
+func TestConfigureCommandLineExplicitNoneEnvRemovesExistingUseGL(t *testing.T) {
+	t.Setenv("PUREGO_CEF2GTK_ANGLE_BACKEND", "none")
+	commandLine := newFakeCommandLine()
+	commandLine.AppendSwitchWithValue("use-angle", "gl-egl")
+	commandLine.AppendSwitchWithValue("use-gl", "angle")
+
+	ConfigureCommandLine(commandLine, CommandLineOptions{})
+
+	if got := commandLine.GetSwitchValue("use-angle"); got != "none" {
+		t.Fatalf("use-angle = %q, want none", got)
+	}
+	if commandLine.HasSwitch("use-gl") {
+		t.Fatalf("use-gl should be removed when ANGLE is explicitly disabled, got %q", commandLine.GetSwitchValue("use-gl"))
+	}
+}
+
+func TestConfigureCommandLineExistingNoneUseAngleRemovesConflictingUseGL(t *testing.T) {
+	commandLine := newFakeCommandLine()
+	commandLine.AppendSwitchWithValue("use-angle", "none")
+	commandLine.AppendSwitchWithValue("use-gl", "angle")
+
+	ConfigureCommandLine(commandLine, CommandLineOptions{})
+
+	if got := commandLine.GetSwitchValue("use-angle"); got != "none" {
+		t.Fatalf("use-angle = %q, want none", got)
+	}
+	if commandLine.HasSwitch("use-gl") {
+		t.Fatalf("use-gl should be removed when ANGLE is disabled, got %q", commandLine.GetSwitchValue("use-gl"))
 	}
 }
 

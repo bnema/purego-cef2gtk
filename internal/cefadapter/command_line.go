@@ -22,15 +22,19 @@ func ConfigureWaylandGPUCommandLine(commandLine cef.CommandLine) {
 	if commandLine == nil {
 		return
 	}
-	angleBackend := normalizeAngleBackend(os.Getenv(angleBackendEnvVar))
-	if angleBackend != "none" {
-		effectiveAngleBackend := angleBackend
-		if commandLine.HasSwitch(useAngleSwitch) {
-			effectiveAngleBackend = normalizeExistingAngleBackend(commandLine.GetSwitchValue(useAngleSwitch))
-		} else {
-			commandLine.AppendSwitchWithValue(useAngleSwitch, angleBackend)
-		}
-		if effectiveAngleBackend != "none" && !commandLine.HasSwitch(useGLSwitch) {
+	angleBackend, angleBackendExplicit := angleBackendFromEnv()
+	if angleBackendExplicit {
+		commandLine.RemoveSwitch(useAngleSwitch)
+		commandLine.AppendSwitchWithValue(useAngleSwitch, angleBackend)
+	} else if !commandLine.HasSwitch(useAngleSwitch) {
+		commandLine.AppendSwitchWithValue(useAngleSwitch, angleBackend)
+	}
+
+	effectiveAngleBackend := normalizeExistingAngleBackend(commandLine.GetSwitchValue(useAngleSwitch))
+	if effectiveAngleBackend == "none" {
+		commandLine.RemoveSwitch(useGLSwitch)
+	} else {
+		if !commandLine.HasSwitch(useGLSwitch) {
 			commandLine.AppendSwitchWithValue(useGLSwitch, "angle")
 		}
 		if effectiveAngleBackend == "vulkan" {
@@ -45,6 +49,11 @@ func ConfigureWaylandGPUCommandLine(commandLine cef.CommandLine) {
 	if !commandLine.HasSwitch(ozonePlatformSwitch) {
 		commandLine.AppendSwitchWithValue(ozonePlatformSwitch, "wayland")
 	}
+}
+
+func angleBackendFromEnv() (backend string, explicit bool) {
+	value, explicit := os.LookupEnv(angleBackendEnvVar)
+	return normalizeAngleBackend(value), explicit
 }
 
 func normalizeAngleBackend(value string) string {
