@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/bnema/purego"
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/cefadapter"
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
@@ -22,14 +23,20 @@ import (
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
+const (
+	retiredTextureLimit   = 16
+	stalePendingFrameWait = 250 * time.Millisecond
+)
+
 var (
-	ErrNilRenderer              = errors.New("nil gdk dmabuf renderer")
-	ErrMissingPicture           = errors.New("missing gtk picture")
-	ErrNoDisplay                = errors.New("gdk display unavailable")
-	ErrBuilderUnavailable       = errors.New("gdk dmabuf texture builder unavailable")
-	ErrDmabufFormatsUnavailable = errors.New("gdk dmabuf formats unavailable")
-	ErrUnsupportedFormat        = errors.New("unsupported gdk dmabuf format")
-	ErrTextureBuildFailed       = errors.New("gdk dmabuf texture build failed")
+	ErrNilRenderer                   = errors.New("nil gdk dmabuf renderer")
+	ErrMissingPicture                = errors.New("missing gtk picture")
+	ErrNoDisplay                     = errors.New("gdk display unavailable")
+	ErrBuilderUnavailable            = errors.New("gdk dmabuf texture builder unavailable")
+	ErrDmabufFormatsUnavailable      = errors.New("gdk dmabuf formats unavailable")
+	ErrUnsupportedFormat             = errors.New("unsupported gdk dmabuf format")
+	ErrTextureBuildFailed            = errors.New("gdk dmabuf texture build failed")
+	ErrCloseDestroyNotifyUnavailable = errors.New("native close destroy notify unavailable")
 )
 
 type dmabufFormatSet interface {
@@ -38,11 +45,18 @@ type dmabufFormatSet interface {
 
 // Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters.
 type Diagnostics struct {
-	TexturesBuilt        uint64
-	TextureBuildFailures uint64
-	FDDupFailures        uint64
-	UnsupportedFormats   uint64
-	PaintableSwaps       uint64
+	TexturesBuilt           uint64
+	TextureBuildFailures    uint64
+	FDDupFailures           uint64
+	UnsupportedFormats      uint64
+	PaintableSwaps          uint64
+	PendingFrame            bool
+	PendingScheduled        bool
+	PendingAge              time.Duration
+	PendingSourceID         uint
+	PendingReschedules      uint64
+	PendingScheduleFailures uint64
+	PendingIdleCallbacks    uint64
 }
 
 type dmabufTextureBuilder interface {
@@ -56,8 +70,10 @@ type dmabufTextureBuilder interface {
 	SetFd(uint, int)
 	SetStride(uint, uint)
 	SetOffset(uint, uint)
-	Build(*glib.DestroyNotify, uintptr) (*gdk.Texture, error)
+	BuildWithDestroyNotifyPointer(uintptr, uintptr) (*gdk.Texture, error)
 }
+
+type idleOnceScheduler func(*glib.SourceOnceFunc, uintptr) uint
 
 type ownedTexture struct {
 	texture *gdk.Texture
@@ -103,8 +119,8 @@ func (f *ownedFrame) borrowed() dmabuf.BorrowedFrame {
 
 // Renderer owns a GtkPicture presenter and imports callback-scoped CEF DMABUFs
 // as GdkDmabufTexture instances. The initial implementation supports only
-// single-plane RGB frames. Duplicated FDs are handed to GTK and closed by
-// closeDmabufFD when the resulting texture is finalized.
+// single-plane RGB frames. Duplicated FDs are handed to GTK with a native
+// close(2) destroy notify so they stay open until the GdkTexture is finalized.
 type Renderer struct {
 	widget  *gtk.Widget
 	picture *gtk.Picture
@@ -114,23 +130,37 @@ type Renderer struct {
 	formats dmabufFormatSet
 	builder dmabufTextureBuilder
 	current *ownedTexture
+	retired []*ownedTexture
 
-	pendingMu        sync.Mutex
-	pendingFrame     *ownedFrame
-	pendingScheduled bool
+	pendingMu          sync.Mutex
+	pendingFrame       *ownedFrame
+	pendingScheduled   bool
+	pendingScheduledAt time.Time
+	pendingSourceID    uint
+	pendingGeneration  uint64
 
-	dupFD   func(int) (int, error)
-	closeFD func(int) error
+	dupFD       func(int) (int, error)
+	closeFD     func(int) error
+	idleAddOnce idleOnceScheduler
 
-	texturesBuilt        atomic.Uint64
-	textureBuildFailures atomic.Uint64
-	fdDupFailures        atomic.Uint64
-	unsupportedFormats   atomic.Uint64
-	paintableSwaps       atomic.Uint64
-	frameTraces          atomic.Uint64
+	texturesBuilt           atomic.Uint64
+	textureBuildFailures    atomic.Uint64
+	fdDupFailures           atomic.Uint64
+	unsupportedFormats      atomic.Uint64
+	paintableSwaps          atomic.Uint64
+	pendingReschedules      atomic.Uint64
+	pendingScheduleFailures atomic.Uint64
+	pendingIdleCallbacks    atomic.Uint64
+	frameTraces             atomic.Uint64
 
 	profiler atomic.Pointer[internalprofile.Recorder]
 }
+
+var (
+	closeDestroyNotifyOnce sync.Once
+	closeDestroyNotifyPtr  uintptr
+	closeDestroyNotifyErr  error
+)
 
 // NewRenderer creates a GtkPicture-backed GDK DMABUF renderer. When useOffload
 // is true and GtkGraphicsOffload can be constructed, Widget returns the offload
@@ -164,12 +194,13 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 		return nil, err
 	}
 	return &Renderer{
-		widget:  widget,
-		picture: picture,
-		offload: offload,
-		builder: builder,
-		dupFD:   dupFDClOExec,
-		closeFD: unix.Close,
+		widget:      widget,
+		picture:     picture,
+		offload:     offload,
+		builder:     builder,
+		dupFD:       dupFDClOExec,
+		closeFD:     unix.Close,
+		idleAddOnce: glib.IdleAddOnce,
 	}, nil
 }
 
@@ -185,6 +216,20 @@ func newTextureBuilder() (builder dmabufTextureBuilder, retErr error) {
 		return nil, ErrBuilderUnavailable
 	}
 	return builder, nil
+}
+
+func nativeCloseDestroyNotify() (uintptr, error) {
+	closeDestroyNotifyOnce.Do(func() {
+		closeDestroyNotifyPtr, closeDestroyNotifyErr = purego.Dlsym(purego.RTLD_DEFAULT, "close")
+		if closeDestroyNotifyErr != nil {
+			closeDestroyNotifyErr = fmt.Errorf("%w: %v", ErrCloseDestroyNotifyUnavailable, closeDestroyNotifyErr)
+			return
+		}
+		if closeDestroyNotifyPtr == 0 {
+			closeDestroyNotifyErr = ErrCloseDestroyNotifyUnavailable
+		}
+	})
+	return closeDestroyNotifyPtr, closeDestroyNotifyErr
 }
 
 // Widget returns the widget that should be packed into GTK containers.
@@ -293,23 +338,59 @@ func (r *Renderer) enqueueOwnedFrame(frame *ownedFrame) {
 		closeOwnedFrame(frame, nil)
 		return
 	}
+	now := time.Now()
 	r.pendingMu.Lock()
 	if r.pendingFrame != nil {
 		r.releaseOwnedFrame(r.pendingFrame)
 	}
 	r.pendingFrame = frame
 	schedule := !r.pendingScheduled
+	if !schedule && !r.pendingScheduledAt.IsZero() && now.Sub(r.pendingScheduledAt) > stalePendingFrameWait {
+		schedule = true
+		r.pendingReschedules.Add(1)
+	}
+	generation := r.pendingGeneration
 	if schedule {
 		r.pendingScheduled = true
+		r.pendingScheduledAt = now
+		r.pendingSourceID = 0
+		r.pendingGeneration++
+		generation = r.pendingGeneration
 	}
 	r.pendingMu.Unlock()
 	if !schedule {
 		return
 	}
+	r.schedulePendingImport(generation)
+}
+
+func (r *Renderer) schedulePendingImport(generation uint64) {
+	if r == nil {
+		return
+	}
 	cb := glib.SourceOnceFunc(func(uintptr) {
+		r.pendingIdleCallbacks.Add(1)
 		r.importPendingFrameOnGTKThread()
 	})
-	glib.IdleAddOnce(&cb, 0)
+	scheduler := r.idleAddOnce
+	if scheduler == nil {
+		scheduler = glib.IdleAddOnce
+	}
+	sourceID := scheduler(&cb, 0)
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if !r.pendingScheduled || r.pendingGeneration != generation {
+		return
+	}
+	if sourceID == 0 {
+		r.pendingScheduleFailures.Add(1)
+		r.pendingScheduled = false
+		r.pendingScheduledAt = time.Time{}
+		r.pendingSourceID = 0
+		r.pendingGeneration++
+		return
+	}
+	r.pendingSourceID = sourceID
 }
 
 func (r *Renderer) importPendingFrameOnGTKThread() {
@@ -320,6 +401,9 @@ func (r *Renderer) importPendingFrameOnGTKThread() {
 	frame := r.pendingFrame
 	r.pendingFrame = nil
 	r.pendingScheduled = false
+	r.pendingScheduledAt = time.Time{}
+	r.pendingSourceID = 0
+	r.pendingGeneration++
 	r.pendingMu.Unlock()
 	if frame == nil {
 		return
@@ -362,7 +446,7 @@ func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame) error {
 	r.picture.SetPaintable(built.texture)
 	r.current = built
 	r.recordPaintableSwap()
-	r.releaseOwnedTexture(old)
+	r.retireOwnedTexture(old)
 	return nil
 }
 
@@ -438,6 +522,10 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 			frame.Planes[0].FD = -1
 		}
 	}()
+	destroyNotify, err := nativeCloseDestroyNotify()
+	if err != nil {
+		return nil, err
+	}
 
 	plane := borrowed.Planes[0]
 	r.builder.SetWidth(uint(borrowed.CodedSize.Width))
@@ -460,13 +548,14 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 			retErr = fmt.Errorf("%w: %v", ErrTextureBuildFailed, p)
 		}
 	}()
-	// Do not pass a Go DestroyNotify callback here. GDK may finalize DMABUF
-	// textures from renderer/finalizer contexts, and callback lifetime/threading
-	// through purego is fragile enough to corrupt Go stack scanning. Instead the
-	// renderer owns each duplicated FD alongside its GdkTexture reference after
-	// Build consumes it, then closes it when that texture is swapped out or
-	// invalidated.
-	texture, err := r.builder.Build(nil, 0)
+	// GDK requires the caller to keep plane FDs open until the returned texture is
+	// released. Pass libc close(2) as a native GDestroyNotify so GTK/GSK closes the
+	// duplicated FD at the exact texture-finalization point, without calling back
+	// into Go from renderer/finalizer code. This relies on the standard C ABI
+	// convention GLib documents for destroy callbacks: the gpointer data value is
+	// passed in the first integer/pointer argument register, and close(2) reads the
+	// low int fd from that register.
+	texture, err := r.builder.BuildWithDestroyNotifyPointer(destroyNotify, uintptr(ownedFD))
 	if err != nil {
 		r.recordTextureBuildFailure()
 		return nil, fmt.Errorf("%w: %v", ErrTextureBuildFailed, err)
@@ -478,7 +567,7 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 	textureOwnsFD = true
 	frame.Planes[0].FD = -1
 	r.recordTextureBuilt()
-	return &ownedTexture{texture: texture, fd: ownedFD}, nil
+	return &ownedTexture{texture: texture, fd: -1}, nil
 }
 
 // QueueRender is a no-op for GtkPicture; GTK schedules painting for paintable changes.
@@ -497,10 +586,14 @@ func (r *Renderer) InvalidateOnGTKThread() {
 	pending := r.pendingFrame
 	r.pendingFrame = nil
 	r.pendingScheduled = false
+	r.pendingScheduledAt = time.Time{}
+	r.pendingSourceID = 0
+	r.pendingGeneration++
 	r.pendingMu.Unlock()
 	r.releaseOwnedFrame(pending)
 	r.releaseOwnedTexture(r.current)
 	r.current = nil
+	r.releaseRetiredTextures()
 	r.display = nil
 	r.formats = nil
 }
@@ -529,6 +622,31 @@ func closeOwnedFrame(frame *ownedFrame, closeFD func(int) error) {
 			frame.Planes[i].FD = -1
 		}
 	}
+}
+
+func (r *Renderer) retireOwnedTexture(owned *ownedTexture) {
+	if r == nil || owned == nil {
+		return
+	}
+	r.retired = append(r.retired, owned)
+	for len(r.retired) > retiredTextureLimit {
+		oldest := r.retired[0]
+		copy(r.retired, r.retired[1:])
+		r.retired[len(r.retired)-1] = nil
+		r.retired = r.retired[:len(r.retired)-1]
+		r.releaseOwnedTexture(oldest)
+	}
+}
+
+func (r *Renderer) releaseRetiredTextures() {
+	if r == nil {
+		return
+	}
+	for _, owned := range r.retired {
+		r.releaseOwnedTexture(owned)
+	}
+	clear(r.retired)
+	r.retired = nil
 }
 
 func (r *Renderer) releaseOwnedTexture(owned *ownedTexture) {
@@ -593,12 +711,33 @@ func (r *Renderer) Diagnostics() Diagnostics {
 	if r == nil {
 		return Diagnostics{}
 	}
+	r.pendingMu.Lock()
+	pendingFrame := r.pendingFrame != nil
+	pendingScheduled := r.pendingScheduled
+	pendingScheduledAt := r.pendingScheduledAt
+	pendingSourceID := r.pendingSourceID
+	r.pendingMu.Unlock()
+
+	pendingAge := time.Duration(0)
+	if pendingScheduled && !pendingScheduledAt.IsZero() {
+		pendingAge = time.Since(pendingScheduledAt)
+		if pendingAge < 0 {
+			pendingAge = 0
+		}
+	}
 	return Diagnostics{
-		TexturesBuilt:        r.texturesBuilt.Load(),
-		TextureBuildFailures: r.textureBuildFailures.Load(),
-		FDDupFailures:        r.fdDupFailures.Load(),
-		UnsupportedFormats:   r.unsupportedFormats.Load(),
-		PaintableSwaps:       r.paintableSwaps.Load(),
+		TexturesBuilt:           r.texturesBuilt.Load(),
+		TextureBuildFailures:    r.textureBuildFailures.Load(),
+		FDDupFailures:           r.fdDupFailures.Load(),
+		UnsupportedFormats:      r.unsupportedFormats.Load(),
+		PaintableSwaps:          r.paintableSwaps.Load(),
+		PendingFrame:            pendingFrame,
+		PendingScheduled:        pendingScheduled,
+		PendingAge:              pendingAge,
+		PendingSourceID:         pendingSourceID,
+		PendingReschedules:      r.pendingReschedules.Load(),
+		PendingScheduleFailures: r.pendingScheduleFailures.Load(),
+		PendingIdleCallbacks:    r.pendingIdleCallbacks.Load(),
 	}
 }
 

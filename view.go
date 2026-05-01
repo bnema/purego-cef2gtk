@@ -461,6 +461,13 @@ func (v *View) Diagnostics() Diagnostics {
 		snap.FDDupFailures = int(d.FDDupFailures)
 		snap.UnsupportedFormats = int(d.UnsupportedFormats)
 		snap.PaintableSwaps = int(d.PaintableSwaps)
+		snap.PendingFrame = d.PendingFrame
+		snap.PendingScheduled = d.PendingScheduled
+		snap.PendingAge = d.PendingAge
+		snap.PendingSourceID = d.PendingSourceID
+		snap.PendingReschedules = int(d.PendingReschedules)
+		snap.PendingScheduleFailures = int(d.PendingScheduleFailures)
+		snap.PendingIdleCallbacks = int(d.PendingIdleCallbacks)
 	}
 	return snap
 }
