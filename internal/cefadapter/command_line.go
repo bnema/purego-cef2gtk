@@ -34,7 +34,8 @@ func ConfigureWaylandGPUCommandLine(commandLine cef.CommandLine) {
 	if effectiveAngleBackend == "none" {
 		commandLine.RemoveSwitch(useGLSwitch)
 	} else {
-		if !commandLine.HasSwitch(useGLSwitch) {
+		if normalizeExistingAngleBackend(commandLine.GetSwitchValue(useGLSwitch)) != "angle" {
+			commandLine.RemoveSwitch(useGLSwitch)
 			commandLine.AppendSwitchWithValue(useGLSwitch, "angle")
 		}
 		if effectiveAngleBackend == "vulkan" {

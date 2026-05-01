@@ -220,9 +220,13 @@ func newTextureBuilder() (builder dmabufTextureBuilder, retErr error) {
 
 func nativeCloseDestroyNotify() (uintptr, error) {
 	closeDestroyNotifyOnce.Do(func() {
+		if !nativeCloseDestroyNotifyABICompatible() {
+			closeDestroyNotifyErr = ErrCloseDestroyNotifyUnavailable
+			return
+		}
 		closeDestroyNotifyPtr, closeDestroyNotifyErr = purego.Dlsym(purego.RTLD_DEFAULT, "close")
 		if closeDestroyNotifyErr != nil {
-			closeDestroyNotifyErr = fmt.Errorf("%w: %v", ErrCloseDestroyNotifyUnavailable, closeDestroyNotifyErr)
+			closeDestroyNotifyErr = fmt.Errorf("%w: %w", ErrCloseDestroyNotifyUnavailable, closeDestroyNotifyErr)
 			return
 		}
 		if closeDestroyNotifyPtr == 0 {
@@ -230,6 +234,18 @@ func nativeCloseDestroyNotify() (uintptr, error) {
 		}
 	})
 	return closeDestroyNotifyPtr, closeDestroyNotifyErr
+}
+
+func nativeCloseDestroyNotifyABICompatible() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	switch runtime.GOARCH {
+	case "amd64", "arm64", "386", "arm":
+		return true
+	default:
+		return false
+	}
 }
 
 // Widget returns the widget that should be packed into GTK containers.
@@ -522,10 +538,7 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 			frame.Planes[0].FD = -1
 		}
 	}()
-	destroyNotify, err := nativeCloseDestroyNotify()
-	if err != nil {
-		return nil, err
-	}
+	destroyNotify, destroyNotifyErr := nativeCloseDestroyNotify()
 
 	plane := borrowed.Planes[0]
 	r.builder.SetWidth(uint(borrowed.CodedSize.Width))
@@ -549,13 +562,22 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 		}
 	}()
 	// GDK requires the caller to keep plane FDs open until the returned texture is
-	// released. Pass libc close(2) as a native GDestroyNotify so GTK/GSK closes the
-	// duplicated FD at the exact texture-finalization point, without calling back
-	// into Go from renderer/finalizer code. This relies on the standard C ABI
-	// convention GLib documents for destroy callbacks: the gpointer data value is
-	// passed in the first integer/pointer argument register, and close(2) reads the
-	// low int fd from that register.
-	texture, err := r.builder.BuildWithDestroyNotifyPointer(destroyNotify, uintptr(ownedFD))
+	// released. On known-compatible Linux ABIs, pass libc close(2) as a native
+	// GDestroyNotify so GTK/GSK closes the duplicated FD at the exact
+	// texture-finalization point, without calling back into Go from renderer/
+	// finalizer code. This relies on the standard C ABI convention GLib documents
+	// for destroy callbacks: the gpointer data value is passed in the first
+	// integer/pointer argument register, and close(2) reads the low int fd from
+	// that register. If the native symbol or ABI compatibility check is unavailable,
+	// fall back to renderer-owned FD lifetime management.
+	textureFD := -1
+	destroyData := uintptr(ownedFD)
+	if destroyNotifyErr != nil {
+		textureFD = ownedFD
+		destroyNotify = 0
+		destroyData = 0
+	}
+	texture, err := r.builder.BuildWithDestroyNotifyPointer(destroyNotify, destroyData)
 	if err != nil {
 		r.recordTextureBuildFailure()
 		return nil, fmt.Errorf("%w: %v", ErrTextureBuildFailed, err)
@@ -567,7 +589,7 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 	textureOwnsFD = true
 	frame.Planes[0].FD = -1
 	r.recordTextureBuilt()
-	return &ownedTexture{texture: texture, fd: -1}, nil
+	return &ownedTexture{texture: texture, fd: textureFD}, nil
 }
 
 // QueueRender is a no-op for GtkPicture; GTK schedules painting for paintable changes.

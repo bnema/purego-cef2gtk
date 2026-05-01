@@ -179,6 +179,12 @@ func TestConfigureCommandLineDoesNotOverrideExistingPlatformSwitches(t *testing.
 			wantCount: 4,
 		},
 		{
+			name:      "conflicting use gl is rewritten to angle",
+			existing:  map[string]string{"use-angle": "vulkan", "use-gl": "desktop"},
+			want:      map[string]string{"ozone-platform": "wayland", "use-angle": "vulkan", "use-gl": "angle", "enable-features": "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"},
+			wantCount: 4,
+		},
+		{
 			name:      "existing angle none does not force use gl angle",
 			existing:  map[string]string{"use-angle": "none"},
 			want:      map[string]string{"ozone-platform": "wayland", "use-angle": "none"},
