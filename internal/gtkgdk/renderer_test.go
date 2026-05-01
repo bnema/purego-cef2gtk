@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -36,7 +37,7 @@ type fakeBuilder struct {
 	fd            int
 	stride        uint
 	offset        uint
-	destroy       *glib.DestroyNotify
+	destroyPtr    uintptr
 	data          uintptr
 	buildErr      error
 	texture       *gdk.Texture
@@ -53,9 +54,9 @@ func (b *fakeBuilder) SetNPlanes(n uint)               { b.nPlanes = n }
 func (b *fakeBuilder) SetFd(_ uint, fd int)            { b.fd = fd }
 func (b *fakeBuilder) SetStride(_ uint, stride uint)   { b.stride = stride }
 func (b *fakeBuilder) SetOffset(_ uint, offset uint)   { b.offset = offset }
-func (b *fakeBuilder) Build(destroy *glib.DestroyNotify, data uintptr) (*gdk.Texture, error) {
+func (b *fakeBuilder) BuildWithDestroyNotifyPointer(destroy uintptr, data uintptr) (*gdk.Texture, error) {
 	b.builds++
-	b.destroy = destroy
+	b.destroyPtr = destroy
 	b.data = data
 	if b.buildErr != nil {
 		return nil, b.buildErr
@@ -96,12 +97,12 @@ func buildTextureFromFrameForTest(r *Renderer, frame dmabuf.BorrowedFrame) (*own
 	return built, nil
 }
 
-func TestBuildTextureDuplicatesFDAndRendererOwnsDuplicate(t *testing.T) {
+func TestBuildTextureDuplicatesFDAndTransfersDuplicateToGDKDestroyNotify(t *testing.T) {
 	file, err := os.Open("/dev/null")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer closeTestFile(t, file)
 
 	builder := &fakeBuilder{texture: fakeTexture()}
 	r := &Renderer{builder: builder, dupFD: dupFDClOExec, closeFD: unix.Close}
@@ -122,15 +123,127 @@ func TestBuildTextureDuplicatesFDAndRendererOwnsDuplicate(t *testing.T) {
 	}
 	assertFDOpen(t, int(file.Fd()))
 	assertFDOpen(t, builder.fd)
-	if builder.destroy != nil || builder.data != 0 {
-		t.Fatalf("destroy notify should not be passed to builder: destroy=%v data=%#x", builder.destroy, builder.data)
+	if builder.destroyPtr == 0 || builder.data != uintptr(builder.fd) {
+		t.Fatalf("destroy notify/data not passed to builder: destroy=%#x data=%#x fd=%d", builder.destroyPtr, builder.data, builder.fd)
+	}
+	if built.fd != -1 {
+		t.Fatalf("renderer should not own fd after successful build, got %d", built.fd)
 	}
 	// Avoid Unref on the fake texture pointer; this unit only verifies FD
 	// ownership. Runtime texture unrefs are covered by live GTK validation.
 	built.texture = nil
 	r.releaseOwnedTexture(built)
-	assertFDClosed(t, builder.fd)
+	assertFDOpen(t, builder.fd)
+	_ = unix.Close(builder.fd)
 	assertFDOpen(t, int(file.Fd()))
+}
+
+func TestRetireOwnedTextureKeepsRecentFDsOpen(t *testing.T) {
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestFile(t, file)
+
+	r := &Renderer{closeFD: unix.Close}
+	fds := make([]int, 0, retiredTextureLimit+1)
+	defer func() {
+		for _, fd := range fds {
+			_ = unix.Close(fd)
+		}
+	}()
+
+	for range retiredTextureLimit {
+		fd, err := dupFDClOExec(int(file.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fds = append(fds, fd)
+		r.retireOwnedTexture(&ownedTexture{fd: fd})
+	}
+	for _, fd := range fds {
+		assertFDOpen(t, fd)
+	}
+
+	extraFD, err := dupFDClOExec(int(file.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fds = append(fds, extraFD)
+	r.retireOwnedTexture(&ownedTexture{fd: extraFD})
+
+	assertFDClosed(t, fds[0])
+	for _, fd := range fds[1:] {
+		assertFDOpen(t, fd)
+	}
+
+	r.releaseRetiredTextures()
+	for _, fd := range fds[1:] {
+		assertFDClosed(t, fd)
+	}
+}
+
+func TestEnqueueOwnedFrameDoesNotDuplicateFreshPendingIdle(t *testing.T) {
+	calls := 0
+	r := &Renderer{
+		closeFD: unix.Close,
+		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+			calls++
+			return uint(calls)
+		},
+	}
+	defer r.InvalidateOnGTKThread()
+
+	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+
+	if calls != 1 {
+		t.Fatalf("idle schedules = %d, want 1", calls)
+	}
+	if got := r.Diagnostics(); !got.PendingScheduled || !got.PendingFrame || got.PendingSourceID != 1 || got.PendingReschedules != 0 {
+		t.Fatalf("unexpected diagnostics: %+v", got)
+	}
+}
+
+func TestEnqueueOwnedFrameReschedulesStalePendingIdle(t *testing.T) {
+	calls := 0
+	r := &Renderer{
+		closeFD: unix.Close,
+		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+			calls++
+			return uint(calls)
+		},
+	}
+	defer r.InvalidateOnGTKThread()
+
+	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+	r.pendingMu.Lock()
+	r.pendingScheduledAt = time.Now().Add(-stalePendingFrameWait - time.Second)
+	r.pendingMu.Unlock()
+	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+
+	if calls != 2 {
+		t.Fatalf("idle schedules = %d, want 2", calls)
+	}
+	if got := r.Diagnostics(); got.PendingReschedules != 1 || got.PendingSourceID != 2 || !got.PendingScheduled || got.PendingAge <= 0 {
+		t.Fatalf("unexpected diagnostics after stale reschedule: %+v", got)
+	}
+}
+
+func TestEnqueueOwnedFrameClearsPendingScheduledWhenIdleScheduleFails(t *testing.T) {
+	r := &Renderer{
+		closeFD: unix.Close,
+		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+			return 0
+		},
+	}
+	defer r.InvalidateOnGTKThread()
+
+	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+
+	if got := r.Diagnostics(); got.PendingScheduleFailures != 1 || got.PendingScheduled || !got.PendingFrame || got.PendingSourceID != 0 {
+		t.Fatalf("unexpected diagnostics after schedule failure: %+v", got)
+	}
 }
 
 func TestBuildTextureClosesDuplicateWhenBuildFails(t *testing.T) {
@@ -138,7 +251,7 @@ func TestBuildTextureClosesDuplicateWhenBuildFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer closeTestFile(t, file)
 
 	builder := &fakeBuilder{buildErr: errors.New("no dmabuf")}
 	r := &Renderer{builder: builder, dupFD: dupFDClOExec, closeFD: unix.Close}
@@ -177,7 +290,7 @@ func TestBuildTextureRejectsUnsupportedDisplayModifierAndClosesDuplicate(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer closeTestFile(t, file)
 
 	formats := &fakeFormats{allowed: false}
 	builder := &fakeBuilder{texture: fakeTexture()}
@@ -254,6 +367,13 @@ func TestBuildTextureRejectsInvalidFrameBeforeDup(t *testing.T) {
 	}
 	if called {
 		t.Fatal("dup called for invalid frame")
+	}
+}
+
+func closeTestFile(t *testing.T, file *os.File) {
+	t.Helper()
+	if err := file.Close(); err != nil {
+		t.Errorf("close test file: %v", err)
 	}
 }
 

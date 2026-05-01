@@ -17,18 +17,25 @@ const maxDiagnosticEvents = 256
 // Diagnostics is a snapshot of View rendering diagnostics. Events contains the
 // most recent diagnostic events, capped to avoid unbounded growth.
 type Diagnostics struct {
-	Backend                string
-	AcceleratedPaints      int
-	AcceleratedPaintErrors int
-	UnsupportedPaints      int
-	ImportFailures         int
-	RenderFailures         int
-	TexturesBuilt          int
-	TextureBuildFailures   int
-	FDDupFailures          int
-	UnsupportedFormats     int
-	PaintableSwaps         int
-	Events                 []DiagnosticEvent
+	Backend                 string
+	AcceleratedPaints       int
+	AcceleratedPaintErrors  int
+	UnsupportedPaints       int
+	ImportFailures          int
+	RenderFailures          int
+	TexturesBuilt           int
+	TextureBuildFailures    int
+	FDDupFailures           int
+	UnsupportedFormats      int
+	PaintableSwaps          int
+	PendingFrame            bool
+	PendingScheduled        bool
+	PendingAge              time.Duration
+	PendingSourceID         uint
+	PendingReschedules      int
+	PendingScheduleFailures int
+	PendingIdleCallbacks    int
+	Events                  []DiagnosticEvent
 }
 
 type diagnosticsRecorder struct {
