@@ -286,8 +286,11 @@ func (r *Renderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (qu
 }
 
 func (r *Renderer) enqueueOwnedFrame(frame *ownedFrame) {
-	if r == nil || frame == nil {
-		r.releaseOwnedFrame(frame)
+	if frame == nil {
+		return
+	}
+	if r == nil {
+		closeOwnedFrame(frame, nil)
 		return
 	}
 	r.pendingMu.Lock()
@@ -503,10 +506,20 @@ func (r *Renderer) InvalidateOnGTKThread() {
 }
 
 func (r *Renderer) releaseOwnedFrame(frame *ownedFrame) {
-	if r == nil || frame == nil {
+	if frame == nil {
 		return
 	}
-	closeFD := r.closeFD
+	var closeFD func(int) error
+	if r != nil {
+		closeFD = r.closeFD
+	}
+	closeOwnedFrame(frame, closeFD)
+}
+
+func closeOwnedFrame(frame *ownedFrame, closeFD func(int) error) {
+	if frame == nil {
+		return
+	}
 	if closeFD == nil {
 		closeFD = unix.Close
 	}

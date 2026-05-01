@@ -181,10 +181,20 @@ func TestBuildTextureRejectsUnsupportedDisplayModifierAndClosesDuplicate(t *test
 
 	formats := &fakeFormats{allowed: false}
 	builder := &fakeBuilder{texture: fakeTexture()}
+	duplicateFD := -1
+	defer func() {
+		if duplicateFD >= 0 {
+			_ = unix.Close(duplicateFD)
+		}
+	}()
 	r := &Renderer{
 		formats: formats,
 		builder: builder,
-		dupFD:   dupFDClOExec,
+		dupFD: func(fd int) (int, error) {
+			dup, err := dupFDClOExec(fd)
+			duplicateFD = dup
+			return dup, err
+		},
 		closeFD: unix.Close,
 	}
 	frame := validFrame(int(file.Fd()))
@@ -197,6 +207,7 @@ func TestBuildTextureRejectsUnsupportedDisplayModifierAndClosesDuplicate(t *test
 	if builder.builds != 0 {
 		t.Fatalf("builder builds = %d, want 0", builder.builds)
 	}
+	assertFDClosed(t, duplicateFD)
 	assertFDOpen(t, int(file.Fd()))
 }
 
