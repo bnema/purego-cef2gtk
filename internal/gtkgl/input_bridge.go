@@ -22,7 +22,7 @@ const (
 	maxSingleByteKeyval = 0x100
 )
 
-// InputBridge translates GTK/GDK input events from a GtkGLArea into CEF OSR input.
+// InputBridge translates GTK/GDK input events from a GTK widget into CEF OSR input.
 type InputBridge struct {
 	mu    sync.Mutex
 	host  cef.BrowserHost
@@ -33,7 +33,7 @@ type InputBridge struct {
 	imContext    *gtk.IMContextSimple
 	detached     bool
 
-	area        *gtk.GLArea
+	widget      *gtk.Widget
 	controllers []*gtk.EventController
 	callbacks   []any
 
@@ -84,11 +84,19 @@ func (ib *InputBridge) SetHost(host cef.BrowserHost) {
 
 // Attach creates GTK event controllers and attaches them to the GLArea.
 func (ib *InputBridge) Attach(area *gtk.GLArea) {
-	if ib == nil || area == nil {
+	if area == nil {
+		return
+	}
+	ib.AttachToWidget(&area.Widget)
+}
+
+// AttachToWidget creates GTK event controllers and attaches them to widget.
+func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
+	if ib == nil || widget == nil {
 		return
 	}
 	ib.mu.Lock()
-	ib.area = area
+	ib.widget = widget
 	ib.detached = false
 	if display := gdk.DisplayGetDefault(); display != nil {
 		ib.clipboard = display.GetClipboard()
@@ -104,12 +112,12 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 		ib.onMouseMove(0, 0, uint(g.GetCurrentEventState()), true)
 	}
 	motion.ConnectLeave(&leaveCb)
-	ib.addController(area, &motion.EventController, &motionCb, &leaveCb)
+	ib.addController(widget, &motion.EventController, &motionCb, &leaveCb)
 
 	click := gtk.NewGestureClick()
 	click.SetButton(0)
 	pressedCb := func(g gtk.GestureClick, nPress int, x, y float64) {
-		area.GrabFocus()
+		widget.GrabFocus()
 		ib.onMousePress(x, y, g.GetCurrentButton(), uint(g.GetCurrentEventState()), nPress)
 	}
 	click.ConnectPressed(&pressedCb)
@@ -117,7 +125,7 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 		ib.onMouseRelease(x, y, g.GetCurrentButton(), uint(g.GetCurrentEventState()), nPress)
 	}
 	click.ConnectReleased(&releasedCb)
-	ib.addController(area, &click.EventController, &pressedCb, &releasedCb)
+	ib.addController(widget, &click.EventController, &pressedCb, &releasedCb)
 
 	scroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollBothAxesValue | gtk.EventControllerScrollKineticValue)
 	scrollCb := func(g gtk.EventControllerScroll, dx, dy float64) bool {
@@ -125,7 +133,7 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 		return true
 	}
 	scroll.ConnectScroll(&scrollCb)
-	ib.addController(area, &scroll.EventController, &scrollCb)
+	ib.addController(widget, &scroll.EventController, &scrollCb)
 
 	focus := gtk.NewEventControllerFocus()
 	focusEnterCb := func(_ gtk.EventControllerFocus) {
@@ -143,7 +151,7 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 		ib.onFocusOut()
 	}
 	focus.ConnectLeave(&focusLeaveCb)
-	ib.addController(area, &focus.EventController, &focusEnterCb, &focusLeaveCb)
+	ib.addController(widget, &focus.EventController, &focusEnterCb, &focusLeaveCb)
 
 	key := gtk.NewEventControllerKey()
 	ib.imContext = gtk.NewIMContextSimple()
@@ -151,7 +159,7 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 		commitCb := func(_ gtk.IMContext, text string) { ib.onIMCommit(text) }
 		ib.imContext.ConnectCommit(&commitCb)
 		key.SetImContext(&ib.imContext.IMContext)
-		ib.imContext.SetClientWidget(&area.Widget)
+		ib.imContext.SetClientWidget(widget)
 		ib.callbacks = append(ib.callbacks, &commitCb)
 	}
 	keyPressCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) bool {
@@ -175,14 +183,14 @@ func (ib *InputBridge) Attach(area *gtk.GLArea) {
 		ib.onKeyRelease(keyval, keycode, uint(state))
 	}
 	key.ConnectKeyReleased(&keyReleaseCb)
-	ib.addController(area, &key.EventController, &keyPressCb, &keyReleaseCb)
+	ib.addController(widget, &key.EventController, &keyPressCb, &keyReleaseCb)
 
-	area.SetFocusable(true)
-	area.SetCanFocus(true)
+	widget.SetFocusable(true)
+	widget.SetCanFocus(true)
 }
 
-func (ib *InputBridge) addController(area *gtk.GLArea, controller *gtk.EventController, callbacks ...any) {
-	area.AddController(controller)
+func (ib *InputBridge) addController(widget *gtk.Widget, controller *gtk.EventController, callbacks ...any) {
+	widget.AddController(controller)
 	ib.mu.Lock()
 	ib.controllers = append(ib.controllers, controller)
 	ib.callbacks = append(ib.callbacks, callbacks...)
@@ -195,21 +203,21 @@ func (ib *InputBridge) Detach() {
 		return
 	}
 	ib.mu.Lock()
-	area := ib.area
+	widget := ib.widget
 	controllers := append([]*gtk.EventController(nil), ib.controllers...)
 	ib.detached = true
 	ib.controllers = nil
 	ib.callbacks = nil
 	ib.imContext = nil
-	ib.area = nil
+	ib.widget = nil
 	ib.clipboard = nil
 	ib.mu.Unlock()
-	if area == nil {
+	if widget == nil {
 		return
 	}
 	for _, controller := range controllers {
 		if controller != nil {
-			area.RemoveController(controller)
+			widget.RemoveController(controller)
 		}
 	}
 }

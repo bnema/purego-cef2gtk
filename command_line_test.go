@@ -44,7 +44,7 @@ func (f *fakeCommandLine) AppendArgument(argument string)                  {}
 func (f *fakeCommandLine) PrependWrapper(wrapper string)                   {}
 func (f *fakeCommandLine) RemoveSwitch(name string)                        { delete(f.switches, name) }
 
-func TestConfigureCommandLineAddsWaylandGLAngleSwitches(t *testing.T) {
+func TestConfigureCommandLineAddsWaylandGLEGLAngleSwitchesByDefault(t *testing.T) {
 	commandLine := newFakeCommandLine()
 
 	ConfigureCommandLine(commandLine, CommandLineOptions{})
@@ -52,10 +52,58 @@ func TestConfigureCommandLineAddsWaylandGLAngleSwitches(t *testing.T) {
 	if got := commandLine.GetSwitchValue("ozone-platform"); got != "wayland" {
 		t.Fatalf("ozone-platform = %q, want wayland", got)
 	}
+	if got := commandLine.GetSwitchValue("use-gl"); got != "angle" {
+		t.Fatalf("use-gl = %q, want angle", got)
+	}
 	if got := commandLine.GetSwitchValue("use-angle"); got != "gl-egl" {
 		t.Fatalf("use-angle = %q, want gl-egl", got)
 	}
-	assertForbiddenSwitchesAbsent(t, commandLine)
+	if commandLine.HasSwitch("enable-features") {
+		t.Fatalf("enable-features should not be forced for default ANGLE GL/EGL, got %q", commandLine.GetSwitchValue("enable-features"))
+	}
+}
+
+func TestConfigureCommandLineMergesExistingEnableFeaturesForExplicitVulkan(t *testing.T) {
+	t.Setenv("PUREGO_CEF2GTK_ANGLE_BACKEND", "vulkan")
+	commandLine := newFakeCommandLine()
+	commandLine.AppendSwitchWithValue("enable-features", "ExistingFeature,Vulkan")
+
+	ConfigureCommandLine(commandLine, CommandLineOptions{})
+
+	want := "ExistingFeature,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+	if got := commandLine.GetSwitchValue("enable-features"); got != want {
+		t.Fatalf("enable-features = %q, want %q", got, want)
+	}
+}
+
+func TestConfigureCommandLineAngleBackendOverrides(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want map[string]string
+	}{
+		{name: "gl egl", env: "gl-egl", want: map[string]string{"ozone-platform": "wayland", "use-gl": "angle", "use-angle": "gl-egl"}},
+		{name: "vulkan", env: "vulkan", want: map[string]string{"ozone-platform": "wayland", "use-gl": "angle", "use-angle": "vulkan", "enable-features": "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"}},
+		{name: "none", env: "none", want: map[string]string{"ozone-platform": "wayland"}},
+		{name: "unknown defaults to gl egl", env: "swiftshader", want: map[string]string{"ozone-platform": "wayland", "use-gl": "angle", "use-angle": "gl-egl"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PUREGO_CEF2GTK_ANGLE_BACKEND", tt.env)
+			commandLine := newFakeCommandLine()
+
+			ConfigureCommandLine(commandLine, CommandLineOptions{})
+
+			for name, want := range tt.want {
+				if got := commandLine.GetSwitchValue(name); got != want {
+					t.Fatalf("%s = %q, want %q", name, got, want)
+				}
+			}
+			if len(commandLine.switches) != len(tt.want) {
+				t.Fatalf("switches = %+v, want only %+v", commandLine.switches, tt.want)
+			}
+		})
+	}
 }
 
 func TestConfigureCommandLineDoesNotOverrideExistingPlatformSwitches(t *testing.T) {
@@ -66,21 +114,27 @@ func TestConfigureCommandLineDoesNotOverrideExistingPlatformSwitches(t *testing.
 		wantCount int
 	}{
 		{
-			name:      "both switches exist",
+			name:      "both switches exist with explicit vulkan",
 			existing:  map[string]string{"ozone-platform": "x11", "use-angle": "vulkan"},
-			want:      map[string]string{"ozone-platform": "x11", "use-angle": "vulkan"},
-			wantCount: 2,
+			want:      map[string]string{"ozone-platform": "x11", "use-angle": "vulkan", "use-gl": "angle", "enable-features": "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"},
+			wantCount: 4,
 		},
 		{
-			name:      "only ozone exists",
+			name:      "only ozone exists uses gl egl default",
 			existing:  map[string]string{"ozone-platform": "x11"},
-			want:      map[string]string{"ozone-platform": "x11", "use-angle": "gl-egl"},
-			wantCount: 2,
+			want:      map[string]string{"ozone-platform": "x11", "use-gl": "angle", "use-angle": "gl-egl"},
+			wantCount: 3,
 		},
 		{
-			name:      "only angle exists",
+			name:      "only vulkan angle exists gets vulkan features",
 			existing:  map[string]string{"use-angle": "vulkan"},
-			want:      map[string]string{"ozone-platform": "wayland", "use-angle": "vulkan"},
+			want:      map[string]string{"ozone-platform": "wayland", "use-angle": "vulkan", "use-gl": "angle", "enable-features": "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"},
+			wantCount: 4,
+		},
+		{
+			name:      "existing angle none does not force use gl angle",
+			existing:  map[string]string{"use-angle": "none"},
+			want:      map[string]string{"ozone-platform": "wayland", "use-angle": "none"},
 			wantCount: 2,
 		},
 	}
@@ -119,7 +173,7 @@ func TestConfigureCommandLineNilSafe(t *testing.T) {
 
 func assertForbiddenSwitchesAbsent(t *testing.T, commandLine *fakeCommandLine) {
 	t.Helper()
-	for _, name := range []string{"enable-features", "disable-gpu", "disable-software-rasterizer", "use-gl", "ozone-platform-hint"} {
+	for _, name := range []string{"disable-gpu", "disable-software-rasterizer", "ozone-platform-hint"} {
 		if commandLine.HasSwitch(name) {
 			t.Fatalf("forbidden switch %q was appended", name)
 		}

@@ -7,11 +7,34 @@ GTK4 widget bridge for [`purego-cef`](https://github.com/bnema/purego-cef) accel
 Early bootstrap. The renderer is Wayland-only and GPU-first:
 
 - CEF accelerated OSR with shared textures/DMABUFs
-- GTK4 `GtkGLArea`
-- EGL/OpenGL import and copy path
+- GTK4 `GdkDmabufTextureBuilder` + `GtkPicture`/`GtkGraphicsOffload` backend for GTK/GSK rendering
+- GTK4 `GtkGLArea` EGL/OpenGL import-and-copy backend as fallback/debug path
 - no X11 target
 - no `--disable-gpu` or software rendering fallback
 - CEF `OnPaint` is treated as a diagnostic/error path, not as a renderer
+
+## Renderer backends
+
+`NewView()` uses `BackendAuto`: it tries `gdk-dmabuf` first and falls back to `glarea` if GDK DMABUF construction is unavailable. Use `NewViewWithOptions` or env overrides for diagnostics:
+
+```go
+view := cef2gtk.NewViewWithOptions(cef2gtk.ViewOptions{Backend: cef2gtk.BackendGDKDMABUF})
+```
+
+Environment overrides:
+
+```sh
+PUREGO_CEF2GTK_BACKEND=auto|gdk-dmabuf|glarea
+PUREGO_CEF2GTK_ANGLE_BACKEND=vulkan|gl-egl|none
+```
+
+Recommended local checks:
+
+```sh
+GSK_RENDERER=vulkan PUREGO_CEF2GTK_BACKEND=gdk-dmabuf go run ./examples/simple-browser
+GSK_RENDERER=ngl PUREGO_CEF2GTK_BACKEND=gdk-dmabuf go run ./examples/simple-browser
+PUREGO_CEF2GTK_BACKEND=glarea go run ./examples/simple-browser
+```
 
 ## Usage sketch
 

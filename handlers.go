@@ -8,14 +8,18 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 )
 
-type acceleratedRenderQueue interface {
-	ImportCopyAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
+type renderQueue interface {
+	ImportAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error)
 	QueueRender()
+}
+
+type asyncRenderQueue interface {
+	ImportAndQueueAsync(*cef.AcceleratedPaintInfo, func(error)) error
 }
 
 type renderHandler struct {
 	view        *View
-	renderer    acceleratedRenderQueue
+	renderer    renderQueue
 	diag        *diagnosticsRecorder
 	staticHooks Hooks
 }
@@ -90,10 +94,22 @@ func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType
 		h.handleAcceleratedError(gtkgl.ErrNilAcceleratedRenderer)
 		return
 	}
-	if _, err := h.renderer.ImportCopyAndQueueOnGTKThread(info); err != nil {
+	if async, ok := h.renderer.(asyncRenderQueue); ok {
+		if err := async.ImportAndQueueAsync(info, h.handleAcceleratedError); err != nil {
+			h.handleAcceleratedError(err)
+			return
+		}
+		h.recordAcceleratedFrameQueued()
+		return
+	}
+	if _, err := h.renderer.ImportAndQueueOnGTKThread(info); err != nil {
 		h.handleAcceleratedError(err)
 		return
 	}
+	h.recordAcceleratedFrameQueued()
+}
+
+func (h *renderHandler) recordAcceleratedFrameQueued() {
 	h.renderer.QueueRender()
 	if h.view != nil {
 		h.view.recordProfileFrameQueued()

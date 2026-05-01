@@ -39,7 +39,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	if v == nil {
 		return ErrNilView
 	}
-	if v.area == nil {
+	if v.widget == nil {
 		return ErrViewNotInitialized
 	}
 	if v.input != nil {
@@ -49,7 +49,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	v.input = gtkgl.NewInputBridge(host, v.inputScale)
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
-	v.input.Attach(v.area)
+	v.input.AttachToWidget(v.widget)
 	return nil
 }
 

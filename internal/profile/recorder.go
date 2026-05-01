@@ -70,8 +70,9 @@ type GCStats struct {
 
 // Snapshot contains one profiling window of render-pipeline metrics.
 type Snapshot struct {
-	Time   time.Time     `json:"time"`
-	Window time.Duration `json:"-"`
+	Time    time.Time     `json:"time"`
+	Window  time.Duration `json:"-"`
+	Backend string        `json:"backend,omitempty"`
 
 	FramesReceived    uint64 `json:"frames_received"`
 	FramesQueued      uint64 `json:"frames_queued"`
@@ -79,6 +80,12 @@ type Snapshot struct {
 	ImportFailures    uint64 `json:"import_failures"`
 	RenderFailures    uint64 `json:"render_failures"`
 	UnsupportedPaints uint64 `json:"unsupported_paints"`
+
+	TexturesBuilt        uint64 `json:"textures_built,omitempty"`
+	TextureBuildFailures uint64 `json:"texture_build_failures,omitempty"`
+	FDDupFailures        uint64 `json:"fd_dup_failures,omitempty"`
+	UnsupportedFormats   uint64 `json:"unsupported_formats,omitempty"`
+	PaintableSwaps       uint64 `json:"paintable_swaps,omitempty"`
 
 	GTKWaitCPU    DurationStats `json:"gtk_wait_cpu"`
 	ImportCopyCPU DurationStats `json:"import_copy_cpu"`
@@ -93,46 +100,59 @@ type Snapshot struct {
 
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type snapshotJSON struct {
-		Time              time.Time     `json:"time"`
-		WindowMS          float64       `json:"window_ms"`
-		FramesReceived    uint64        `json:"frames_received"`
-		FramesQueued      uint64        `json:"frames_queued"`
-		FramesRendered    uint64        `json:"frames_rendered"`
-		ImportFailures    uint64        `json:"import_failures"`
-		RenderFailures    uint64        `json:"render_failures"`
-		UnsupportedPaints uint64        `json:"unsupported_paints"`
-		GTKWaitCPU        DurationStats `json:"gtk_wait_cpu"`
-		ImportCopyCPU     DurationStats `json:"import_copy_cpu"`
-		ImportCPU         DurationStats `json:"import_cpu"`
-		CopyCPU           DurationStats `json:"copy_cpu"`
-		RenderCPU         DurationStats `json:"render_cpu"`
-		CopyGPU           DurationStats `json:"copy_gpu"`
-		DrawGPU           DurationStats `json:"draw_gpu"`
-		GC                GCStats       `json:"gc"`
+		Time                 time.Time     `json:"time"`
+		WindowMS             float64       `json:"window_ms"`
+		Backend              string        `json:"backend,omitempty"`
+		FramesReceived       uint64        `json:"frames_received"`
+		FramesQueued         uint64        `json:"frames_queued"`
+		FramesRendered       uint64        `json:"frames_rendered"`
+		ImportFailures       uint64        `json:"import_failures"`
+		RenderFailures       uint64        `json:"render_failures"`
+		UnsupportedPaints    uint64        `json:"unsupported_paints"`
+		TexturesBuilt        uint64        `json:"textures_built,omitempty"`
+		TextureBuildFailures uint64        `json:"texture_build_failures,omitempty"`
+		FDDupFailures        uint64        `json:"fd_dup_failures,omitempty"`
+		UnsupportedFormats   uint64        `json:"unsupported_formats,omitempty"`
+		PaintableSwaps       uint64        `json:"paintable_swaps,omitempty"`
+		GTKWaitCPU           DurationStats `json:"gtk_wait_cpu"`
+		ImportCopyCPU        DurationStats `json:"import_copy_cpu"`
+		ImportCPU            DurationStats `json:"import_cpu"`
+		CopyCPU              DurationStats `json:"copy_cpu"`
+		RenderCPU            DurationStats `json:"render_cpu"`
+		CopyGPU              DurationStats `json:"copy_gpu"`
+		DrawGPU              DurationStats `json:"draw_gpu"`
+		GC                   GCStats       `json:"gc"`
 	}
 	return json.Marshal(snapshotJSON{
-		Time:              s.Time,
-		WindowMS:          durationMS(s.Window),
-		FramesReceived:    s.FramesReceived,
-		FramesQueued:      s.FramesQueued,
-		FramesRendered:    s.FramesRendered,
-		ImportFailures:    s.ImportFailures,
-		RenderFailures:    s.RenderFailures,
-		UnsupportedPaints: s.UnsupportedPaints,
-		GTKWaitCPU:        s.GTKWaitCPU,
-		ImportCopyCPU:     s.ImportCopyCPU,
-		ImportCPU:         s.ImportCPU,
-		CopyCPU:           s.CopyCPU,
-		RenderCPU:         s.RenderCPU,
-		CopyGPU:           s.CopyGPU,
-		DrawGPU:           s.DrawGPU,
-		GC:                s.GC,
+		Time:                 s.Time,
+		WindowMS:             durationMS(s.Window),
+		Backend:              s.Backend,
+		FramesReceived:       s.FramesReceived,
+		FramesQueued:         s.FramesQueued,
+		FramesRendered:       s.FramesRendered,
+		ImportFailures:       s.ImportFailures,
+		RenderFailures:       s.RenderFailures,
+		UnsupportedPaints:    s.UnsupportedPaints,
+		TexturesBuilt:        s.TexturesBuilt,
+		TextureBuildFailures: s.TextureBuildFailures,
+		FDDupFailures:        s.FDDupFailures,
+		UnsupportedFormats:   s.UnsupportedFormats,
+		PaintableSwaps:       s.PaintableSwaps,
+		GTKWaitCPU:           s.GTKWaitCPU,
+		ImportCopyCPU:        s.ImportCopyCPU,
+		ImportCPU:            s.ImportCPU,
+		CopyCPU:              s.CopyCPU,
+		RenderCPU:            s.RenderCPU,
+		CopyGPU:              s.CopyGPU,
+		DrawGPU:              s.DrawGPU,
+		GC:                   s.GC,
 	})
 }
 
 // Recorder aggregates render profiling metrics. The zero value is usable after Start.
 type Recorder struct {
 	mu             sync.Mutex
+	backend        string
 	started        bool
 	windowStart    time.Time
 	lastGCNum      uint32
@@ -153,7 +173,17 @@ func (r *Recorder) Start(now time.Time) {
 	r.windowStart = now
 	r.lastGCNum = ms.NumGC
 	r.lastPauseTotal = ms.PauseTotalNs
-	r.current = Snapshot{}
+	r.current = Snapshot{Backend: r.backend}
+	r.mu.Unlock()
+}
+
+func (r *Recorder) SetBackend(backend string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.backend = backend
+	r.current.Backend = backend
 	r.mu.Unlock()
 }
 
@@ -163,6 +193,11 @@ func (r *Recorder) RecordFrameRendered()          { r.add(func(s *Snapshot) { s.
 func (r *Recorder) RecordImportFailure()          { r.add(func(s *Snapshot) { s.ImportFailures++ }) }
 func (r *Recorder) RecordRenderFailure()          { r.add(func(s *Snapshot) { s.RenderFailures++ }) }
 func (r *Recorder) RecordUnsupportedPaint()       { r.add(func(s *Snapshot) { s.UnsupportedPaints++ }) }
+func (r *Recorder) RecordTextureBuilt()           { r.add(func(s *Snapshot) { s.TexturesBuilt++ }) }
+func (r *Recorder) RecordTextureBuildFailure()    { r.add(func(s *Snapshot) { s.TextureBuildFailures++ }) }
+func (r *Recorder) RecordFDDupFailure()           { r.add(func(s *Snapshot) { s.FDDupFailures++ }) }
+func (r *Recorder) RecordUnsupportedFormat()      { r.add(func(s *Snapshot) { s.UnsupportedFormats++ }) }
+func (r *Recorder) RecordPaintableSwap()          { r.add(func(s *Snapshot) { s.PaintableSwaps++ }) }
 func (r *Recorder) RecordGTKWait(d time.Duration) { r.add(func(s *Snapshot) { s.GTKWaitCPU.Add(d) }) }
 func (r *Recorder) RecordImportCopyCPU(d time.Duration) {
 	r.add(func(s *Snapshot) { s.ImportCopyCPU.Add(d) })
@@ -195,6 +230,7 @@ func (r *Recorder) MaybeSnapshot(now time.Time, interval time.Duration) (Snapsho
 		runtime.ReadMemStats(&ms)
 		r.lastGCNum = ms.NumGC
 		r.lastPauseTotal = ms.PauseTotalNs
+		r.current = Snapshot{Backend: r.backend}
 		return Snapshot{}, false
 	}
 	if now.Sub(r.windowStart) < interval {
@@ -204,6 +240,9 @@ func (r *Recorder) MaybeSnapshot(now time.Time, interval time.Duration) (Snapsho
 	runtime.ReadMemStats(&ms)
 	snap := r.current
 	snap.Time = now
+	if snap.Backend == "" {
+		snap.Backend = r.backend
+	}
 	snap.Window = now.Sub(r.windowStart)
 	snap.GC = GCStats{
 		NumGC:        ms.NumGC,
@@ -216,7 +255,7 @@ func (r *Recorder) MaybeSnapshot(now time.Time, interval time.Duration) (Snapsho
 		NextGC:       ms.NextGC,
 		NumGoroutine: runtime.NumGoroutine(),
 	}
-	r.current = Snapshot{}
+	r.current = Snapshot{Backend: r.backend}
 	r.windowStart = now
 	r.lastGCNum = ms.NumGC
 	r.lastPauseTotal = ms.PauseTotalNs

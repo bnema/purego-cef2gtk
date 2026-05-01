@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+func TestNewViewWithOptionsRejectsInvalidBackendBeforeGTK(t *testing.T) {
+	t.Setenv(backendEnvVar, "invalid")
+	if got := NewViewWithOptions(ViewOptions{Backend: BackendGLArea}); got != nil {
+		t.Fatal("NewViewWithOptions returned view for invalid env backend")
+	}
+}
+
 func TestViewSizeScaleAndObservers(t *testing.T) {
 	v := &View{}
 	if w, h := v.Size(); w != 1 || h != 1 {
@@ -33,7 +40,8 @@ func TestNewViewWidgetGLAreaBasics(t *testing.T) {
 	if os.Getenv("PUREGO_CEF2GTK_LIVE_GTK_TEST") == "" {
 		t.Skip("requires live GTK runtime; set PUREGO_CEF2GTK_LIVE_GTK_TEST=1")
 	}
-	v := NewView()
+	t.Setenv(backendEnvVar, "glarea")
+	v := NewViewWithOptions(ViewOptions{Backend: BackendGLArea})
 	if v == nil {
 		t.Fatal("NewView returned nil")
 	}
@@ -42,6 +50,9 @@ func TestNewViewWidgetGLAreaBasics(t *testing.T) {
 			t.Errorf("Destroy: %v", err)
 		}
 	})
+	if got := v.Backend(); got != BackendGLArea {
+		t.Fatalf("Backend = %q, want %q", got, BackendGLArea)
+	}
 	if v.GLArea() == nil {
 		t.Fatalf("GLArea nil")
 	}

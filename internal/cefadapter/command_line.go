@@ -1,10 +1,19 @@
 package cefadapter
 
-import "github.com/bnema/purego-cef/cef"
+import (
+	"os"
+	"strings"
+
+	"github.com/bnema/purego-cef/cef"
+)
 
 const (
-	ozonePlatformSwitch = "ozone-platform"
-	useAngleSwitch      = "use-angle"
+	ozonePlatformSwitch  = "ozone-platform"
+	useAngleSwitch       = "use-angle"
+	useGLSwitch          = "use-gl"
+	enableFeaturesSwitch = "enable-features"
+
+	angleBackendEnvVar = "PUREGO_CEF2GTK_ANGLE_BACKEND"
 )
 
 // ConfigureWaylandGPUCommandLine configures CEF command-line switches required
@@ -13,14 +22,57 @@ func ConfigureWaylandGPUCommandLine(commandLine cef.CommandLine) {
 	if commandLine == nil {
 		return
 	}
-	// CEF's Linux OSR shared-texture path uses DMABUFs via ANGLE's EGL backend.
-	// Avoid Chromium's Vulkan path here: current CEF/Wayland logs warn that
-	// --ozone-platform=wayland is not compatible with Vulkan, and Chromium's
-	// Linux VAAPI decoder gates GL and Vulkan through different feature paths.
-	if !commandLine.HasSwitch(useAngleSwitch) {
-		commandLine.AppendSwitchWithValue(useAngleSwitch, "gl-egl")
+	angleBackend := normalizeAngleBackend(os.Getenv(angleBackendEnvVar))
+	if angleBackend != "none" {
+		effectiveAngleBackend := angleBackend
+		if commandLine.HasSwitch(useAngleSwitch) {
+			effectiveAngleBackend = normalizeExistingAngleBackend(commandLine.GetSwitchValue(useAngleSwitch))
+		} else {
+			commandLine.AppendSwitchWithValue(useAngleSwitch, angleBackend)
+		}
+		if effectiveAngleBackend != "none" && !commandLine.HasSwitch(useGLSwitch) {
+			commandLine.AppendSwitchWithValue(useGLSwitch, "angle")
+		}
+		if effectiveAngleBackend == "vulkan" {
+			features := mergeCommaTokens(
+				commandLine.GetSwitchValue(enableFeaturesSwitch),
+				"Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
+			)
+			commandLine.RemoveSwitch(enableFeaturesSwitch)
+			commandLine.AppendSwitchWithValue(enableFeaturesSwitch, features)
+		}
 	}
 	if !commandLine.HasSwitch(ozonePlatformSwitch) {
 		commandLine.AppendSwitchWithValue(ozonePlatformSwitch, "wayland")
 	}
+}
+
+func normalizeAngleBackend(value string) string {
+	normalized := normalizeExistingAngleBackend(value)
+	switch normalized {
+	case "vulkan", "none":
+		return normalized
+	default:
+		return "gl-egl"
+	}
+}
+
+func normalizeExistingAngleBackend(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func mergeCommaTokens(existing, required string) string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, list := range []string{existing, required} {
+		for _, token := range strings.Split(list, ",") {
+			token = strings.TrimSpace(token)
+			if token == "" || seen[token] {
+				continue
+			}
+			seen[token] = true
+			out = append(out, token)
+		}
+	}
+	return strings.Join(out, ",")
 }

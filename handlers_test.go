@@ -18,12 +18,22 @@ type fakeRenderQueue struct {
 	queued       bool
 }
 
-func (f *fakeRenderQueue) ImportCopyAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
+type fakeAsyncRenderQueue struct {
+	fakeRenderQueue
+	asyncCalled bool
+}
+
+func (f *fakeRenderQueue) ImportAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
 	f.importCalled = true
 	if f.err != nil {
 		return gtkgl.QueuedFrame{}, f.err
 	}
 	return gtkgl.QueuedFrame{}, nil
+}
+
+func (f *fakeAsyncRenderQueue) ImportAndQueueAsync(*cef.AcceleratedPaintInfo, func(error)) error {
+	f.asyncCalled = true
+	return f.err
 }
 func (f *fakeRenderQueue) QueueRender()                 { f.queued = true }
 func (f *fakeRenderQueue) InitializeOnGTKThread() error { return nil }
@@ -76,6 +86,21 @@ func TestOnAcceleratedPaintQueuesRenderOnSuccess(t *testing.T) {
 	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
 	if !f.importCalled || !f.queued {
 		t.Fatalf("importCalled=%v queued=%v, want both true", f.importCalled, f.queued)
+	}
+}
+
+func TestOnAcceleratedPaintUsesAsyncRendererWhenAvailable(t *testing.T) {
+	f := &fakeAsyncRenderQueue{}
+	h := &renderHandler{renderer: f, diag: newDiagnosticsRecorder()}
+	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+	if !f.asyncCalled {
+		t.Fatal("async renderer was not used")
+	}
+	if f.importCalled {
+		t.Fatal("sync import path should not run for async renderer")
+	}
+	if !f.queued {
+		t.Fatal("render was not queued after async import scheduling")
 	}
 }
 

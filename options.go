@@ -1,6 +1,92 @@
 package cef2gtk
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+// Backend selects the GTK presentation backend used by a View.
+type Backend string
+
+const (
+	// BackendAuto tries the GDK DMABUF backend first and falls back to GLArea
+	// when GDK DMABUF construction is unavailable.
+	BackendAuto Backend = "auto"
+	// BackendGDKDMABUF presents CEF DMABUF frames as GDK textures.
+	BackendGDKDMABUF Backend = "gdk-dmabuf"
+	// BackendGLArea presents CEF DMABUF frames through GtkGLArea/EGL/OpenGL.
+	BackendGLArea Backend = "glarea"
+)
+
+const backendEnvVar = "PUREGO_CEF2GTK_BACKEND"
+
+// String returns the environment/API spelling for b.
+func (b Backend) String() string {
+	if b == "" {
+		return string(BackendAuto)
+	}
+	return string(b)
+}
+
+// ViewOptions configures NewViewWithOptions.
+type ViewOptions struct {
+	// Backend selects the renderer backend. Empty defaults to BackendAuto.
+	Backend Backend
+	// Profile optionally enables development render profiling during construction.
+	Profile ProfileOptions
+}
+
+// Validate verifies that the requested backend is supported by the option schema.
+func (o ViewOptions) Validate() error {
+	_, err := normalizeBackend(o.Backend)
+	return err
+}
+
+func (o ViewOptions) normalized() (ViewOptions, error) {
+	backend, err := normalizeBackend(o.Backend)
+	if err != nil {
+		return ViewOptions{}, err
+	}
+	o.Backend = backend
+	return o, nil
+}
+
+func normalizeBackend(backend Backend) (Backend, error) {
+	if backend == "" {
+		return BackendAuto, nil
+	}
+	parsed, ok := parseBackend(string(backend))
+	if !ok {
+		return "", fmt.Errorf("unsupported backend %q", backend)
+	}
+	return parsed, nil
+}
+
+func parseBackend(value string) (Backend, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", string(BackendAuto):
+		return BackendAuto, true
+	case string(BackendGDKDMABUF):
+		return BackendGDKDMABUF, true
+	case string(BackendGLArea):
+		return BackendGLArea, true
+	default:
+		return "", false
+	}
+}
+
+func backendFromEnv() (Backend, bool, error) {
+	value, ok := os.LookupEnv(backendEnvVar)
+	if !ok {
+		return "", false, nil
+	}
+	backend, valid := parseBackend(value)
+	if !valid {
+		return "", true, fmt.Errorf("unsupported %s %q", backendEnvVar, value)
+	}
+	return backend, true, nil
+}
 
 // RenderingMode selects the rendering pipeline used by the GTK bridge.
 type RenderingMode string

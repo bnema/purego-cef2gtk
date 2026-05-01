@@ -1,0 +1,652 @@
+// Package gtkgdk renders CEF accelerated-paint DMABUF frames through GDK textures.
+package gtkgdk
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/bnema/purego-cef/cef"
+	"github.com/bnema/purego-cef2gtk/internal/cefadapter"
+	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
+	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
+	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/glib"
+	"github.com/bnema/puregotk/v4/gtk"
+)
+
+var (
+	ErrNilRenderer              = errors.New("nil gdk dmabuf renderer")
+	ErrMissingPicture           = errors.New("missing gtk picture")
+	ErrNoDisplay                = errors.New("gdk display unavailable")
+	ErrBuilderUnavailable       = errors.New("gdk dmabuf texture builder unavailable")
+	ErrDmabufFormatsUnavailable = errors.New("gdk dmabuf formats unavailable")
+	ErrUnsupportedFormat        = errors.New("unsupported gdk dmabuf format")
+	ErrTextureBuildFailed       = errors.New("gdk dmabuf texture build failed")
+)
+
+type dmabufFormatSet interface {
+	Contains(uint32, uint64) bool
+}
+
+// Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters.
+type Diagnostics struct {
+	TexturesBuilt        uint64
+	TextureBuildFailures uint64
+	FDDupFailures        uint64
+	UnsupportedFormats   uint64
+	PaintableSwaps       uint64
+}
+
+type dmabufTextureBuilder interface {
+	SetDisplay(*gdk.Display)
+	SetWidth(uint)
+	SetHeight(uint)
+	SetFourcc(uint32)
+	SetModifier(uint64)
+	SetPremultiplied(bool)
+	SetNPlanes(uint)
+	SetFd(uint, int)
+	SetStride(uint, uint)
+	SetOffset(uint, uint)
+	Build(*glib.DestroyNotify, uintptr) (*gdk.Texture, error)
+}
+
+type ownedTexture struct {
+	texture *gdk.Texture
+	fd      int
+}
+
+type ownedPlane struct {
+	FD     int
+	Stride uint32
+	Offset uint64
+	Size   uint64
+}
+
+type ownedFrame struct {
+	CodedSize   dmabuf.Size
+	VisibleRect dmabuf.Rect
+	ContentRect dmabuf.Rect
+	SourceSize  dmabuf.Size
+	Format      dmabuf.FourCC
+	Modifier    uint64
+	Planes      []ownedPlane
+	onError     func(error)
+}
+
+func (f *ownedFrame) borrowed() dmabuf.BorrowedFrame {
+	if f == nil {
+		return dmabuf.BorrowedFrame{}
+	}
+	planes := make([]dmabuf.Plane, len(f.Planes))
+	for i, plane := range f.Planes {
+		planes[i] = dmabuf.Plane{FD: plane.FD, Stride: plane.Stride, Offset: plane.Offset, Size: plane.Size}
+	}
+	return dmabuf.BorrowedFrame{
+		CodedSize:   f.CodedSize,
+		VisibleRect: f.VisibleRect,
+		ContentRect: f.ContentRect,
+		SourceSize:  f.SourceSize,
+		Format:      f.Format,
+		Modifier:    f.Modifier,
+		Planes:      planes,
+	}
+}
+
+// Renderer owns a GtkPicture presenter and imports callback-scoped CEF DMABUFs
+// as GdkDmabufTexture instances. The initial implementation supports only
+// single-plane RGB frames. Duplicated FDs are handed to GTK and closed by
+// closeDmabufFD when the resulting texture is finalized.
+type Renderer struct {
+	widget  *gtk.Widget
+	picture *gtk.Picture
+	offload *gtk.GraphicsOffload
+
+	display *gdk.Display
+	formats dmabufFormatSet
+	builder dmabufTextureBuilder
+	current *ownedTexture
+
+	pendingMu        sync.Mutex
+	pendingFrame     *ownedFrame
+	pendingScheduled bool
+
+	dupFD   func(int) (int, error)
+	closeFD func(int) error
+
+	texturesBuilt        atomic.Uint64
+	textureBuildFailures atomic.Uint64
+	fdDupFailures        atomic.Uint64
+	unsupportedFormats   atomic.Uint64
+	paintableSwaps       atomic.Uint64
+	frameTraces          atomic.Uint64
+
+	profiler atomic.Pointer[internalprofile.Recorder]
+}
+
+// NewRenderer creates a GtkPicture-backed GDK DMABUF renderer. When useOffload
+// is true and GtkGraphicsOffload can be constructed, Widget returns the offload
+// wrapper; otherwise it returns the picture widget directly.
+func NewRenderer(useOffload bool) (*Renderer, error) {
+	picture := gtk.NewPicture()
+	if picture == nil {
+		return nil, ErrMissingPicture
+	}
+	picture.SetCanShrink(true)
+	picture.SetContentFit(gtk.ContentFitContainValue)
+	picture.SetHexpand(true)
+	picture.SetVexpand(true)
+	picture.SetSizeRequest(1, 1)
+
+	widget := &picture.Widget
+	var offload *gtk.GraphicsOffload
+	if useOffload {
+		offload = gtk.NewGraphicsOffload(widget)
+		if offload != nil {
+			offload.SetEnabled(gtk.GraphicsOffloadEnabledValue)
+			offload.SetHexpand(true)
+			offload.SetVexpand(true)
+			offload.SetSizeRequest(1, 1)
+			widget = &offload.Widget
+		}
+	}
+
+	builder, err := newTextureBuilder()
+	if err != nil {
+		return nil, err
+	}
+	return &Renderer{
+		widget:  widget,
+		picture: picture,
+		offload: offload,
+		builder: builder,
+		dupFD:   dupFDClOExec,
+		closeFD: unix.Close,
+	}, nil
+}
+
+func newTextureBuilder() (builder dmabufTextureBuilder, retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			builder = nil
+			retErr = fmt.Errorf("%w: %v", ErrBuilderUnavailable, r)
+		}
+	}()
+	builder = gdk.NewDmabufTextureBuilder()
+	if builder == nil {
+		return nil, ErrBuilderUnavailable
+	}
+	return builder, nil
+}
+
+// Widget returns the widget that should be packed into GTK containers.
+func (r *Renderer) Widget() *gtk.Widget {
+	if r == nil {
+		return nil
+	}
+	return r.widget
+}
+
+// Picture returns the GtkPicture used as the paintable presenter.
+func (r *Renderer) Picture() *gtk.Picture {
+	if r == nil {
+		return nil
+	}
+	return r.picture
+}
+
+// InitializeOnGTKThread resolves the GDK display and builder on the GTK thread.
+func (r *Renderer) InitializeOnGTKThread() error {
+	if r == nil {
+		return ErrNilRenderer
+	}
+	if r.builder == nil {
+		builder, err := newTextureBuilder()
+		if err != nil {
+			return err
+		}
+		r.builder = builder
+	}
+	if r.display != nil {
+		return nil
+	}
+	if r.widget != nil {
+		r.display = r.widget.GetDisplay()
+	}
+	if r.display == nil {
+		r.display = gdk.DisplayGetDefault()
+	}
+	if r.display == nil {
+		return ErrNoDisplay
+	}
+	if r.formats == nil {
+		r.formats = r.display.GetDmabufFormats()
+	}
+	if r.formats == nil {
+		return ErrDmabufFormatsUnavailable
+	}
+	return nil
+}
+
+// ImportAndQueueAsync duplicates callback-scoped CEF DMABUF FDs before the CEF
+// callback returns, then posts the GDK texture import/swap to the GTK main
+// thread. This mirrors Dumber's old OnPaint staging model: CEF never waits for
+// GTK, and GTK always consumes an owned, callback-independent frame.
+func (r *Renderer) ImportAndQueueAsync(info *cef.AcceleratedPaintInfo, onError func(error)) error {
+	if r == nil {
+		return ErrNilRenderer
+	}
+	frame, err := cefadapter.BorrowedFrameFromAcceleratedPaint(info)
+	if err != nil {
+		return err
+	}
+	owned, err := r.duplicateFrame(frame)
+	if err != nil {
+		return err
+	}
+	owned.onError = onError
+	r.enqueueOwnedFrame(owned)
+	return nil
+}
+
+// ImportAndQueueOnGTKThread is kept for the GLArea backend contract and tests.
+// Prefer ImportAndQueueAsync for GDK DMABUF so CEF paint callbacks do not block
+// on the GTK main loop.
+func (r *Renderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (queued gtkgl.QueuedFrame, retErr error) {
+	start := time.Now()
+	frame, err := cefadapter.BorrowedFrameFromAcceleratedPaint(info)
+	if err != nil {
+		return gtkgl.QueuedFrame{}, err
+	}
+	owned, err := r.duplicateFrame(frame)
+	if err != nil {
+		return gtkgl.QueuedFrame{}, err
+	}
+	gtkgl.RunOnGTKThreadSync(func() {
+		if r == nil {
+			retErr = ErrNilRenderer
+			return
+		}
+		r.recordGTKWait(time.Since(start))
+		defer func(begin time.Time) { r.recordImportCopyCPU(time.Since(begin)) }(time.Now())
+		retErr = r.importAndSwapOwnedFrame(owned)
+	})
+	if retErr != nil {
+		r.releaseOwnedFrame(owned)
+	}
+	return gtkgl.QueuedFrame{}, retErr
+}
+
+func (r *Renderer) enqueueOwnedFrame(frame *ownedFrame) {
+	if r == nil || frame == nil {
+		r.releaseOwnedFrame(frame)
+		return
+	}
+	r.pendingMu.Lock()
+	if r.pendingFrame != nil {
+		r.releaseOwnedFrame(r.pendingFrame)
+	}
+	r.pendingFrame = frame
+	schedule := !r.pendingScheduled
+	if schedule {
+		r.pendingScheduled = true
+	}
+	r.pendingMu.Unlock()
+	if !schedule {
+		return
+	}
+	cb := glib.SourceOnceFunc(func(uintptr) {
+		r.importPendingFrameOnGTKThread()
+	})
+	glib.IdleAddOnce(&cb, 0)
+}
+
+func (r *Renderer) importPendingFrameOnGTKThread() {
+	if r == nil {
+		return
+	}
+	r.pendingMu.Lock()
+	frame := r.pendingFrame
+	r.pendingFrame = nil
+	r.pendingScheduled = false
+	r.pendingMu.Unlock()
+	if frame == nil {
+		return
+	}
+	start := time.Now()
+	defer func(begin time.Time) { r.recordImportCopyCPU(time.Since(begin)) }(start)
+	if err := r.importAndSwapOwnedFrame(frame); err != nil {
+		r.releaseOwnedFrame(frame)
+		if frame.onError != nil {
+			frame.onError(err)
+		}
+	}
+}
+
+func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame) error {
+	if r == nil {
+		return ErrNilRenderer
+	}
+	if err := r.InitializeOnGTKThread(); err != nil {
+		return err
+	}
+	built, err := r.buildTextureFromOwnedFrame(frame)
+	if err != nil {
+		return err
+	}
+	if built == nil || built.texture == nil || built.texture.GoPointer() == 0 {
+		if built != nil {
+			r.releaseOwnedTexture(built)
+		}
+		return ErrTextureBuildFailed
+	}
+
+	if r.picture == nil {
+		r.releaseOwnedTexture(r.current)
+		r.current = nil
+		r.releaseOwnedTexture(built)
+		return ErrMissingPicture
+	}
+	old := r.current
+	r.picture.SetPaintable(built.texture)
+	r.current = built
+	r.recordPaintableSwap()
+	r.releaseOwnedTexture(old)
+	return nil
+}
+
+func (r *Renderer) duplicateFrame(frame dmabuf.BorrowedFrame) (_ *ownedFrame, retErr error) {
+	if r == nil {
+		return nil, ErrNilRenderer
+	}
+	if err := frame.Validate(); err != nil {
+		return nil, err
+	}
+	dup := r.dupFD
+	if dup == nil {
+		dup = dupFDClOExec
+	}
+	owned := &ownedFrame{
+		CodedSize:   frame.CodedSize,
+		VisibleRect: frame.VisibleRect,
+		ContentRect: frame.ContentRect,
+		SourceSize:  frame.SourceSize,
+		Format:      frame.Format,
+		Modifier:    frame.Modifier,
+		Planes:      make([]ownedPlane, len(frame.Planes)),
+	}
+	for i := range owned.Planes {
+		owned.Planes[i].FD = -1
+	}
+	defer func() {
+		if retErr != nil {
+			r.releaseOwnedFrame(owned)
+		}
+	}()
+	for i, plane := range frame.Planes {
+		ownedFD, err := dup(plane.FD)
+		if err != nil {
+			r.recordFDDupFailure()
+			return nil, err
+		}
+		owned.Planes[i] = ownedPlane{FD: ownedFD, Stride: plane.Stride, Offset: plane.Offset, Size: plane.Size}
+	}
+	return owned, nil
+}
+
+func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTexture, retErr error) {
+	if r == nil {
+		return nil, ErrNilRenderer
+	}
+	if r.builder == nil {
+		return nil, ErrBuilderUnavailable
+	}
+	if frame == nil {
+		return nil, dmabuf.ErrInvalidPlaneFD
+	}
+	borrowed := frame.borrowed()
+	if err := borrowed.Validate(); err != nil {
+		return nil, err
+	}
+	gdkFormat := gdkTextureFormat(borrowed.Format)
+	if r.formats != nil && !r.formats.Contains(uint32(gdkFormat), borrowed.Modifier) {
+		r.recordUnsupportedFormat()
+		return nil, fmt.Errorf("%w: %s as %s modifier 0x%x", ErrUnsupportedFormat, borrowed.Format, gdkFormat, borrowed.Modifier)
+	}
+	r.traceFrame(borrowed, gdkFormat)
+	closeFD := r.closeFD
+	if closeFD == nil {
+		closeFD = unix.Close
+	}
+
+	ownedFD := borrowed.Planes[0].FD
+	textureOwnsFD := false
+	defer func() {
+		if !textureOwnsFD {
+			_ = closeFD(ownedFD)
+			frame.Planes[0].FD = -1
+		}
+	}()
+
+	plane := borrowed.Planes[0]
+	r.builder.SetWidth(uint(borrowed.CodedSize.Width))
+	r.builder.SetHeight(uint(borrowed.CodedSize.Height))
+	r.builder.SetFourcc(uint32(gdkFormat))
+	r.builder.SetModifier(borrowed.Modifier)
+	r.builder.SetPremultiplied(false)
+	r.builder.SetNPlanes(1)
+	if r.display != nil {
+		r.builder.SetDisplay(r.display)
+	}
+	r.builder.SetFd(0, ownedFD)
+	r.builder.SetStride(0, uint(plane.Stride))
+	r.builder.SetOffset(0, uint(plane.Offset))
+
+	defer func() {
+		if p := recover(); p != nil {
+			r.recordTextureBuildFailure()
+			built = nil
+			retErr = fmt.Errorf("%w: %v", ErrTextureBuildFailed, p)
+		}
+	}()
+	// Do not pass a Go DestroyNotify callback here. GDK may finalize DMABUF
+	// textures from renderer/finalizer contexts, and callback lifetime/threading
+	// through purego is fragile enough to corrupt Go stack scanning. Instead the
+	// renderer owns each duplicated FD alongside its GdkTexture reference after
+	// Build consumes it, then closes it when that texture is swapped out or
+	// invalidated.
+	texture, err := r.builder.Build(nil, 0)
+	if err != nil {
+		r.recordTextureBuildFailure()
+		return nil, fmt.Errorf("%w: %v", ErrTextureBuildFailed, err)
+	}
+	if texture == nil || texture.GoPointer() == 0 {
+		r.recordTextureBuildFailure()
+		return nil, ErrTextureBuildFailed
+	}
+	textureOwnsFD = true
+	frame.Planes[0].FD = -1
+	r.recordTextureBuilt()
+	return &ownedTexture{texture: texture, fd: ownedFD}, nil
+}
+
+// QueueRender is a no-op for GtkPicture; GTK schedules painting for paintable changes.
+func (r *Renderer) QueueRender() {}
+
+// RenderQueuedOnGTKThread is a no-op for GtkPicture; GTK/GSK renders the paintable.
+func (r *Renderer) RenderQueuedOnGTKThread() error { return nil }
+
+// InvalidateOnGTKThread drops the renderer's current texture reference without
+// requiring a GL context. The GtkPicture may still hold its own paintable ref.
+func (r *Renderer) InvalidateOnGTKThread() {
+	if r == nil {
+		return
+	}
+	r.pendingMu.Lock()
+	pending := r.pendingFrame
+	r.pendingFrame = nil
+	r.pendingScheduled = false
+	r.pendingMu.Unlock()
+	r.releaseOwnedFrame(pending)
+	r.releaseOwnedTexture(r.current)
+	r.current = nil
+	r.display = nil
+	r.formats = nil
+}
+
+func (r *Renderer) releaseOwnedFrame(frame *ownedFrame) {
+	if r == nil || frame == nil {
+		return
+	}
+	closeFD := r.closeFD
+	if closeFD == nil {
+		closeFD = unix.Close
+	}
+	for i := range frame.Planes {
+		if frame.Planes[i].FD >= 0 {
+			_ = closeFD(frame.Planes[i].FD)
+			frame.Planes[i].FD = -1
+		}
+	}
+}
+
+func (r *Renderer) releaseOwnedTexture(owned *ownedTexture) {
+	if r == nil || owned == nil {
+		return
+	}
+	if owned.texture != nil {
+		owned.texture.Unref()
+		runtime.KeepAlive(owned.texture)
+	}
+	if owned.fd >= 0 {
+		closeFD := r.closeFD
+		if closeFD == nil {
+			closeFD = unix.Close
+		}
+		_ = closeFD(owned.fd)
+		owned.fd = -1
+	}
+}
+
+func gdkTextureFormat(format dmabuf.FourCC) dmabuf.FourCC {
+	// CEF accelerated OSR frames are page content, not intentionally transparent
+	// UI layers. Import them as opaque for GSK so a zero/undefined alpha channel
+	// cannot make valid content render as a black/transparent rectangle.
+	switch format {
+	case dmabuf.FormatARGB8888:
+		return dmabuf.FormatXRGB8888
+	case dmabuf.FormatABGR8888:
+		return dmabuf.FormatXBGR8888
+	default:
+		return format
+	}
+}
+
+func (r *Renderer) traceFrame(frame dmabuf.BorrowedFrame, gdkFormat dmabuf.FourCC) {
+	if os.Getenv("PUREGO_CEF2GTK_GDK_TRACE") == "" || r == nil || r.frameTraces.Add(1) > 8 {
+		return
+	}
+	plane := frame.Planes[0]
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-gdk-dmabuf frame coded=%dx%d visible=%dx%d+%d+%d content=%dx%d+%d+%d source=%dx%d cef_format=%s gdk_format=%s modifier=0x%x fd=%d stride=%d offset=%d size=%d\n",
+		frame.CodedSize.Width, frame.CodedSize.Height,
+		frame.VisibleRect.Width, frame.VisibleRect.Height, frame.VisibleRect.X, frame.VisibleRect.Y,
+		frame.ContentRect.Width, frame.ContentRect.Height, frame.ContentRect.X, frame.ContentRect.Y,
+		frame.SourceSize.Width, frame.SourceSize.Height,
+		frame.Format, gdkFormat, frame.Modifier, plane.FD, plane.Stride, plane.Offset, plane.Size)
+}
+
+// SetProfiler installs a development profile recorder.
+func (r *Renderer) SetProfiler(p *internalprofile.Recorder) {
+	if r == nil {
+		return
+	}
+	r.profiler.Store(p)
+}
+
+// Close releases references owned by the renderer.
+func (r *Renderer) Close() { r.InvalidateOnGTKThread() }
+
+// Diagnostics returns GDK DMABUF renderer-specific counters.
+func (r *Renderer) Diagnostics() Diagnostics {
+	if r == nil {
+		return Diagnostics{}
+	}
+	return Diagnostics{
+		TexturesBuilt:        r.texturesBuilt.Load(),
+		TextureBuildFailures: r.textureBuildFailures.Load(),
+		FDDupFailures:        r.fdDupFailures.Load(),
+		UnsupportedFormats:   r.unsupportedFormats.Load(),
+		PaintableSwaps:       r.paintableSwaps.Load(),
+	}
+}
+
+func dupFDClOExec(fd int) (int, error) {
+	dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 3)
+	if err != nil {
+		return -1, err
+	}
+	return dup, nil
+}
+
+func (r *Renderer) profileRecorder() *internalprofile.Recorder {
+	if r == nil {
+		return nil
+	}
+	return r.profiler.Load()
+}
+
+func (r *Renderer) recordGTKWait(d time.Duration) {
+	if p := r.profileRecorder(); p != nil {
+		p.RecordGTKWait(d)
+	}
+}
+
+func (r *Renderer) recordImportCopyCPU(d time.Duration) {
+	if p := r.profileRecorder(); p != nil {
+		p.RecordImportCopyCPU(d)
+	}
+}
+
+func (r *Renderer) recordTextureBuilt() {
+	r.texturesBuilt.Add(1)
+	if p := r.profileRecorder(); p != nil {
+		p.RecordTextureBuilt()
+	}
+}
+
+func (r *Renderer) recordTextureBuildFailure() {
+	r.textureBuildFailures.Add(1)
+	if p := r.profileRecorder(); p != nil {
+		p.RecordTextureBuildFailure()
+	}
+}
+
+func (r *Renderer) recordFDDupFailure() {
+	r.fdDupFailures.Add(1)
+	if p := r.profileRecorder(); p != nil {
+		p.RecordFDDupFailure()
+	}
+}
+
+func (r *Renderer) recordUnsupportedFormat() {
+	r.unsupportedFormats.Add(1)
+	if p := r.profileRecorder(); p != nil {
+		p.RecordUnsupportedFormat()
+	}
+}
+
+func (r *Renderer) recordPaintableSwap() {
+	r.paintableSwaps.Add(1)
+	if p := r.profileRecorder(); p != nil {
+		p.RecordPaintableSwap()
+	}
+}

@@ -6,6 +6,14 @@ import (
 	"testing"
 )
 
+func TestViewDiagnosticsIncludesBackend(t *testing.T) {
+	v := &View{backend: BackendGDKDMABUF, diag: newDiagnosticsRecorder()}
+	d := v.Diagnostics()
+	if d.Backend != "gdk-dmabuf" {
+		t.Fatalf("Backend = %q, want gdk-dmabuf", d.Backend)
+	}
+}
+
 func TestDiagnosticsRecorderSnapshot(t *testing.T) {
 	r := newDiagnosticsRecorder()
 	r.RecordAcceleratedPaint()
