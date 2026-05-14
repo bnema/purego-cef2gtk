@@ -21,18 +21,45 @@ func TestViewSizeScaleAndObservers(t *testing.T) {
 		t.Fatalf("initial scale=%v, want 1", got)
 	}
 
+	called := false
 	var gotW, gotH int32
-	remove := v.AddSizeObserver(func(w, h int32) { gotW, gotH = w, h })
+	remove := v.AddSizeObserver(func(w, h int32) {
+		called = true
+		gotW, gotH = w, h
+	})
+	if called {
+		t.Fatal("observer called for synthetic fallback size")
+	}
+
 	v.cachedWidth.Store(100)
 	v.cachedHeight.Store(50)
 	v.emitSizeHooks(100, 50)
-	if gotW != 100 || gotH != 50 {
-		t.Fatalf("observer size=(%d,%d), want (100,50)", gotW, gotH)
+	if !called || gotW != 100 || gotH != 50 {
+		t.Fatalf("observer size=(%d,%d) called=%v, want (100,50) true", gotW, gotH, called)
 	}
 	remove()
 	v.emitSizeHooks(200, 75)
 	if gotW != 100 || gotH != 50 {
 		t.Fatalf("observer called after remove: (%d,%d)", gotW, gotH)
+	}
+}
+
+func TestAddSizeObserverImmediatelyCallsWithObservedRealSizeIncludingOneByOne(t *testing.T) {
+	v := &View{}
+	v.cachedWidth.Store(1)
+	v.cachedHeight.Store(1)
+
+	called := false
+	remove := v.AddSizeObserver(func(w, h int32) {
+		called = true
+		if w != 1 || h != 1 {
+			t.Fatalf("observer size=(%d,%d), want (1,1)", w, h)
+		}
+	})
+	defer remove()
+
+	if !called {
+		t.Fatal("observer not called for real observed 1x1 size")
 	}
 }
 

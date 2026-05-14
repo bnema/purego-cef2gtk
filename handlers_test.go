@@ -149,6 +149,17 @@ func TestRenderSignalErrorHookAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestGetViewRectFallsBackToOneByOneWithoutObservedSize(t *testing.T) {
+	h := &renderHandler{view: &View{}}
+	rect := cef.Rect{}
+
+	h.GetViewRect(nil, &rect)
+
+	if rect.Width != 1 || rect.Height != 1 {
+		t.Fatalf("rect=(%d,%d), want (1,1)", rect.Width, rect.Height)
+	}
+}
+
 func TestGetScreenInfoUsesViewSizeAndScale(t *testing.T) {
 	v := &View{}
 	v.cachedWidth.Store(640)
