@@ -136,6 +136,15 @@ func newGDKDMABUFView(profile ProfileOptions) *View {
 	return v
 }
 
+func (v *View) observedSize() (width, height int32, ok bool) {
+	if v == nil {
+		return 0, 0, false
+	}
+	width = v.cachedWidth.Load()
+	height = v.cachedHeight.Load()
+	return width, height, width > 0 && height > 0
+}
+
 func (v *View) connectRenderSignal() {
 	if v == nil || v.widget == nil || v.renderer == nil {
 		return
@@ -244,7 +253,9 @@ func (v *View) DeviceScaleFactor() float32 {
 
 // AddSizeObserver registers a callback invoked on the GTK thread when the view
 // observes a positive size change. It returns a function that unregisters the
-// observer. Register and unregister from the GTK thread.
+// observer. If a real positive size has already been observed, the callback is
+// invoked immediately with that size; the synthetic Size() fallback is not
+// emitted as an observer event. Register and unregister from the GTK thread.
 func (v *View) AddSizeObserver(fn func(width, height int32)) func() {
 	if v == nil || fn == nil {
 		return func() {}
@@ -257,8 +268,10 @@ func (v *View) AddSizeObserver(fn func(width, height int32)) func() {
 	id := v.nextSizeHookID
 	v.sizeHooks[id] = fn
 	v.sizeHooksMu.Unlock()
-	width, height := v.Size()
-	fn(width, height)
+	width, height, ok := v.observedSize()
+	if ok {
+		fn(width, height)
+	}
 	return func() {
 		v.sizeHooksMu.Lock()
 		delete(v.sizeHooks, id)
