@@ -40,7 +40,15 @@ func (v *View) RenderHandler(hooks Hooks) cef.RenderHandler {
 }
 
 func (h *renderHandler) GetAccessibilityHandler() cef.AccessibilityHandler { return nil }
-func (h *renderHandler) GetRootScreenRect(cef.Browser, *cef.Rect) int32    { return 0 }
+func (h *renderHandler) GetRootScreenRect(_ cef.Browser, rect *cef.Rect) int32 {
+	if rect == nil || h == nil || h.view == nil {
+		return 0
+	}
+	rect.X, rect.Y = 0, 0
+	rect.Width, rect.Height = h.view.osrViewRectSize()
+	h.view.traceScreenGeometryCallback("root-screen-rect", 0, 0, true)
+	return 1
+}
 func (h *renderHandler) GetViewRect(_ cef.Browser, rect *cef.Rect) {
 	if rect == nil {
 		return
@@ -50,17 +58,30 @@ func (h *renderHandler) GetViewRect(_ cef.Browser, rect *cef.Rect) {
 		rect.Width, rect.Height = 1, 1
 		return
 	}
-	rect.Width, rect.Height = h.view.cachedSize()
+	rect.Width, rect.Height = h.view.osrViewRectSize()
+	h.view.traceViewRect(rect.Width, rect.Height)
 }
-func (h *renderHandler) GetScreenPoint(cef.Browser, int32, int32, *int32, *int32) int32 { return 0 }
+func (h *renderHandler) GetScreenPoint(_ cef.Browser, viewX, viewY int32, screenX, screenY *int32) int32 {
+	if screenX == nil || screenY == nil || h == nil || h.view == nil {
+		return 0
+	}
+	// Wayland does not expose stable global screen coordinates to clients. CEF's
+	// OSR callbacks still need a consistent coordinate space for hit-testing and
+	// popup placement. Use a view-local root screen with device-pixel output for
+	// Linux as required by CefRenderHandler::GetScreenPoint.
+	*screenX, *screenY = h.view.osrScreenPoint(viewX, viewY)
+	h.view.traceScreenGeometryCallback("screen-point", viewX, viewY, true)
+	return 1
+}
 func (h *renderHandler) GetScreenInfo(_ cef.Browser, info *cef.ScreenInfo) int32 {
 	if info == nil || h.view == nil {
 		return 0
 	}
-	width, height := h.view.cachedSize()
+	width, height := h.view.osrViewRectSize()
 	rect := cef.Rect{X: 0, Y: 0, Width: width, Height: height}
 	si := cef.NewScreenInfo()
-	si.DeviceScaleFactor = h.view.DeviceScaleFactor()
+	si.DeviceScaleFactor = h.view.osrScreenInfoScale()
+	h.view.traceScreenInfo(width, height, si.DeviceScaleFactor)
 	si.Depth = 24
 	si.DepthPerComponent = 8
 	si.Rect = rect

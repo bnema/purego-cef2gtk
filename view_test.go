@@ -20,6 +20,10 @@ func TestViewSizeScaleAndObservers(t *testing.T) {
 	if got := v.DeviceScaleFactor(); got != 1 {
 		t.Fatalf("initial scale=%v, want 1", got)
 	}
+	v.storeObservedScale(1.2)
+	if got := v.DeviceScaleFactor(); got != 1.2 {
+		t.Fatalf("stored fractional scale=%v, want 1.2", got)
+	}
 
 	called := false
 	var gotW, gotH int32

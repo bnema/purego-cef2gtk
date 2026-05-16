@@ -26,7 +26,18 @@ Environment overrides:
 ```sh
 PUREGO_CEF2GTK_BACKEND=auto|gdk-dmabuf|glarea
 PUREGO_CEF2GTK_ANGLE_BACKEND=vulkan|gl-egl|none
+PUREGO_CEF2GTK_OSR_BACKING_SCALE=auto|on|off
 ```
+
+`PUREGO_CEF2GTK_OSR_BACKING_SCALE=auto` enables the Linux accelerated-OSR
+HiDPI compatibility path only when the GTK surface scale is greater than 1. In
+that mode CEF receives a device-sized OSR view rect with a 1x screen scale,
+because current CEF shared-texture OSR builds can otherwise report a fractional
+`device_scale_factor` while still emitting 1x/logical DMABUF frames. Applications
+that call `BrowserHost.SetZoomLevel` should divide their page zoom by
+`cef2gtk.OSRBackingScaleFactorForScale(float64(view.DeviceScaleFactor()))` before
+converting it to CEF's logarithmic zoom level; this keeps the page's CSS viewport
+at the GTK logical size while the OSR backing remains device-sized.
 
 Recommended local checks:
 
@@ -59,7 +70,7 @@ client := cef.NewClient(myClient{render: view.RenderHandler(cef2gtk.Hooks{})})
 cef.BrowserHostCreateBrowser(&info, client, "https://example.com/", &settings, nil, nil)
 
 // In OnAfterCreated(browser cef.Browser), attach the BrowserHost:
-_ = view.AttachInput(browser.GetHost(), cef2gtk.InputOptions{Scale: 1})
+_ = view.AttachInput(browser.GetHost(), cef2gtk.InputOptions{Scale: 0})
 ```
 
 See `examples/simple-browser` for a complete accelerated-only GTK+CEF setup.

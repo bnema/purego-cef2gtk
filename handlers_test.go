@@ -160,21 +160,118 @@ func TestGetViewRectFallsBackToOneByOneWithoutObservedSize(t *testing.T) {
 	}
 }
 
-func TestGetScreenInfoUsesViewSizeAndScale(t *testing.T) {
+func TestScreenGeometryUsesViewLocalRoot(t *testing.T) {
+	t.Setenv(osrBackingScaleEnvVar, "")
 	v := &View{}
 	v.cachedWidth.Store(640)
 	v.cachedHeight.Store(480)
-	v.scale.Store(2)
+	h := &renderHandler{view: v}
+
+	var root cef.Rect
+	if ok := h.GetRootScreenRect(nil, &root); ok != 1 {
+		t.Fatalf("GetRootScreenRect returned %d, want 1", ok)
+	}
+	if root.X != 0 || root.Y != 0 || root.Width != 640 || root.Height != 480 {
+		t.Fatalf("root rect=%+v, want 640x480 at origin", root)
+	}
+
+	var screenX, screenY int32
+	if ok := h.GetScreenPoint(nil, 123, 456, &screenX, &screenY); ok != 1 {
+		t.Fatalf("GetScreenPoint returned %d, want 1", ok)
+	}
+	if screenX != 123 || screenY != 456 {
+		t.Fatalf("screen point=%d,%d, want 123,456", screenX, screenY)
+	}
+}
+
+func TestScreenPointScalesCoordinatesWithoutSizeClamping(t *testing.T) {
+	t.Setenv(osrBackingScaleEnvVar, "")
+	v := &View{}
+	v.storeObservedScale(1.25)
+	h := &renderHandler{view: v}
+
+	var screenX, screenY int32
+	if ok := h.GetScreenPoint(nil, 0, -2, &screenX, &screenY); ok != 1 {
+		t.Fatalf("GetScreenPoint returned %d, want 1", ok)
+	}
+	if screenX != 0 || screenY != -3 {
+		t.Fatalf("screen point=%d,%d, want 0,-3", screenX, screenY)
+	}
+
+	if ok := h.GetScreenPoint(nil, 123, 456, &screenX, &screenY); ok != 1 {
+		t.Fatalf("GetScreenPoint returned %d, want 1", ok)
+	}
+	if screenX != 153 || screenY != 570 {
+		t.Fatalf("screen point=%d,%d, want 153,570", screenX, screenY)
+	}
+}
+
+func TestGetScreenInfoUsesViewSizeAndScale(t *testing.T) {
+	t.Setenv(osrBackingScaleEnvVar, "")
+	v := &View{}
+	v.cachedWidth.Store(640)
+	v.cachedHeight.Store(480)
+	v.storeObservedScale(1.25)
 	h := &renderHandler{view: v}
 	info := cef.NewScreenInfo()
 	if ok := h.GetScreenInfo(nil, &info); ok != 1 {
 		t.Fatalf("GetScreenInfo returned %d, want 1", ok)
 	}
-	if info.DeviceScaleFactor != 2 {
-		t.Fatalf("scale=%v, want 2", info.DeviceScaleFactor)
+	if info.DeviceScaleFactor != 1.25 {
+		t.Fatalf("scale=%v, want 1.25", info.DeviceScaleFactor)
 	}
 	if info.Rect.Width != 640 || info.Rect.Height != 480 || info.AvailableRect.Width != 640 || info.AvailableRect.Height != 480 {
 		t.Fatalf("unexpected rects: rect=%+v available=%+v", info.Rect, info.AvailableRect)
+	}
+}
+
+func TestGetScreenInfoAndViewRectUseForcedBackingScale(t *testing.T) {
+	t.Setenv(osrBackingScaleEnvVar, "1")
+	v := &View{}
+	v.cachedWidth.Store(640)
+	v.cachedHeight.Store(480)
+	v.storeObservedScale(1.25)
+	h := &renderHandler{view: v}
+	var rect cef.Rect
+	h.GetViewRect(nil, &rect)
+	if rect.Width != 800 || rect.Height != 600 {
+		t.Fatalf("view rect=%+v, want 800x600", rect)
+	}
+	info := cef.NewScreenInfo()
+	if ok := h.GetScreenInfo(nil, &info); ok != 1 {
+		t.Fatalf("GetScreenInfo returned %d, want 1", ok)
+	}
+	if info.DeviceScaleFactor != 1 {
+		t.Fatalf("scale=%v, want 1 when backing scale enabled", info.DeviceScaleFactor)
+	}
+	if info.Rect.Width != 800 || info.Rect.Height != 600 {
+		t.Fatalf("unexpected rects: rect=%+v", info.Rect)
+	}
+}
+
+func TestGetScreenInfoAndViewRectUseAutoBackingScaleAboveOne(t *testing.T) {
+	t.Setenv(osrBackingScaleEnvVar, "auto")
+	v := &View{}
+	v.cachedWidth.Store(640)
+	v.cachedHeight.Store(480)
+	v.storeObservedScale(1.25)
+	h := &renderHandler{view: v}
+
+	var rect cef.Rect
+	h.GetViewRect(nil, &rect)
+	if rect.Width != 800 || rect.Height != 600 {
+		t.Fatalf("view rect=%+v, want 800x600", rect)
+	}
+
+	info := cef.NewScreenInfo()
+	if ok := h.GetScreenInfo(nil, &info); ok != 1 {
+		t.Fatalf("GetScreenInfo returned %d, want 1", ok)
+	}
+	if info.DeviceScaleFactor != 1 {
+		t.Fatalf("scale=%v, want 1 when auto backing scale enabled", info.DeviceScaleFactor)
+	}
+	if info.Rect.Width != 800 || info.Rect.Height != 600 {
+		t.Fatalf("unexpected rects: rect=%+v", info.Rect)
 	}
 }
 

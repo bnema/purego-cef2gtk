@@ -1,6 +1,7 @@
 package gtkgl
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +27,7 @@ const (
 type InputBridge struct {
 	mu    sync.Mutex
 	host  cef.BrowserHost
-	scale int32
+	scale float64
 
 	lastX, lastY float64
 	clipboard    *gdk.Clipboard
@@ -44,8 +45,18 @@ type InputBridge struct {
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
-func NewInputBridge(host cef.BrowserHost, scale int32) *InputBridge {
+func NewInputBridge(host cef.BrowserHost, scale float64) *InputBridge {
 	return &InputBridge{host: host, scale: normalizeScale(scale)}
+}
+
+// SetScale updates the device scale used for pointer coordinate translation.
+func (ib *InputBridge) SetScale(scale float64) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.scale = normalizeScale(scale)
+	ib.mu.Unlock()
 }
 
 // SetMiddleClickHandler configures a callback for middle-button press events.
@@ -228,10 +239,10 @@ func (ib *InputBridge) currentHost() cef.BrowserHost {
 	return ib.host
 }
 
-func (ib *InputBridge) currentHostAndMiddleClickHandler() (cef.BrowserHost, func(x, y float64) bool) {
+func (ib *InputBridge) currentHostAndMiddleClickHandler() (cef.BrowserHost, float64, func(x, y float64) bool) {
 	ib.mu.Lock()
 	defer ib.mu.Unlock()
-	return ib.host, ib.onMiddleClick
+	return ib.host, ib.scale, ib.onMiddleClick
 }
 
 func (ib *InputBridge) currentClipboardShortcutHandlers() (func() string, func(action, text string)) {
@@ -256,7 +267,7 @@ func (ib *InputBridge) consumeMiddleClickRelease() bool {
 
 func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 	ib.mu.Lock()
-	host := ib.host
+	host, scale := ib.host, ib.scale
 	if !leave {
 		ib.lastX, ib.lastY = x, y
 	}
@@ -264,7 +275,7 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 	if host == nil {
 		return
 	}
-	evt := BuildMouseEvent(x, y, mods, ib.scale)
+	evt := BuildMouseEvent(x, y, mods, scale)
 	var mouseLeave int32
 	if leave {
 		mouseLeave = 1
@@ -273,7 +284,7 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 }
 
 func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount int) {
-	host, consumeMiddle := ib.currentHostAndMiddleClickHandler()
+	host, scale, consumeMiddle := ib.currentHostAndMiddleClickHandler()
 	if host == nil {
 		return
 	}
@@ -287,30 +298,32 @@ func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount 
 	if button == 2 {
 		ib.setMiddleClickConsumed(false)
 	}
-	evt := BuildMouseEvent(x, y, mods, ib.scale)
+	evt := BuildMouseEvent(x, y, mods, scale)
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 0, int32(clickCount))
 }
 
 func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCount int) {
-	host := ib.currentHost()
+	ib.mu.Lock()
+	host, scale := ib.host, ib.scale
+	ib.mu.Unlock()
 	if host == nil {
 		return
 	}
 	if button == 2 && ib.consumeMiddleClickRelease() {
 		return
 	}
-	evt := BuildMouseEvent(x, y, mods, ib.scale)
+	evt := BuildMouseEvent(x, y, mods, scale)
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 1, int32(clickCount))
 }
 
 func (ib *InputBridge) onScroll(dx, dy float64, mods uint) {
 	ib.mu.Lock()
-	host, x, y := ib.host, ib.lastX, ib.lastY
+	host, x, y, scale := ib.host, ib.lastX, ib.lastY, ib.scale
 	ib.mu.Unlock()
 	if host == nil {
 		return
 	}
-	evt := BuildMouseEvent(x, y, mods, ib.scale)
+	evt := BuildMouseEvent(x, y, mods, scale)
 	deltaX, deltaY := TranslateScrollDeltas(dx, dy)
 	host.SendMouseWheelEvent(&evt, deltaX, deltaY)
 }
@@ -487,13 +500,21 @@ func jsString(s string) string {
 	return strings.ReplaceAll(q, "</", "<\\/")
 }
 
-func BuildMouseEvent(x, y float64, gdkMods uint, scale int32) cef.MouseEvent {
+func BuildMouseEvent(x, y float64, gdkMods uint, scale float64) cef.MouseEvent {
 	scale = normalizeScale(scale)
-	return cef.MouseEvent{X: int32(x * float64(scale)), Y: int32(y * float64(scale)), Modifiers: TranslateModifiers(gdkMods)}
+	return cef.MouseEvent{
+		X:         logicalToDeviceCoord(x, scale),
+		Y:         logicalToDeviceCoord(y, scale),
+		Modifiers: TranslateModifiers(gdkMods),
+	}
 }
 
-func normalizeScale(scale int32) int32 {
-	if scale <= 0 {
+func logicalToDeviceCoord(value float64, scale float64) int32 {
+	return int32(math.Floor(value * normalizeScale(scale)))
+}
+
+func normalizeScale(scale float64) float64 {
+	if math.IsNaN(scale) || math.IsInf(scale, 0) || scale <= 0 {
 		return 1
 	}
 	return scale
