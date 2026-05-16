@@ -161,7 +161,7 @@ func TestGetViewRectFallsBackToOneByOneWithoutObservedSize(t *testing.T) {
 }
 
 func TestScreenGeometryUsesViewLocalRoot(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "")
+	setOSRBackingScaleEnv(t, "")
 	v := &View{}
 	v.cachedWidth.Store(640)
 	v.cachedHeight.Store(480)
@@ -185,7 +185,7 @@ func TestScreenGeometryUsesViewLocalRoot(t *testing.T) {
 }
 
 func TestScreenPointScalesCoordinatesWithoutSizeClamping(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "")
+	setOSRBackingScaleEnv(t, "")
 	v := &View{}
 	v.storeObservedScale(1.25)
 	h := &renderHandler{view: v}
@@ -207,7 +207,7 @@ func TestScreenPointScalesCoordinatesWithoutSizeClamping(t *testing.T) {
 }
 
 func TestGetScreenInfoUsesViewSizeAndScale(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "")
+	setOSRBackingScaleEnv(t, "")
 	v := &View{}
 	v.cachedWidth.Store(640)
 	v.cachedHeight.Store(480)
@@ -226,7 +226,7 @@ func TestGetScreenInfoUsesViewSizeAndScale(t *testing.T) {
 }
 
 func TestGetScreenInfoAndViewRectUseForcedBackingScale(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "1")
+	setOSRBackingScaleEnv(t, "1")
 	v := &View{}
 	v.cachedWidth.Store(640)
 	v.cachedHeight.Store(480)
@@ -250,7 +250,7 @@ func TestGetScreenInfoAndViewRectUseForcedBackingScale(t *testing.T) {
 }
 
 func TestGetScreenInfoAndViewRectUseAutoBackingScaleAboveOne(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "auto")
+	setOSRBackingScaleEnv(t, "auto")
 	v := &View{}
 	v.cachedWidth.Store(640)
 	v.cachedHeight.Store(480)

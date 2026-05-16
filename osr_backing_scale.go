@@ -4,9 +4,15 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 )
 
 const osrBackingScaleEnvVar = "PUREGO_CEF2GTK_OSR_BACKING_SCALE"
+
+var (
+	cachedOsrBackingScaleMode osrBackingScaleMode
+	cachedOsrBackingScaleOnce sync.Once
+)
 
 type osrBackingScaleMode uint8
 
@@ -17,7 +23,14 @@ const (
 )
 
 func osrBackingScaleModeFromEnv() osrBackingScaleMode {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(osrBackingScaleEnvVar))) {
+	cachedOsrBackingScaleOnce.Do(func() {
+		cachedOsrBackingScaleMode = parseOSRBackingScaleMode(os.Getenv(osrBackingScaleEnvVar))
+	})
+	return cachedOsrBackingScaleMode
+}
+
+func parseOSRBackingScaleMode(value string) osrBackingScaleMode {
+	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "on", "device":
 		return osrBackingScaleOn
 	case "auto":

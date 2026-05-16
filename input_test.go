@@ -6,7 +6,7 @@ import (
 )
 
 func TestInputOptionsNormalizedScale(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "")
+	setOSRBackingScaleEnv(t, "")
 	if got := (InputOptions{}).normalizedScale(1.25); got != 1 {
 		t.Fatalf("zero scale normalized to %v, want 1", got)
 	}
@@ -19,14 +19,14 @@ func TestInputOptionsNormalizedScale(t *testing.T) {
 }
 
 func TestInputOptionsNormalizedScaleUsesDeviceScaleForBackingScale(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "1")
+	setOSRBackingScaleEnv(t, "1")
 	if got := (InputOptions{}).normalizedScale(1.25); got != 1.25 {
 		t.Fatalf("zero scale normalized to %v, want 1.25 when backing scale enabled", got)
 	}
 }
 
 func TestInputOptionsNormalizedScaleUsesDeviceScaleForAutoBackingScale(t *testing.T) {
-	t.Setenv(osrBackingScaleEnvVar, "auto")
+	setOSRBackingScaleEnv(t, "auto")
 	if got := (InputOptions{}).normalizedScale(1.25); got != 1.25 {
 		t.Fatalf("zero scale normalized to %v, want 1.25 when auto backing scale enabled", got)
 	}
@@ -47,7 +47,7 @@ func TestInputScaleOverrideRemainsStickyAcrossObservedScaleChanges(t *testing.T)
 	}
 
 	v.setInputScaleOverride(math.NaN())
-	t.Setenv(osrBackingScaleEnvVar, "auto")
+	setOSRBackingScaleEnv(t, "auto")
 	if got := v.inputScaleForObservedScale(1.25); got != 1.25 {
 		t.Fatalf("input scale after clearing override = %v, want auto 1.25", got)
 	}
