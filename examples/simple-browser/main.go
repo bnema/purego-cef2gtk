@@ -102,7 +102,8 @@ func main() {
 	}
 	// AttachInput starts before the asynchronous browser exists; OnAfterCreated
 	// later supplies the real host with SetInputHost(browser.GetHost()).
-	if err := view.AttachInput(nil, cef2gtk.InputOptions{Scale: 1}); err != nil {
+	// Scale=0 lets the view derive and track the current GTK surface scale.
+	if err := view.AttachInput(nil, cef2gtk.InputOptions{Scale: 0}); err != nil {
 		fmt.Fprintln(os.Stderr, "attach input:", err)
 		os.Exit(1)
 	}

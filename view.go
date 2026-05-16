@@ -2,6 +2,9 @@ package cef2gtk
 
 import (
 	"errors"
+	"fmt"
+	"math"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,11 +13,17 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/gtkgdk"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
+	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
 var ErrNilView = errors.New("nil View")
+
+const (
+	scaleTraceEnvVar = "PUREGO_CEF2GTK_TRACE_SCALE"
+	osrTraceEnvVar   = "PUREGO_CEF2GTK_TRACE_OSR"
+)
 
 // Hooks contains optional callbacks invoked by the public CEF render adapter.
 type Hooks struct {
@@ -41,7 +50,6 @@ type View struct {
 	renderer           renderer
 	signalObject       *gobject.Object
 	input              *gtkgl.InputBridge
-	inputScale         int32
 	diag               *diagnosticsRecorder
 	hooks              Hooks
 	handler            *renderHandler
@@ -57,7 +65,10 @@ type View struct {
 	heightHandlerID    uint
 	cachedWidth        atomic.Int32
 	cachedHeight       atomic.Int32
-	scale              atomic.Int32
+	scaleBits          atomic.Uint64
+	inputScaleOverride atomic.Uint64
+	scaleTraceCount    atomic.Uint64
+	osrTraceCount      atomic.Uint64
 	sizeHooksMu        sync.Mutex
 	sizeHooks          map[uint64]func(width, height int32)
 	nextSizeHookID     uint64
@@ -207,10 +218,17 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	if height > 0 {
 		changed = v.cachedHeight.Swap(height) != height || changed
 	}
-	if scale := int32(v.widget.GetScaleFactor()); scale > 0 {
-		v.scale.Store(scale)
+	prevScale := v.observedScale()
+	obs := observeWidgetScale(v.widget)
+	scaleChanged := prevScale != obs.scale
+	v.storeObservedScale(obs.scale)
+	if scaleChanged && v.input != nil {
+		v.input.SetScale(v.inputScaleForObservedScale(obs.scale))
 	}
-	if changed && width > 0 && height > 0 {
+	if changed || scaleChanged {
+		v.traceScaleObservation("widget-update", width, height, prevScale, obs)
+	}
+	if (changed || scaleChanged) && width > 0 && height > 0 {
 		v.emitSizeHooks(width, height)
 	}
 }
@@ -238,17 +256,140 @@ func (v *View) Size() (int32, int32) {
 	return width, height
 }
 
-// DeviceScaleFactor returns the last GTK scale factor observed for the view.
+// DeviceScaleFactor returns the last GTK surface scale observed for the view.
 // Values <= 0 are normalized to 1.
 func (v *View) DeviceScaleFactor() float32 {
 	if v == nil {
 		return 1
 	}
-	scale := v.scale.Load()
-	if scale <= 0 {
-		scale = 1
+	return float32(v.observedScale())
+}
+
+func (v *View) observedScale() float64 {
+	if v == nil {
+		return 1
 	}
-	return float32(scale)
+	bits := v.scaleBits.Load()
+	if bits == 0 {
+		return 1
+	}
+	return normalizeDeviceScale(math.Float64frombits(bits))
+}
+
+func (v *View) storeObservedScale(scale float64) {
+	if v == nil {
+		return
+	}
+	v.scaleBits.Store(math.Float64bits(normalizeDeviceScale(scale)))
+}
+
+func normalizeDeviceScale(scale float64) float64 {
+	if math.IsNaN(scale) || math.IsInf(scale, 0) || scale <= 0 {
+		return 1
+	}
+	return scale
+}
+
+type widgetScaleObservation struct {
+	scale              float64
+	widgetScaleFactor  int
+	surfaceScale       float64
+	surfaceScaleFactor int
+	hasSurface         bool
+}
+
+func observeWidgetScale(widget *gtk.Widget) widgetScaleObservation {
+	obs := widgetScaleObservation{scale: 1}
+	if widget == nil {
+		return obs
+	}
+	obs.widgetScaleFactor = widget.GetScaleFactor()
+	if surface := widgetSurface(widget); surface != nil {
+		obs.hasSurface = true
+		if scale := surface.GetScale(); scale > 0 && !math.IsNaN(scale) && !math.IsInf(scale, 0) {
+			obs.surfaceScale = scale
+		}
+		if scaleFactor := surface.GetScaleFactor(); scaleFactor > 0 {
+			obs.surfaceScaleFactor = scaleFactor
+		}
+	}
+	switch {
+	case obs.surfaceScale > 0:
+		obs.scale = obs.surfaceScale
+	case obs.surfaceScaleFactor > 0:
+		obs.scale = float64(obs.surfaceScaleFactor)
+	case obs.widgetScaleFactor > 0:
+		obs.scale = float64(obs.widgetScaleFactor)
+	}
+	obs.scale = normalizeDeviceScale(obs.scale)
+	obs.surfaceScale = normalizeDeviceScale(obs.surfaceScale)
+	return obs
+}
+
+func widgetSurface(widget *gtk.Widget) *gdk.Surface {
+	if widget == nil {
+		return nil
+	}
+	native := widget.GetNative()
+	if native == nil {
+		return nil
+	}
+	return native.GetSurface()
+}
+
+func (v *View) traceScaleObservation(reason string, width, height int32, prevScale float64, obs widgetScaleObservation) {
+	if os.Getenv(scaleTraceEnvVar) == "" || v == nil || v.scaleTraceCount.Add(1) > 32 {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-scale reason=%s backend=%s widget_logical=%dx%d scale=%.3f prev_scale=%.3f widget_scale_factor=%d surface_scale=%.3f surface_scale_factor=%d has_surface=%t input_attached=%t\n",
+		reason, v.backend.String(), width, height, obs.scale, prevScale, obs.widgetScaleFactor, obs.surfaceScale, obs.surfaceScaleFactor, obs.hasSurface, v.input != nil)
+}
+
+func traceOSREnabled() bool {
+	return os.Getenv(scaleTraceEnvVar) != "" || os.Getenv(osrTraceEnvVar) != ""
+}
+
+func (v *View) traceViewRect(width, height int32) {
+	if !traceOSREnabled() || v == nil || v.osrTraceCount.Add(1) > 96 {
+		return
+	}
+	widgetWidth, widgetHeight := v.cachedSize()
+	scale := float64(v.DeviceScaleFactor())
+	expectedWidth, expectedHeight := expectedDeviceSize(widgetWidth, widgetHeight, scale)
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-osr-geometry callback=view-rect backend=%s widget_logical=%dx%d osr_rect=%dx%d device_scale=%.3f backing_scale_enabled=%t expected_device=%dx%d\n",
+		v.backend.String(), widgetWidth, widgetHeight, width, height, scale, v.osrBackingScaleEnabled(), expectedWidth, expectedHeight)
+}
+
+func (v *View) traceScreenInfo(width, height int32, scale float32) {
+	if !traceOSREnabled() || v == nil || v.osrTraceCount.Add(1) > 96 {
+		return
+	}
+	widgetWidth, widgetHeight := v.cachedSize()
+	surfaceScale := float64(v.DeviceScaleFactor())
+	expectedWidth, expectedHeight := expectedDeviceSize(widgetWidth, widgetHeight, surfaceScale)
+	reportedExpectedWidth, reportedExpectedHeight := expectedDeviceSize(width, height, float64(scale))
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-screen-info backend=%s widget_logical=%dx%d screen_rect=%dx%d device_scale=%.3f surface_scale=%.3f backing_scale_enabled=%t widget_expected_device=%dx%d reported_expected_device=%dx%d\n",
+		v.backend.String(), widgetWidth, widgetHeight, width, height, scale, surfaceScale, v.osrBackingScaleEnabled(), expectedWidth, expectedHeight, reportedExpectedWidth, reportedExpectedHeight)
+}
+
+func (v *View) traceScreenGeometryCallback(callback string, viewX, viewY int32, returns bool) {
+	if !traceOSREnabled() || v == nil || v.osrTraceCount.Add(1) > 96 {
+		return
+	}
+	widgetWidth, widgetHeight := v.cachedSize()
+	osrWidth, osrHeight := v.osrViewRectSize()
+	scale := float64(v.DeviceScaleFactor())
+	expectedWidth, expectedHeight := expectedDeviceSize(widgetWidth, widgetHeight, scale)
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-osr-geometry callback=%s backend=%s widget_logical=%dx%d osr_rect=%dx%d view_point=%d,%d device_scale=%.3f expected_device=%dx%d returns=%t\n",
+		callback, v.backend.String(), widgetWidth, widgetHeight, osrWidth, osrHeight, viewX, viewY, scale, expectedWidth, expectedHeight, returns)
+}
+
+func expectedDeviceSize(width, height int32, scale float64) (int32, int32) {
+	return int32(math.Ceil(float64(width) * scale)), int32(math.Ceil(float64(height) * scale))
 }
 
 // AddSizeObserver registers a callback invoked on the GTK thread when the view

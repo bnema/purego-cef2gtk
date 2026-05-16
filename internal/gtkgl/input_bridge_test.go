@@ -56,6 +56,13 @@ func TestBuildMouseEventScaleDefault(t *testing.T) {
 	}
 }
 
+func TestBuildMouseEventFractionalScale(t *testing.T) {
+	evt := BuildMouseEvent(10.5, 2.25, 0, 1.2)
+	if evt.X != 12 || evt.Y != 2 {
+		t.Fatalf("BuildMouseEvent coords = (%d,%d), want (12,2)", evt.X, evt.Y)
+	}
+}
+
 func TestMiddleClickHandlerStoredWithHost(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	called := false
@@ -67,9 +74,12 @@ func TestMiddleClickHandlerStoredWithHost(t *testing.T) {
 		return true
 	})
 
-	host, handler := ib.currentHostAndMiddleClickHandler()
+	host, scale, handler := ib.currentHostAndMiddleClickHandler()
 	if host != nil {
 		t.Fatalf("host = %v, want nil", host)
+	}
+	if scale != 1 {
+		t.Fatalf("scale = %v, want 1", scale)
 	}
 	if handler == nil {
 		t.Fatalf("middle click handler nil")

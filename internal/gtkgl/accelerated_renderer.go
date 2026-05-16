@@ -3,6 +3,7 @@ package gtkgl
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -54,16 +55,17 @@ type QueuedFrame struct {
 // methods must be called from the GTK main thread because it owns GtkGLArea and
 // current-context GL/EGL state.
 type AcceleratedRenderer struct {
-	area       *gtk.GLArea
-	egl        eglImporter
-	gl         glImporter
-	copier     textureCopier
-	queued     QueuedFrame
-	contextPtr uintptr
-	initFunc   func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
-	profiler   atomic.Pointer[internalprofile.Recorder]
-	copyTimer  *gl.TimerQueryRecorder
-	drawTimer  *gl.TimerQueryRecorder
+	area        *gtk.GLArea
+	egl         eglImporter
+	gl          glImporter
+	copier      textureCopier
+	queued      QueuedFrame
+	contextPtr  uintptr
+	initFunc    func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
+	profiler    atomic.Pointer[internalprofile.Recorder]
+	copyTimer   *gl.TimerQueryRecorder
+	drawTimer   *gl.TimerQueryRecorder
+	frameTraces atomic.Uint64
 }
 
 func NewAcceleratedRenderer(area *gtk.GLArea) *AcceleratedRenderer {
@@ -189,6 +191,7 @@ func (r *AcceleratedRenderer) ImportCopyAndQueue(info *cef.AcceleratedPaintInfo)
 	if err != nil {
 		return QueuedFrame{}, err
 	}
+	r.traceFrame(frame)
 
 	importStart := time.Now()
 	image, err := r.egl.ImportDMABUF(frame)
@@ -245,6 +248,19 @@ func (r *AcceleratedRenderer) QueuedFrame() (QueuedFrame, bool) {
 		return QueuedFrame{}, false
 	}
 	return r.queued, true
+}
+
+func (r *AcceleratedRenderer) traceFrame(frame dmabuf.BorrowedFrame) {
+	if os.Getenv("PUREGO_CEF2GTK_GL_TRACE") == "" || r == nil || r.frameTraces.Add(1) > 8 {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-gl frame coded=%dx%d visible=%dx%d+%d+%d content=%dx%d+%d+%d source=%dx%d format=%s modifier=0x%x\n",
+		frame.CodedSize.Width, frame.CodedSize.Height,
+		frame.VisibleRect.Width, frame.VisibleRect.Height, frame.VisibleRect.X, frame.VisibleRect.Y,
+		frame.ContentRect.Width, frame.ContentRect.Height, frame.ContentRect.X, frame.ContentRect.Y,
+		frame.SourceSize.Width, frame.SourceSize.Height,
+		frame.Format, frame.Modifier)
 }
 
 // QueueRender schedules the GtkGLArea render signal on the GTK main context.

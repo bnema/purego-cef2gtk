@@ -2,6 +2,7 @@ package cef2gtk
 
 import (
 	"errors"
+	"math"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
@@ -12,8 +13,11 @@ var ErrViewNotInitialized = errors.New("view not initialized")
 
 // InputOptions configures GTK-to-CEF input forwarding.
 type InputOptions struct {
-	// Scale is the HiDPI scale factor applied to pointer coordinates. Values <= 0 use 1.
-	Scale int32
+	// Scale overrides the coordinate transform applied to pointer coordinates.
+	// Values <= 0 let the view choose the correct transform for the current OSR
+	// backing mode: logical coordinates normally, device coordinates when the
+	// OSR backing-scale compatibility path is active.
+	Scale float64
 	// OnMiddleClick is invoked when GTK receives a middle-button press. Returning
 	// true consumes the event before it is forwarded to CEF.
 	OnMiddleClick func(x, y float64) bool
@@ -26,11 +30,35 @@ type InputOptions struct {
 	OnClipboardShortcut func(action, text string)
 }
 
-func (o InputOptions) normalizedScale() int32 {
-	if o.Scale <= 0 {
+func (o InputOptions) normalizedScale(fallback float64) float64 {
+	if o.Scale > 0 {
+		return normalizeDeviceScale(o.Scale)
+	}
+	if fallback <= 0 {
 		return 1
 	}
-	return o.Scale
+	return inputScaleForOSRBacking(fallback)
+}
+
+func (v *View) setInputScaleOverride(scale float64) {
+	if v == nil {
+		return
+	}
+	if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+		v.inputScaleOverride.Store(0)
+		return
+	}
+	v.inputScaleOverride.Store(math.Float64bits(normalizeDeviceScale(scale)))
+}
+
+func (v *View) inputScaleForObservedScale(observedScale float64) float64 {
+	if v == nil {
+		return 1
+	}
+	if bits := v.inputScaleOverride.Load(); bits != 0 {
+		return normalizeDeviceScale(math.Float64frombits(bits))
+	}
+	return inputScaleForOSRBacking(observedScale)
 }
 
 // AttachInput attaches GTK event controllers to the view and forwards input to host.
@@ -45,8 +73,9 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	if v.input != nil {
 		v.input.Detach()
 	}
-	v.inputScale = opts.normalizedScale()
-	v.input = gtkgl.NewInputBridge(host, v.inputScale)
+	v.setInputScaleOverride(opts.Scale)
+	scale := v.inputScaleForObservedScale(float64(v.DeviceScaleFactor()))
+	v.input = gtkgl.NewInputBridge(host, scale)
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(v.widget)
@@ -62,6 +91,7 @@ func (v *View) DetachInput() error {
 		v.input.Detach()
 		v.input = nil
 	}
+	v.setInputScaleOverride(0)
 	return nil
 }
 

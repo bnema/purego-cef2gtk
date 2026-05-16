@@ -4,6 +4,7 @@ package gtkgdk
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sync"
@@ -152,6 +153,7 @@ type Renderer struct {
 	pendingScheduleFailures atomic.Uint64
 	pendingIdleCallbacks    atomic.Uint64
 	frameTraces             atomic.Uint64
+	textureTraces           atomic.Uint64
 
 	profiler atomic.Pointer[internalprofile.Recorder]
 }
@@ -589,6 +591,7 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 	textureOwnsFD = true
 	frame.Planes[0].FD = -1
 	r.recordTextureBuilt()
+	r.traceTexturePresent(borrowed, gdkFormat, texture)
 	return &ownedTexture{texture: texture, fd: textureFD}, nil
 }
 
@@ -715,6 +718,81 @@ func (r *Renderer) traceFrame(frame dmabuf.BorrowedFrame, gdkFormat dmabuf.FourC
 		frame.ContentRect.Width, frame.ContentRect.Height, frame.ContentRect.X, frame.ContentRect.Y,
 		frame.SourceSize.Width, frame.SourceSize.Height,
 		frame.Format, gdkFormat, frame.Modifier, plane.FD, plane.Stride, plane.Offset, plane.Size)
+}
+
+func (r *Renderer) traceTexturePresent(frame dmabuf.BorrowedFrame, gdkFormat dmabuf.FourCC, texture *gdk.Texture) {
+	if os.Getenv("PUREGO_CEF2GTK_GDK_TRACE") == "" || r == nil || r.textureTraces.Add(1) > 8 {
+		return
+	}
+	textureWidth, textureHeight := 0, 0
+	intrinsicWidth, intrinsicHeight := 0, 0
+	if texture != nil {
+		textureWidth, textureHeight = texture.GetWidth(), texture.GetHeight()
+		intrinsicWidth, intrinsicHeight = texture.GetIntrinsicWidth(), texture.GetIntrinsicHeight()
+	}
+	widgetWidth, widgetHeight := 0, 0
+	widgetAllocatedWidth, widgetAllocatedHeight := 0, 0
+	widgetScaleFactor := 0
+	surfaceScale := 1.0
+	surfaceScaleFactor := 0
+	surfaceWidth, surfaceHeight := 0, 0
+	if r.widget != nil {
+		widgetWidth, widgetHeight = r.widget.GetWidth(), r.widget.GetHeight()
+		widgetAllocatedWidth, widgetAllocatedHeight = r.widget.GetAllocatedWidth(), r.widget.GetAllocatedHeight()
+		widgetScaleFactor = r.widget.GetScaleFactor()
+		if surface := rendererWidgetSurface(r.widget); surface != nil {
+			surfaceScale = surface.GetScale()
+			surfaceScaleFactor = surface.GetScaleFactor()
+			surfaceWidth, surfaceHeight = surface.GetWidth(), surface.GetHeight()
+		}
+	}
+	pictureWidth, pictureHeight := 0, 0
+	pictureAllocatedWidth, pictureAllocatedHeight := 0, 0
+	if r.picture != nil {
+		pictureWidth, pictureHeight = r.picture.GetWidth(), r.picture.GetHeight()
+		pictureAllocatedWidth, pictureAllocatedHeight = r.picture.GetAllocatedWidth(), r.picture.GetAllocatedHeight()
+	}
+	expectedSurfaceWidth := int(math.Ceil(float64(widgetAllocatedWidth) * surfaceScale))
+	expectedSurfaceHeight := int(math.Ceil(float64(widgetAllocatedHeight) * surfaceScale))
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-gdk-dmabuf-present coded=%dx%d visible=%dx%d+%d+%d source=%dx%d texture=%dx%d intrinsic=%dx%d widget=%dx%d alloc=%dx%d picture=%dx%d picture_alloc=%dx%d surface=%dx%d surface_scale=%.3f surface_scale_factor=%d widget_scale_factor=%d expected_surface_pixels=%dx%d coded_to_expected=%.3fx%.3f texture_to_widget=%.3fx%.3f cef_format=%s gdk_format=%s content_fit=contain offload=%t\n",
+		frame.CodedSize.Width, frame.CodedSize.Height,
+		frame.VisibleRect.Width, frame.VisibleRect.Height, frame.VisibleRect.X, frame.VisibleRect.Y,
+		frame.SourceSize.Width, frame.SourceSize.Height,
+		textureWidth, textureHeight, intrinsicWidth, intrinsicHeight,
+		widgetWidth, widgetHeight, widgetAllocatedWidth, widgetAllocatedHeight,
+		pictureWidth, pictureHeight, pictureAllocatedWidth, pictureAllocatedHeight,
+		surfaceWidth, surfaceHeight, surfaceScale, surfaceScaleFactor, widgetScaleFactor,
+		expectedSurfaceWidth, expectedSurfaceHeight,
+		ratioInt32ToInt(frame.CodedSize.Width, expectedSurfaceWidth), ratioInt32ToInt(frame.CodedSize.Height, expectedSurfaceHeight),
+		ratioIntToInt(textureWidth, widgetAllocatedWidth), ratioIntToInt(textureHeight, widgetAllocatedHeight),
+		frame.Format, gdkFormat, r.offload != nil)
+}
+
+func rendererWidgetSurface(widget *gtk.Widget) *gdk.Surface {
+	if widget == nil {
+		return nil
+	}
+	native := widget.GetNative()
+	if native == nil {
+		return nil
+	}
+	return native.GetSurface()
+}
+
+func ratioInt32ToInt(num int32, den int) float64 {
+	return ratioFloat(float64(num), float64(den))
+}
+
+func ratioIntToInt(num, den int) float64 {
+	return ratioFloat(float64(num), float64(den))
+}
+
+func ratioFloat(num, den float64) float64 {
+	if den == 0 {
+		return 0
+	}
+	return num / den
 }
 
 // SetProfiler installs a development profile recorder.
