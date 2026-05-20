@@ -199,20 +199,18 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	if v == nil || v.widget == nil {
 		return
 	}
-	width := int32(v.widget.GetAllocatedWidth())
-	height := int32(v.widget.GetAllocatedHeight())
-	if width <= 0 {
-		width = int32(v.widget.GetWidth())
-	}
-	if height <= 0 {
-		height = int32(v.widget.GetHeight())
-	}
+	prevWidth := v.cachedWidth.Load()
+	prevHeight := v.cachedHeight.Load()
+	width := resolveObservedDimension(prevWidth, int32(v.widget.GetAllocatedWidth()), int32(v.widget.GetWidth()))
+	height := resolveObservedDimension(prevHeight, int32(v.widget.GetAllocatedHeight()), int32(v.widget.GetHeight()))
 	changed := false
-	if width > 0 {
-		changed = v.cachedWidth.Swap(width) != width || changed
+	if width > 0 && width != prevWidth {
+		v.cachedWidth.Store(width)
+		changed = true
 	}
-	if height > 0 {
-		changed = v.cachedHeight.Swap(height) != height || changed
+	if height > 0 && height != prevHeight {
+		v.cachedHeight.Store(height)
+		changed = true
 	}
 	prevScale := v.observedScale()
 	obs := observeWidgetScale(v.widget)
@@ -229,9 +227,39 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	}
 }
 
+// resolveObservedDimension picks the best observed size from cached,
+// allocated, and widget in that order, except that widget==1 is treated as
+// the synthetic bootstrap sentinel so it does not overwrite a larger cached
+// real size during transient GTK allocation gaps.
+func resolveObservedDimension(cached, allocated, widget int32) int32 {
+	if allocated > 0 {
+		return allocated
+	}
+	if widget > 1 {
+		return widget
+	}
+	if cached > 0 {
+		return cached
+	}
+	if widget > 0 {
+		return widget
+	}
+	return 0
+}
+
 func (v *View) cachedSize() (int32, int32) {
 	width, height := v.Size()
 	return width, height
+}
+
+// RefreshObservedSizeOnGTKThread synchronously refreshes the cached observed
+// size from the widget's current GTK allocation and returns the resulting size.
+func (v *View) RefreshObservedSizeOnGTKThread() (int32, int32) {
+	if v == nil {
+		return 1, 1
+	}
+	v.updateCachedSizeOnGTKThread()
+	return v.Size()
 }
 
 // Size returns the last positive widget size observed on the GTK thread. Before
