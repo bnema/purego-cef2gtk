@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,12 +75,19 @@ type Snapshot struct {
 	Window  time.Duration `json:"-"`
 	Backend string        `json:"backend,omitempty"`
 
-	FramesReceived    uint64 `json:"frames_received"`
-	FramesQueued      uint64 `json:"frames_queued"`
-	FramesRendered    uint64 `json:"frames_rendered"`
-	ImportFailures    uint64 `json:"import_failures"`
-	RenderFailures    uint64 `json:"render_failures"`
-	UnsupportedPaints uint64 `json:"unsupported_paints"`
+	FramesReceived uint64 `json:"frames_received"`
+	FramesQueued   uint64 `json:"frames_queued"`
+	FramesRendered uint64 `json:"frames_rendered"`
+	ImportFailures uint64 `json:"import_failures"`
+
+	ScrollEvents            uint64  `json:"scroll_events,omitempty"`
+	ScrollDXSum             float64 `json:"scroll_dx_sum,omitempty"`
+	ScrollDYSum             float64 `json:"scroll_dy_sum,omitempty"`
+	ScrollAbsDXSum          float64 `json:"scroll_abs_dx_sum,omitempty"`
+	ScrollAbsDYSum          float64 `json:"scroll_abs_dy_sum,omitempty"`
+	ExternalBeginFramesSent uint64  `json:"external_begin_frames_sent,omitempty"`
+	RenderFailures          uint64  `json:"render_failures"`
+	UnsupportedPaints       uint64  `json:"unsupported_paints"`
 
 	TexturesBuilt        uint64 `json:"textures_built,omitempty"`
 	TextureBuildFailures uint64 `json:"texture_build_failures,omitempty"`
@@ -100,52 +108,64 @@ type Snapshot struct {
 
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type snapshotJSON struct {
-		Time                 time.Time     `json:"time"`
-		WindowMS             float64       `json:"window_ms"`
-		Backend              string        `json:"backend,omitempty"`
-		FramesReceived       uint64        `json:"frames_received"`
-		FramesQueued         uint64        `json:"frames_queued"`
-		FramesRendered       uint64        `json:"frames_rendered"`
-		ImportFailures       uint64        `json:"import_failures"`
-		RenderFailures       uint64        `json:"render_failures"`
-		UnsupportedPaints    uint64        `json:"unsupported_paints"`
-		TexturesBuilt        uint64        `json:"textures_built,omitempty"`
-		TextureBuildFailures uint64        `json:"texture_build_failures,omitempty"`
-		FDDupFailures        uint64        `json:"fd_dup_failures,omitempty"`
-		UnsupportedFormats   uint64        `json:"unsupported_formats,omitempty"`
-		PaintableSwaps       uint64        `json:"paintable_swaps,omitempty"`
-		GTKWaitCPU           DurationStats `json:"gtk_wait_cpu"`
-		ImportCopyCPU        DurationStats `json:"import_copy_cpu"`
-		ImportCPU            DurationStats `json:"import_cpu"`
-		CopyCPU              DurationStats `json:"copy_cpu"`
-		RenderCPU            DurationStats `json:"render_cpu"`
-		CopyGPU              DurationStats `json:"copy_gpu"`
-		DrawGPU              DurationStats `json:"draw_gpu"`
-		GC                   GCStats       `json:"gc"`
+		Time                    time.Time     `json:"time"`
+		WindowMS                float64       `json:"window_ms"`
+		Backend                 string        `json:"backend,omitempty"`
+		FramesReceived          uint64        `json:"frames_received"`
+		FramesQueued            uint64        `json:"frames_queued"`
+		FramesRendered          uint64        `json:"frames_rendered"`
+		ImportFailures          uint64        `json:"import_failures"`
+		RenderFailures          uint64        `json:"render_failures"`
+		UnsupportedPaints       uint64        `json:"unsupported_paints"`
+		ScrollEvents            uint64        `json:"scroll_events,omitempty"`
+		ScrollDXSum             float64       `json:"scroll_dx_sum,omitempty"`
+		ScrollDYSum             float64       `json:"scroll_dy_sum,omitempty"`
+		ScrollAbsDXSum          float64       `json:"scroll_abs_dx_sum,omitempty"`
+		ScrollAbsDYSum          float64       `json:"scroll_abs_dy_sum,omitempty"`
+		ExternalBeginFramesSent uint64        `json:"external_begin_frames_sent,omitempty"`
+		TexturesBuilt           uint64        `json:"textures_built,omitempty"`
+		TextureBuildFailures    uint64        `json:"texture_build_failures,omitempty"`
+		FDDupFailures           uint64        `json:"fd_dup_failures,omitempty"`
+		UnsupportedFormats      uint64        `json:"unsupported_formats,omitempty"`
+		PaintableSwaps          uint64        `json:"paintable_swaps,omitempty"`
+		GTKWaitCPU              DurationStats `json:"gtk_wait_cpu"`
+		ImportCopyCPU           DurationStats `json:"import_copy_cpu"`
+		ImportCPU               DurationStats `json:"import_cpu"`
+		CopyCPU                 DurationStats `json:"copy_cpu"`
+		RenderCPU               DurationStats `json:"render_cpu"`
+		CopyGPU                 DurationStats `json:"copy_gpu"`
+		DrawGPU                 DurationStats `json:"draw_gpu"`
+		GC                      GCStats       `json:"gc"`
 	}
 	return json.Marshal(snapshotJSON{
-		Time:                 s.Time,
-		WindowMS:             durationMS(s.Window),
-		Backend:              s.Backend,
-		FramesReceived:       s.FramesReceived,
-		FramesQueued:         s.FramesQueued,
-		FramesRendered:       s.FramesRendered,
-		ImportFailures:       s.ImportFailures,
-		RenderFailures:       s.RenderFailures,
-		UnsupportedPaints:    s.UnsupportedPaints,
-		TexturesBuilt:        s.TexturesBuilt,
-		TextureBuildFailures: s.TextureBuildFailures,
-		FDDupFailures:        s.FDDupFailures,
-		UnsupportedFormats:   s.UnsupportedFormats,
-		PaintableSwaps:       s.PaintableSwaps,
-		GTKWaitCPU:           s.GTKWaitCPU,
-		ImportCopyCPU:        s.ImportCopyCPU,
-		ImportCPU:            s.ImportCPU,
-		CopyCPU:              s.CopyCPU,
-		RenderCPU:            s.RenderCPU,
-		CopyGPU:              s.CopyGPU,
-		DrawGPU:              s.DrawGPU,
-		GC:                   s.GC,
+		Time:                    s.Time,
+		WindowMS:                durationMS(s.Window),
+		Backend:                 s.Backend,
+		FramesReceived:          s.FramesReceived,
+		FramesQueued:            s.FramesQueued,
+		FramesRendered:          s.FramesRendered,
+		ImportFailures:          s.ImportFailures,
+		RenderFailures:          s.RenderFailures,
+		UnsupportedPaints:       s.UnsupportedPaints,
+		ScrollEvents:            s.ScrollEvents,
+		ScrollDXSum:             s.ScrollDXSum,
+		ScrollDYSum:             s.ScrollDYSum,
+		ScrollAbsDXSum:          s.ScrollAbsDXSum,
+		ScrollAbsDYSum:          s.ScrollAbsDYSum,
+		ExternalBeginFramesSent: s.ExternalBeginFramesSent,
+		TexturesBuilt:           s.TexturesBuilt,
+		TextureBuildFailures:    s.TextureBuildFailures,
+		FDDupFailures:           s.FDDupFailures,
+		UnsupportedFormats:      s.UnsupportedFormats,
+		PaintableSwaps:          s.PaintableSwaps,
+		GTKWaitCPU:              s.GTKWaitCPU,
+		ImportCopyCPU:           s.ImportCopyCPU,
+		ImportCPU:               s.ImportCPU,
+		CopyCPU:                 s.CopyCPU,
+		RenderCPU:               s.RenderCPU,
+		CopyGPU:                 s.CopyGPU,
+		DrawGPU:                 s.DrawGPU,
+		GC:                      s.GC,
 	})
 }
 
@@ -158,6 +178,15 @@ type Recorder struct {
 	lastGCNum      uint32
 	lastPauseTotal uint64
 	current        Snapshot
+
+	scrollMu         sync.Mutex
+	scrollEvents     uint64
+	scrollDXMilli    int64
+	scrollDYMilli    int64
+	scrollAbsDXMilli int64
+	scrollAbsDYMilli int64
+
+	externalBeginFramesSent atomic.Uint64
 }
 
 func NewRecorder() *Recorder { return &Recorder{} }
@@ -208,6 +237,38 @@ func (r *Recorder) RecordRenderCPU(d time.Duration) { r.add(func(s *Snapshot) { 
 func (r *Recorder) RecordCopyGPU(d time.Duration)   { r.add(func(s *Snapshot) { s.CopyGPU.Add(d) }) }
 func (r *Recorder) RecordDrawGPU(d time.Duration)   { r.add(func(s *Snapshot) { s.DrawGPU.Add(d) }) }
 
+// RecordScroll records one GTK scroll event as a single profiler update. It is
+// safe for high-frequency input paths; snapshots drain these counters later.
+func (r *Recorder) RecordScroll(dx, dy float64) {
+	if r == nil {
+		return
+	}
+	dxMilli := int64(dx * 1000)
+	dyMilli := int64(dy * 1000)
+	absDXMilli := dxMilli
+	if absDXMilli < 0 {
+		absDXMilli = -absDXMilli
+	}
+	absDYMilli := dyMilli
+	if absDYMilli < 0 {
+		absDYMilli = -absDYMilli
+	}
+	r.scrollMu.Lock()
+	r.scrollEvents++
+	r.scrollDXMilli += dxMilli
+	r.scrollDYMilli += dyMilli
+	r.scrollAbsDXMilli += absDXMilli
+	r.scrollAbsDYMilli += absDYMilli
+	r.scrollMu.Unlock()
+}
+
+func (r *Recorder) RecordExternalBeginFrameSent() {
+	if r == nil {
+		return
+	}
+	r.externalBeginFramesSent.Add(1)
+}
+
 func (r *Recorder) add(fn func(*Snapshot)) {
 	if r == nil || fn == nil {
 		return
@@ -239,6 +300,7 @@ func (r *Recorder) MaybeSnapshot(now time.Time, interval time.Duration) (Snapsho
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	snap := r.current
+	r.drainHotPathCounters(&snap)
 	snap.Time = now
 	if snap.Backend == "" {
 		snap.Backend = r.backend
@@ -260,6 +322,25 @@ func (r *Recorder) MaybeSnapshot(now time.Time, interval time.Duration) (Snapsho
 	r.lastGCNum = ms.NumGC
 	r.lastPauseTotal = ms.PauseTotalNs
 	return snap, true
+}
+
+func (r *Recorder) drainHotPathCounters(snap *Snapshot) {
+	if r == nil || snap == nil {
+		return
+	}
+	r.scrollMu.Lock()
+	snap.ScrollEvents = r.scrollEvents
+	snap.ScrollDXSum = float64(r.scrollDXMilli) / 1000
+	snap.ScrollDYSum = float64(r.scrollDYMilli) / 1000
+	snap.ScrollAbsDXSum = float64(r.scrollAbsDXMilli) / 1000
+	snap.ScrollAbsDYSum = float64(r.scrollAbsDYMilli) / 1000
+	r.scrollEvents = 0
+	r.scrollDXMilli = 0
+	r.scrollDYMilli = 0
+	r.scrollAbsDXMilli = 0
+	r.scrollAbsDYMilli = 0
+	r.scrollMu.Unlock()
+	snap.ExternalBeginFramesSent = r.externalBeginFramesSent.Swap(0)
 }
 
 func lastPauseNS(ms runtime.MemStats) uint64 {

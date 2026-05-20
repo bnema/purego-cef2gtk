@@ -76,6 +76,7 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	v.setInputScaleOverride(opts.Scale)
 	scale := v.inputScaleForObservedScale(float64(v.DeviceScaleFactor()))
 	v.input = gtkgl.NewInputBridge(host, scale)
+	v.input.SetProfiler(v.profileRecorder())
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(v.widget)
