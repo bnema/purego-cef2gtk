@@ -179,11 +179,13 @@ type Recorder struct {
 	lastPauseTotal uint64
 	current        Snapshot
 
-	scrollEvents            atomic.Uint64
-	scrollDXMilli           atomic.Int64
-	scrollDYMilli           atomic.Int64
-	scrollAbsDXMilli        atomic.Int64
-	scrollAbsDYMilli        atomic.Int64
+	scrollMu         sync.Mutex
+	scrollEvents     uint64
+	scrollDXMilli    int64
+	scrollDYMilli    int64
+	scrollAbsDXMilli int64
+	scrollAbsDYMilli int64
+
 	externalBeginFramesSent atomic.Uint64
 }
 
@@ -235,7 +237,7 @@ func (r *Recorder) RecordRenderCPU(d time.Duration) { r.add(func(s *Snapshot) { 
 func (r *Recorder) RecordCopyGPU(d time.Duration)   { r.add(func(s *Snapshot) { s.CopyGPU.Add(d) }) }
 func (r *Recorder) RecordDrawGPU(d time.Duration)   { r.add(func(s *Snapshot) { s.DrawGPU.Add(d) }) }
 
-// RecordScroll records one GTK scroll event using atomic counters only. It is
+// RecordScroll records one GTK scroll event as a single profiler update. It is
 // safe for high-frequency input paths; snapshots drain these counters later.
 func (r *Recorder) RecordScroll(dx, dy float64) {
 	if r == nil {
@@ -251,11 +253,13 @@ func (r *Recorder) RecordScroll(dx, dy float64) {
 	if absDYMilli < 0 {
 		absDYMilli = -absDYMilli
 	}
-	r.scrollEvents.Add(1)
-	r.scrollDXMilli.Add(dxMilli)
-	r.scrollDYMilli.Add(dyMilli)
-	r.scrollAbsDXMilli.Add(absDXMilli)
-	r.scrollAbsDYMilli.Add(absDYMilli)
+	r.scrollMu.Lock()
+	r.scrollEvents++
+	r.scrollDXMilli += dxMilli
+	r.scrollDYMilli += dyMilli
+	r.scrollAbsDXMilli += absDXMilli
+	r.scrollAbsDYMilli += absDYMilli
+	r.scrollMu.Unlock()
 }
 
 func (r *Recorder) RecordExternalBeginFrameSent() {
@@ -324,11 +328,18 @@ func (r *Recorder) drainHotPathCounters(snap *Snapshot) {
 	if r == nil || snap == nil {
 		return
 	}
-	snap.ScrollEvents = r.scrollEvents.Swap(0)
-	snap.ScrollDXSum = float64(r.scrollDXMilli.Swap(0)) / 1000
-	snap.ScrollDYSum = float64(r.scrollDYMilli.Swap(0)) / 1000
-	snap.ScrollAbsDXSum = float64(r.scrollAbsDXMilli.Swap(0)) / 1000
-	snap.ScrollAbsDYSum = float64(r.scrollAbsDYMilli.Swap(0)) / 1000
+	r.scrollMu.Lock()
+	snap.ScrollEvents = r.scrollEvents
+	snap.ScrollDXSum = float64(r.scrollDXMilli) / 1000
+	snap.ScrollDYSum = float64(r.scrollDYMilli) / 1000
+	snap.ScrollAbsDXSum = float64(r.scrollAbsDXMilli) / 1000
+	snap.ScrollAbsDYSum = float64(r.scrollAbsDYMilli) / 1000
+	r.scrollEvents = 0
+	r.scrollDXMilli = 0
+	r.scrollDYMilli = 0
+	r.scrollAbsDXMilli = 0
+	r.scrollAbsDYMilli = 0
+	r.scrollMu.Unlock()
 	snap.ExternalBeginFramesSent = r.externalBeginFramesSent.Swap(0)
 }
 

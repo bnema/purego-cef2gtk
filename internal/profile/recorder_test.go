@@ -2,6 +2,7 @@ package profile
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 )
@@ -72,6 +73,41 @@ func TestRecorderSnapshotIncludesInputAndBeginFrameCounters(t *testing.T) {
 	}
 	if snap.ScrollEvents != 0 || snap.ExternalBeginFramesSent != 0 {
 		t.Fatalf("hot-path counters did not reset: %+v", snap)
+	}
+}
+
+func TestRecorderScrollSnapshotConcurrentConsistency(t *testing.T) {
+	r := NewRecorder()
+	start := time.Unix(100, 0)
+	r.Start(start)
+
+	const workers = 8
+	const eventsPerWorker = 1000
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for range eventsPerWorker {
+				r.RecordScroll(1, -1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	snap, ok := r.MaybeSnapshot(start.Add(time.Second), time.Second)
+	if !ok {
+		t.Fatal("snapshot not emitted")
+	}
+	want := uint64(workers * eventsPerWorker)
+	if snap.ScrollEvents != want {
+		t.Fatalf("ScrollEvents = %d, want %d", snap.ScrollEvents, want)
+	}
+	if snap.ScrollDXSum != float64(want) || snap.ScrollDYSum != -float64(want) {
+		t.Fatalf("scroll sums = (%v,%v), want (%v,%v)", snap.ScrollDXSum, snap.ScrollDYSum, float64(want), -float64(want))
+	}
+	if snap.ScrollAbsDXSum != float64(want) || snap.ScrollAbsDYSum != float64(want) {
+		t.Fatalf("scroll abs sums = (%v,%v), want (%v,%v)", snap.ScrollAbsDXSum, snap.ScrollAbsDYSum, float64(want), float64(want))
 	}
 }
 
