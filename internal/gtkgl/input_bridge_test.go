@@ -11,8 +11,8 @@ import (
 
 func TestTranslateScrollDeltas(t *testing.T) {
 	x, y := TranslateScrollDeltas(1.5, -2)
-	if x != 180 || y != 240 {
-		t.Fatalf("TranslateScrollDeltas = (%d,%d), want (180,240)", x, y)
+	if x != 360 || y != 480 {
+		t.Fatalf("TranslateScrollDeltas = (%d,%d), want (360,480)", x, y)
 	}
 }
 

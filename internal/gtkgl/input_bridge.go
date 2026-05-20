@@ -578,7 +578,7 @@ func TranslateMouseButton(gdkButton uint) cef.MouseButtonType {
 	}
 }
 
-const cefScrollUnitsPerNotch = 120
+const cefScrollUnitsPerNotch = 240
 
 func TranslateScrollDeltas(dx, dy float64) (int32, int32) {
 	return int32(dx * cefScrollUnitsPerNotch), int32(-dy * cefScrollUnitsPerNotch)
