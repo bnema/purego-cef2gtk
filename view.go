@@ -78,24 +78,19 @@ type View struct {
 	profileOptions     ProfileOptions
 }
 
-// NewView creates an accelerated CEF view using BackendAuto or the
-// PUREGO_CEF2GTK_BACKEND override when it is set.
+// NewView creates an accelerated CEF view using the default Vulkan/GDK DMABUF
+// render stack or the PUREGO_CEF2GTK_BACKEND override when it is set.
 func NewView() *View {
-	return NewViewWithOptions(ViewOptions{Backend: BackendAuto})
+	return NewViewWithOptions(ViewOptions{})
 }
 
 // NewViewWithOptions creates an accelerated CEF view with explicit options.
 // When PUREGO_CEF2GTK_BACKEND is set, it intentionally overrides opts.Backend
 // for diagnostics and deployment-level backend selection.
 func NewViewWithOptions(opts ViewOptions) *View {
-	opts, err := opts.normalized()
+	opts, err := resolveViewOptions(opts)
 	if err != nil {
 		return nil
-	}
-	if envBackend, ok, err := backendFromEnv(); err != nil {
-		return nil
-	} else if ok {
-		opts.Backend = envBackend
 	}
 
 	backend := opts.Backend

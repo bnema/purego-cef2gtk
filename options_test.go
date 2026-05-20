@@ -49,11 +49,11 @@ func TestViewOptionsValidateAndNormalizeBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
-	if got.Backend != BackendAuto {
-		t.Fatalf("Backend = %q, want %q", got.Backend, BackendAuto)
+	if got.Backend != BackendGDKDMABUF {
+		t.Fatalf("Backend = %q, want %q", got.Backend, BackendGDKDMABUF)
 	}
 
-	for _, backend := range []Backend{BackendAuto, BackendGDKDMABUF, BackendGLArea} {
+	for _, backend := range []Backend{BackendGDKDMABUF, BackendGLArea} {
 		if err := (ViewOptions{Backend: backend}).Validate(); err != nil {
 			t.Fatalf("Validate(%q) error = %v", backend, err)
 		}
@@ -61,6 +61,30 @@ func TestViewOptionsValidateAndNormalizeBackend(t *testing.T) {
 
 	if err := (ViewOptions{Backend: Backend("software")}).Validate(); err == nil {
 		t.Fatal("Validate() error = nil, want unsupported backend error")
+	}
+}
+
+func TestViewOptionsExplicitBackendAutoPreservesFallbackSemantics(t *testing.T) {
+	got, err := (ViewOptions{Backend: BackendAuto}).normalized()
+	if err != nil {
+		t.Fatalf("normalized() error = %v", err)
+	}
+	if got.Backend != BackendAuto {
+		t.Fatalf("Backend = %q, want explicit %q", got.Backend, BackendAuto)
+	}
+}
+
+func TestViewOptionsRenderStackPlanSelectsBackend(t *testing.T) {
+	plan, err := ResolveRenderStack(RenderStackEGL)
+	if err != nil {
+		t.Fatalf("ResolveRenderStack(egl) error = %v", err)
+	}
+	got, err := (ViewOptions{RenderStackPlan: plan}).normalized()
+	if err != nil {
+		t.Fatalf("normalized() error = %v", err)
+	}
+	if got.Backend != BackendGLArea {
+		t.Fatalf("Backend = %q, want %q", got.Backend, BackendGLArea)
 	}
 }
 

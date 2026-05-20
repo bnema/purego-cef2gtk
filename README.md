@@ -13,18 +13,29 @@ Early bootstrap. The renderer is Wayland-only and GPU-first:
 - no `--disable-gpu` or software rendering fallback
 - CEF `OnPaint` is treated as a diagnostic/error path, not as a renderer
 
-## Renderer backends
+## Renderer stacks
 
-`NewView()` uses `BackendAuto`: it tries `gdk-dmabuf` first and falls back to `glarea` if GDK DMABUF construction is unavailable. Use `NewViewWithOptions` or env overrides for diagnostics:
+`NewView()` defaults to the Vulkan GPU stack and fails during view setup if the selected stack cannot be constructed. Use `ResolveRenderStack` to choose a coherent stack explicitly:
 
 ```go
-view := cef2gtk.NewViewWithOptions(cef2gtk.ViewOptions{Backend: cef2gtk.BackendGDKDMABUF})
+plan, err := cef2gtk.ResolveRenderStack(cef2gtk.RenderStackVulkan) // or RenderStackEGL
+if err != nil {
+    return err
+}
+cef2gtk.ConfigureRenderStackEnvironment(plan) // call before GTK initialization
+cef2gtk.ConfigureCommandLine(commandLine, cef2gtk.CommandLineOptions{RenderStackPlan: plan})
+view := cef2gtk.NewViewWithOptions(cef2gtk.ViewOptions{RenderStackPlan: plan})
 ```
 
-Environment overrides:
+Supported stacks:
+
+- `vulkan`: GDK DMABUF presentation with ANGLE Vulkan and GSK Vulkan.
+- `egl`: GtkGLArea presentation with ANGLE GL/EGL and GSK OpenGL.
+
+Environment overrides remain available as diagnostics/backcompat escape hatches:
 
 ```sh
-PUREGO_CEF2GTK_BACKEND=auto|gdk-dmabuf|glarea
+PUREGO_CEF2GTK_BACKEND=gdk-dmabuf|glarea
 PUREGO_CEF2GTK_ANGLE_BACKEND=vulkan|gl-egl|none
 PUREGO_CEF2GTK_OSR_BACKING_SCALE=auto|on|off
 ```
@@ -43,17 +54,23 @@ Recommended local checks:
 
 ```sh
 GSK_RENDERER=vulkan PUREGO_CEF2GTK_BACKEND=gdk-dmabuf go run ./examples/simple-browser
-GSK_RENDERER=ngl PUREGO_CEF2GTK_BACKEND=gdk-dmabuf go run ./examples/simple-browser
-PUREGO_CEF2GTK_BACKEND=glarea go run ./examples/simple-browser
+GSK_RENDERER=opengl PUREGO_CEF2GTK_BACKEND=glarea PUREGO_CEF2GTK_ANGLE_BACKEND=gl-egl go run ./examples/simple-browser
 ```
 
 ## Usage sketch
 
 ```go
-// In cef.App.OnBeforeCommandLineProcessing:
-cef2gtk.ConfigureCommandLine(commandLine, cef2gtk.CommandLineOptions{})
+plan, err := cef2gtk.ResolveRenderStack(cef2gtk.RenderStackVulkan)
+if err != nil {
+    return err
+}
 
-view := cef2gtk.NewView()
+cef2gtk.ConfigureRenderStackEnvironment(plan) // before GTK initialization
+
+// In cef.App.OnBeforeCommandLineProcessing:
+cef2gtk.ConfigureCommandLine(commandLine, cef2gtk.CommandLineOptions{RenderStackPlan: plan})
+
+view := cef2gtk.NewViewWithOptions(cef2gtk.ViewOptions{RenderStackPlan: plan})
 window.SetChild(view.Widget())
 window.Present()
 view.Widget().Realize()
@@ -66,6 +83,7 @@ info := cef.NewWindowInfo()
 // with the appropriate GTK/platform API and pass that handle as Parent.
 cef2gtk.ConfigureWindowInfo(&info, cef2gtk.WindowInfoOptions{Parent: /* realized native handle */})
 settings := cef.NewBrowserSettings()
+cef2gtk.ConfigureBrowserSettings(&settings, cef2gtk.BrowserSettingsOptions{WindowlessFrameRate: 144})
 client := cef.NewClient(myClient{render: view.RenderHandler(cef2gtk.Hooks{})})
 cef.BrowserHostCreateBrowser(&info, client, "https://example.com/", &settings, nil, nil)
 

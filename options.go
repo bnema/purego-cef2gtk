@@ -31,25 +31,51 @@ func (b Backend) String() string {
 
 // ViewOptions configures NewViewWithOptions.
 type ViewOptions struct {
-	// Backend selects the renderer backend. Empty defaults to BackendAuto.
+	// Backend selects the renderer backend. Empty defaults to the Vulkan stack's
+	// GDK DMABUF backend unless RenderStackPlan is provided.
 	Backend Backend
+	// RenderStackPlan selects the renderer backend from a resolved render stack.
+	RenderStackPlan RenderStackPlan
 	// Profile optionally enables development render profiling during construction.
 	Profile ProfileOptions
 }
 
-// Validate verifies that the requested backend is supported by the option schema.
+// Validate verifies that the requested backend/render stack is supported by the option schema.
 func (o ViewOptions) Validate() error {
-	_, err := normalizeBackend(o.Backend)
+	_, err := o.normalized()
 	return err
 }
 
 func (o ViewOptions) normalized() (ViewOptions, error) {
+	if o.RenderStackPlan.Backend != "" {
+		o.Backend = o.RenderStackPlan.Backend
+	}
 	backend, err := normalizeBackend(o.Backend)
 	if err != nil {
 		return ViewOptions{}, err
 	}
+	if o.Backend == "" && backend == BackendAuto && o.RenderStackPlan.Backend == "" {
+		backend = BackendGDKDMABUF
+	}
 	o.Backend = backend
 	return o, nil
+}
+
+func resolveViewOptions(opts ViewOptions) (ViewOptions, error) {
+	planProvided := opts.RenderStackPlan.Backend != ""
+	normalized, err := opts.normalized()
+	if err != nil {
+		return ViewOptions{}, err
+	}
+	if planProvided {
+		return normalized, nil
+	}
+	if envBackend, ok, err := backendFromEnv(); err != nil {
+		return ViewOptions{}, err
+	} else if ok {
+		normalized.Backend = envBackend
+	}
+	return normalized, nil
 }
 
 func normalizeBackend(backend Backend) (Backend, error) {
