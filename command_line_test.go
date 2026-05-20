@@ -44,7 +44,7 @@ func (f *fakeCommandLine) AppendArgument(argument string)                  {}
 func (f *fakeCommandLine) PrependWrapper(wrapper string)                   {}
 func (f *fakeCommandLine) RemoveSwitch(name string)                        { delete(f.switches, name) }
 
-func TestConfigureCommandLineAddsWaylandGLEGLAngleSwitchesByDefault(t *testing.T) {
+func TestConfigureCommandLineAddsWaylandVulkanAngleSwitchesByDefault(t *testing.T) {
 	commandLine := newFakeCommandLine()
 
 	ConfigureCommandLine(commandLine, CommandLineOptions{})
@@ -55,11 +55,32 @@ func TestConfigureCommandLineAddsWaylandGLEGLAngleSwitchesByDefault(t *testing.T
 	if got := commandLine.GetSwitchValue("use-gl"); got != "angle" {
 		t.Fatalf("use-gl = %q, want angle", got)
 	}
+	if got := commandLine.GetSwitchValue("use-angle"); got != "vulkan" {
+		t.Fatalf("use-angle = %q, want vulkan", got)
+	}
+	if got := commandLine.GetSwitchValue("enable-features"); got != "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" {
+		t.Fatalf("enable-features = %q, want Vulkan features", got)
+	}
+}
+
+func TestConfigureCommandLineExplicitRenderStackPlanSelectsEGLAndIgnoresAngleEnv(t *testing.T) {
+	t.Setenv("PUREGO_CEF2GTK_ANGLE_BACKEND", "vulkan")
+	plan, err := ResolveRenderStack(RenderStackEGL)
+	if err != nil {
+		t.Fatalf("ResolveRenderStack(egl) error = %v", err)
+	}
+	commandLine := newFakeCommandLine()
+
+	ConfigureCommandLine(commandLine, CommandLineOptions{RenderStackPlan: plan})
+
+	if got := commandLine.GetSwitchValue("use-gl"); got != "angle" {
+		t.Fatalf("use-gl = %q, want angle", got)
+	}
 	if got := commandLine.GetSwitchValue("use-angle"); got != "gl-egl" {
 		t.Fatalf("use-angle = %q, want gl-egl", got)
 	}
 	if commandLine.HasSwitch("enable-features") {
-		t.Fatalf("enable-features should not be forced for default ANGLE GL/EGL, got %q", commandLine.GetSwitchValue("enable-features"))
+		t.Fatalf("enable-features should not be forced for EGL stack, got %q", commandLine.GetSwitchValue("enable-features"))
 	}
 }
 
@@ -167,10 +188,10 @@ func TestConfigureCommandLineDoesNotOverrideExistingPlatformSwitches(t *testing.
 			wantCount: 4,
 		},
 		{
-			name:      "only ozone exists uses gl egl default",
+			name:      "only ozone exists uses vulkan default",
 			existing:  map[string]string{"ozone-platform": "x11"},
-			want:      map[string]string{"ozone-platform": "x11", "use-gl": "angle", "use-angle": "gl-egl"},
-			wantCount: 3,
+			want:      map[string]string{"ozone-platform": "x11", "use-gl": "angle", "use-angle": "vulkan", "enable-features": "Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"},
+			wantCount: 4,
 		},
 		{
 			name:      "only vulkan angle exists gets vulkan features",

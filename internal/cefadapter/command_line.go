@@ -16,13 +16,28 @@ const (
 	angleBackendEnvVar = "PUREGO_CEF2GTK_ANGLE_BACKEND"
 )
 
+// CommandLineOptions configures CEF command-line switches required for Wayland
+// accelerated rendering without adding software fallbacks.
+type CommandLineOptions struct {
+	// ANGLEBackend selects Chromium's ANGLE backend. Empty defaults to vulkan
+	// unless PUREGO_CEF2GTK_ANGLE_BACKEND is set as a diagnostic override.
+	ANGLEBackend string
+}
+
 // ConfigureWaylandGPUCommandLine configures CEF command-line switches required
 // for Wayland accelerated rendering without adding software fallbacks.
 func ConfigureWaylandGPUCommandLine(commandLine cef.CommandLine) {
+	ConfigureWaylandGPUCommandLineWithOptions(commandLine, CommandLineOptions{})
+}
+
+// ConfigureWaylandGPUCommandLineWithOptions configures CEF command-line switches
+// using typed options while preserving PUREGO_CEF2GTK_ANGLE_BACKEND as a
+// diagnostic override when ANGLEBackend is empty.
+func ConfigureWaylandGPUCommandLineWithOptions(commandLine cef.CommandLine, opts CommandLineOptions) {
 	if commandLine == nil {
 		return
 	}
-	angleBackend, angleBackendExplicit := angleBackendFromEnv()
+	angleBackend, angleBackendExplicit := resolveAngleBackend(opts.ANGLEBackend)
 	if angleBackendExplicit {
 		commandLine.RemoveSwitch(useAngleSwitch)
 		commandLine.AppendSwitchWithValue(useAngleSwitch, angleBackend)
@@ -52,18 +67,23 @@ func ConfigureWaylandGPUCommandLine(commandLine cef.CommandLine) {
 	}
 }
 
-func angleBackendFromEnv() (backend string, explicit bool) {
-	value, explicit := os.LookupEnv(angleBackendEnvVar)
-	return normalizeAngleBackend(value), explicit
+func resolveAngleBackend(option string) (backend string, explicit bool) {
+	if strings.TrimSpace(option) != "" {
+		return normalizeAngleBackend(option, "vulkan"), true
+	}
+	if value, explicit := os.LookupEnv(angleBackendEnvVar); explicit {
+		return normalizeAngleBackend(value, "gl-egl"), true
+	}
+	return "vulkan", false
 }
 
-func normalizeAngleBackend(value string) string {
+func normalizeAngleBackend(value, fallback string) string {
 	normalized := normalizeExistingAngleBackend(value)
 	switch normalized {
-	case "vulkan", "none":
+	case "vulkan", "gl-egl", "none":
 		return normalized
 	default:
-		return "gl-egl"
+		return fallback
 	}
 }
 
