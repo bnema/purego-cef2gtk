@@ -67,6 +67,67 @@ func TestAddSizeObserverImmediatelyCallsWithObservedRealSizeIncludingOneByOne(t 
 	}
 }
 
+func TestResolveObservedDimension(t *testing.T) {
+	tests := []struct {
+		name      string
+		cached    int32
+		allocated int32
+		widget    int32
+		want      int32
+	}{
+		{
+			name:      "uses allocated size when present",
+			cached:    640,
+			allocated: 800,
+			widget:    1,
+			want:      800,
+		},
+		{
+			name:      "preserves cached size across synthetic one pixel fallback",
+			cached:    640,
+			allocated: 0,
+			widget:    1,
+			want:      640,
+		},
+		{
+			name:      "real allocated one pixel replaces larger cached size",
+			cached:    640,
+			allocated: 1,
+			widget:    1,
+			want:      1,
+		},
+		{
+			name:      "allows initial one pixel bootstrap before any real size",
+			cached:    0,
+			allocated: 0,
+			widget:    1,
+			want:      1,
+		},
+		{
+			name:      "accepts widget width above sentinel when allocation missing",
+			cached:    640,
+			allocated: 0,
+			widget:    777,
+			want:      777,
+		},
+		{
+			name:      "keeps zero when nothing observed yet",
+			cached:    0,
+			allocated: 0,
+			widget:    0,
+			want:      0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveObservedDimension(tt.cached, tt.allocated, tt.widget); got != tt.want {
+				t.Fatalf("resolveObservedDimension(%d, %d, %d) = %d, want %d", tt.cached, tt.allocated, tt.widget, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewViewWidgetGLAreaBasics(t *testing.T) {
 	if os.Getenv("PUREGO_CEF2GTK_LIVE_GTK_TEST") == "" {
 		t.Skip("requires live GTK runtime; set PUREGO_CEF2GTK_LIVE_GTK_TEST=1")
