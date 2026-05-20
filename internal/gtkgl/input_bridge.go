@@ -5,10 +5,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf16"
 
 	"github.com/bnema/purego-cef/cef"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gio"
 	"github.com/bnema/puregotk/v4/gtk"
@@ -42,6 +44,7 @@ type InputBridge struct {
 	middleClickConsumed bool
 	selectionText       func() string
 	onClipboardShortcut func(action, text string)
+	profiler            atomic.Pointer[internalprofile.Recorder]
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
@@ -73,6 +76,13 @@ func (ib *InputBridge) SetMiddleClickHandler(fn func(x, y float64) bool) {
 
 // SetClipboardShortcutHandler configures callbacks used to mirror explicit
 // Ctrl+C/Ctrl+X shortcuts to application-level clipboard orchestration.
+func (ib *InputBridge) SetProfiler(profiler *internalprofile.Recorder) {
+	if ib == nil {
+		return
+	}
+	ib.profiler.Store(profiler)
+}
+
 func (ib *InputBridge) SetClipboardShortcutHandler(selectionText func() string, onShortcut func(action, text string)) {
 	if ib == nil {
 		return
@@ -320,6 +330,9 @@ func (ib *InputBridge) onScroll(dx, dy float64, mods uint) {
 	ib.mu.Lock()
 	host, x, y, scale := ib.host, ib.lastX, ib.lastY, ib.scale
 	ib.mu.Unlock()
+	if profiler := ib.profiler.Load(); profiler != nil {
+		profiler.RecordScroll(dx, dy)
+	}
 	if host == nil {
 		return
 	}

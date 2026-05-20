@@ -50,6 +50,23 @@ func TestViewConfigureProfilingInstallsRecorder(t *testing.T) {
 	}
 }
 
+func TestViewRecordExternalBeginFrameSent(t *testing.T) {
+	renderer := &profileTestRenderer{}
+	v := &View{backend: BackendGDKDMABUF, renderer: renderer}
+	if err := v.ConfigureProfiling(ProfileOptions{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	v.RecordExternalBeginFrameSent()
+	snap, ok := renderer.profiler.MaybeSnapshot(now.Add(2*time.Second), time.Second)
+	if !ok {
+		t.Fatal("expected profile snapshot")
+	}
+	if snap.ExternalBeginFramesSent != 1 {
+		t.Fatalf("ExternalBeginFramesSent = %d, want 1", snap.ExternalBeginFramesSent)
+	}
+}
+
 func TestWriteProfileSnapshotWritesJSONLine(t *testing.T) {
 	var buf bytes.Buffer
 	snap := ProfileSnapshot{Time: time.Unix(100, 0), Backend: "gdk-dmabuf", FramesReceived: 3, TexturesBuilt: 2, PaintableSwaps: 2}

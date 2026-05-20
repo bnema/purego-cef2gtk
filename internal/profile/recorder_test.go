@@ -40,6 +40,41 @@ func TestRecorderSnapshotAggregatesAndResetsWindow(t *testing.T) {
 	}
 }
 
+func TestRecorderSnapshotIncludesInputAndBeginFrameCounters(t *testing.T) {
+	r := NewRecorder()
+	start := time.Unix(100, 0)
+	r.Start(start)
+	r.RecordScroll(1.5, -2.25)
+	r.RecordScroll(-0.5, 0.25)
+	r.RecordExternalBeginFrameSent()
+	r.RecordExternalBeginFrameSent()
+
+	snap, ok := r.MaybeSnapshot(start.Add(time.Second), time.Second)
+	if !ok {
+		t.Fatal("snapshot not emitted")
+	}
+	if snap.ScrollEvents != 2 {
+		t.Fatalf("ScrollEvents = %d, want 2", snap.ScrollEvents)
+	}
+	if snap.ScrollDXSum != 1.0 || snap.ScrollDYSum != -2.0 {
+		t.Fatalf("scroll sums = (%v,%v), want (1,-2)", snap.ScrollDXSum, snap.ScrollDYSum)
+	}
+	if snap.ScrollAbsDXSum != 2.0 || snap.ScrollAbsDYSum != 2.5 {
+		t.Fatalf("scroll abs sums = (%v,%v), want (2,2.5)", snap.ScrollAbsDXSum, snap.ScrollAbsDYSum)
+	}
+	if snap.ExternalBeginFramesSent != 2 {
+		t.Fatalf("ExternalBeginFramesSent = %d, want 2", snap.ExternalBeginFramesSent)
+	}
+
+	snap, ok = r.MaybeSnapshot(start.Add(2*time.Second), time.Second)
+	if !ok {
+		t.Fatal("second snapshot not emitted")
+	}
+	if snap.ScrollEvents != 0 || snap.ExternalBeginFramesSent != 0 {
+		t.Fatalf("hot-path counters did not reset: %+v", snap)
+	}
+}
+
 func TestSnapshotJSONUsesMillisecondFields(t *testing.T) {
 	stats := DurationStats{}
 	stats.Add(1500 * time.Microsecond)

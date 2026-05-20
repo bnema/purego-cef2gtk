@@ -74,6 +74,7 @@ type View struct {
 	nextSizeHookID     uint64
 	profileMu          sync.Mutex
 	profileEnabled     atomic.Bool
+	profilePtr         atomic.Pointer[internalprofile.Recorder]
 	profile            *internalprofile.Recorder
 	profileOptions     ProfileOptions
 }
@@ -514,17 +515,25 @@ func (v *View) ConfigureProfiling(opts ProfileOptions) error {
 	if !opts.Enabled {
 		v.profileEnabled.Store(false)
 		v.profile = nil
+		v.profilePtr.Store(nil)
 		v.profileOptions = ProfileOptions{}
 		v.renderer.SetProfiler(nil)
+		if v.input != nil {
+			v.input.SetProfiler(nil)
+		}
 		return nil
 	}
 	recorder := internalprofile.NewRecorder()
 	recorder.SetBackend(v.backend.String())
 	recorder.Start(time.Now())
 	v.profile = recorder
+	v.profilePtr.Store(recorder)
 	v.profileOptions = opts
 	v.profileEnabled.Store(true)
 	v.renderer.SetProfiler(recorder)
+	if v.input != nil {
+		v.input.SetProfiler(recorder)
+	}
 	return nil
 }
 
@@ -532,9 +541,7 @@ func (v *View) profileRecorder() *internalprofile.Recorder {
 	if v == nil || !v.profileEnabled.Load() {
 		return nil
 	}
-	v.profileMu.Lock()
-	defer v.profileMu.Unlock()
-	return v.profile
+	return v.profilePtr.Load()
 }
 
 func (v *View) recordProfileFrameReceived() {
@@ -570,6 +577,12 @@ func (v *View) recordProfileRenderFailure() {
 func (v *View) recordProfileUnsupportedPaint() {
 	if p := v.profileRecorder(); p != nil {
 		p.RecordUnsupportedPaint()
+	}
+}
+
+func (v *View) RecordExternalBeginFrameSent() {
+	if p := v.profileRecorder(); p != nil {
+		p.RecordExternalBeginFrameSent()
 	}
 }
 

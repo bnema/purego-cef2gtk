@@ -2,8 +2,10 @@ package gtkgl
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
 )
 
@@ -11,6 +13,24 @@ func TestTranslateScrollDeltas(t *testing.T) {
 	x, y := TranslateScrollDeltas(1.5, -2)
 	if x != 180 || y != 240 {
 		t.Fatalf("TranslateScrollDeltas = (%d,%d), want (180,240)", x, y)
+	}
+}
+
+func TestInputBridgeRecordsScrollInProfiler(t *testing.T) {
+	recorder := internalprofile.NewRecorder()
+	start := time.Unix(100, 0)
+	recorder.Start(start)
+	ib := NewInputBridge(nil, 1)
+	ib.SetProfiler(recorder)
+
+	ib.onScroll(1.5, -2.25, 0)
+
+	snap, ok := recorder.MaybeSnapshot(start.Add(time.Second), time.Second)
+	if !ok {
+		t.Fatal("snapshot not emitted")
+	}
+	if snap.ScrollEvents != 1 || snap.ScrollDXSum != 1.5 || snap.ScrollDYSum != -2.25 {
+		t.Fatalf("scroll profile = %+v", snap)
 	}
 }
 
