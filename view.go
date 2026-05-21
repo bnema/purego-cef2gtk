@@ -489,7 +489,7 @@ func (v *View) effectiveInputWidget() *gtk.Widget {
 	if v == nil {
 		return nil
 	}
-	if v.inputWidget != nil {
+	if v.input != nil && v.inputWidget != nil {
 		return v.inputWidget
 	}
 	return v.widget
@@ -684,6 +684,7 @@ func (v *View) Destroy() error {
 		v.input.Detach()
 		v.input = nil
 	}
+	v.inputWidget = nil
 	if v.widget != nil && v.sizeTickID != 0 {
 		v.widget.RemoveTickCallback(v.sizeTickID)
 		v.sizeTickID = 0

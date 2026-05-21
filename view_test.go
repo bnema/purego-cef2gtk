@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -72,19 +73,31 @@ func TestAddSizeObserverImmediatelyCallsWithObservedRealSizeIncludingOneByOne(t 
 func TestEffectiveInputWidgetPrefersAttachedInputWidget(t *testing.T) {
 	renderWidget := &gtk.Widget{}
 	inputWidget := &gtk.Widget{}
-	v := &View{widget: renderWidget, inputWidget: inputWidget}
+	v := &View{widget: renderWidget, input: &gtkgl.InputBridge{}, inputWidget: inputWidget}
 
 	if got := v.effectiveInputWidget(); got != inputWidget {
 		t.Fatalf("effectiveInputWidget = %p, want input widget %p", got, inputWidget)
 	}
 }
 
-func TestEffectiveInputWidgetFallsBackToRenderWidget(t *testing.T) {
+func TestEffectiveInputWidgetFallsBackToRenderWidgetWhenInputNotAttached(t *testing.T) {
 	renderWidget := &gtk.Widget{}
-	v := &View{widget: renderWidget}
+	inputWidget := &gtk.Widget{}
+	v := &View{widget: renderWidget, inputWidget: inputWidget}
 
 	if got := v.effectiveInputWidget(); got != renderWidget {
 		t.Fatalf("effectiveInputWidget = %p, want render widget %p", got, renderWidget)
+	}
+}
+
+func TestDestroyClearsInputWidget(t *testing.T) {
+	v := &View{widget: &gtk.Widget{}, inputWidget: &gtk.Widget{}}
+
+	if err := v.Destroy(); err != nil {
+		t.Fatalf("Destroy() error = %v", err)
+	}
+	if v.inputWidget != nil {
+		t.Fatalf("Destroy() left inputWidget set")
 	}
 }
 
