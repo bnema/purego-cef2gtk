@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	"github.com/bnema/puregotk/v4/gtk"
 )
 
 var ErrInputNotAttached = errors.New("input bridge is not attached")
@@ -61,9 +62,18 @@ func (v *View) inputScaleForObservedScale(observedScale float64) float64 {
 	return inputScaleForOSRBacking(observedScale)
 }
 
-// AttachInput attaches GTK event controllers to the view and forwards input to host.
-// Call from the GTK/main thread; GTK controller attachment is not goroutine-safe.
+// AttachInput attaches GTK event controllers to the view's render widget and
+// forwards input to host. Call from the GTK/main thread; GTK controller
+// attachment is not goroutine-safe.
 func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
+	return v.AttachInputToWidget(host, nil, opts)
+}
+
+// AttachInputToWidget attaches GTK event controllers to widget and forwards
+// input to host. When widget is nil, the view's render widget is used. This is
+// useful when the render widget is embedded inside another focusable container
+// that should own GTK keyboard focus, such as a GtkOverlay wrapper.
+func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opts InputOptions) error {
 	if v == nil {
 		return ErrNilView
 	}
@@ -75,11 +85,19 @@ func (v *View) AttachInput(host cef.BrowserHost, opts InputOptions) error {
 	}
 	v.setInputScaleOverride(opts.Scale)
 	scale := v.inputScaleForObservedScale(float64(v.DeviceScaleFactor()))
+	targetWidget := widget
+	if targetWidget == nil {
+		targetWidget = v.widget
+	}
+	if targetWidget == nil {
+		return ErrViewNotInitialized
+	}
 	v.input = gtkgl.NewInputBridge(host, scale)
 	v.input.SetProfiler(v.profileRecorder())
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
-	v.input.AttachToWidget(v.widget)
+	v.input.AttachToWidget(targetWidget)
+	v.inputWidget = targetWidget
 	return nil
 }
 
@@ -92,6 +110,7 @@ func (v *View) DetachInput() error {
 		v.input.Detach()
 		v.input = nil
 	}
+	v.inputWidget = nil
 	v.setInputScaleOverride(0)
 	return nil
 }

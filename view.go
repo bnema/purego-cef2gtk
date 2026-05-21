@@ -50,6 +50,7 @@ type View struct {
 	renderer           renderer
 	signalObject       *gobject.Object
 	input              *gtkgl.InputBridge
+	inputWidget        *gtk.Widget
 	diag               *diagnosticsRecorder
 	hooks              Hooks
 	handler            *renderHandler
@@ -474,13 +475,24 @@ func (v *View) renderOnGTKThread() bool {
 	return true
 }
 
-// HasFocus reports whether the underlying GTK widget currently has focus.
+// HasFocus reports whether the effective GTK input widget currently has focus.
 // Call on the GTK main thread.
 func (v *View) HasFocus() bool {
-	if v == nil || v.widget == nil {
+	widget := v.effectiveInputWidget()
+	if widget == nil {
 		return false
 	}
-	return v.widget.HasFocus()
+	return widget.HasFocus()
+}
+
+func (v *View) effectiveInputWidget() *gtk.Widget {
+	if v == nil {
+		return nil
+	}
+	if v.input != nil && v.inputWidget != nil {
+		return v.inputWidget
+	}
+	return v.widget
 }
 
 // SetCursorFromName applies a named cursor to the underlying GTK widget. Call
@@ -672,6 +684,7 @@ func (v *View) Destroy() error {
 		v.input.Detach()
 		v.input = nil
 	}
+	v.inputWidget = nil
 	if v.widget != nil && v.sizeTickID != 0 {
 		v.widget.RemoveTickCallback(v.sizeTickID)
 		v.sizeTickID = 0
