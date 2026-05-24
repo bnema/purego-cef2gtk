@@ -3,6 +3,7 @@ package cef2gtk
 import (
 	"testing"
 
+	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -45,8 +46,37 @@ func TestViewSizeTickObservation_RearmWhileActiveResetsWithoutSecondRegistration
 	if v.runSizeTickObservation() {
 		t.Fatal("third stable tick after re-arm should stop")
 	}
-	if v.sizeTickID != 0 || v.sizeTickFunc != nil {
-		t.Fatalf("tick state not cleared after stop: id=%d callback=%v", v.sizeTickID, v.sizeTickFunc != nil)
+	if v.sizeTickID != 0 {
+		t.Fatalf("tick state not cleared after stop: id=%d", v.sizeTickID)
+	}
+	if v.sizeTickFunc == nil {
+		t.Fatal("size tick callback should be retained for reuse after stop")
+	}
+}
+
+func TestViewSizeTickObservation_ReusesCallbackAcrossCompletedArms(t *testing.T) {
+	sample := sizeObservationSample{width: 800, height: 600, scale: 1}
+	var callbacks []*gtk.TickCallback
+	v := &View{
+		widget:                    &gtk.Widget{},
+		sizeObservationSampleFunc: func() sizeObservationSample { return sample },
+		sizeTickRegistrar: func(cb *gtk.TickCallback) uint {
+			callbacks = append(callbacks, cb)
+			return uint(len(callbacks))
+		},
+	}
+
+	v.handleObservationSignal()
+	for v.sizeTickID != 0 {
+		v.runSizeTickObservation()
+	}
+	v.handleObservationSignal()
+
+	if len(callbacks) != 2 {
+		t.Fatalf("tick registrations = %d, want 2", len(callbacks))
+	}
+	if callbacks[0] != callbacks[1] {
+		t.Fatal("size tick callback pointer was replaced across completed observation arms")
 	}
 }
 
@@ -112,6 +142,32 @@ func TestViewSizeTickObservation_StopsAfterBudgetDuringSentinelChurn(t *testing.
 	}
 	if v.sizeTickID != 0 {
 		t.Fatalf("sizeTickID = %d after budget stop, want 0", v.sizeTickID)
+	}
+}
+
+func TestViewSurfaceObservation_RetainsCachedSurfaceUntilDisconnect(t *testing.T) {
+	var retained int
+	var released int
+	v := &View{
+		surfaceRefFunc:   func(*gdk.Surface) { retained++ },
+		surfaceUnrefFunc: func(*gdk.Surface) { released++ },
+	}
+	surface := &gdk.Surface{}
+
+	v.setObservedSurface(surface)
+	if retained != 1 {
+		t.Fatalf("surface retain calls = %d, want 1", retained)
+	}
+	if released != 0 {
+		t.Fatalf("surface release calls = %d before disconnect, want 0", released)
+	}
+
+	v.disconnectSurfaceSignals()
+	if released != 1 {
+		t.Fatalf("surface release calls = %d after disconnect, want 1", released)
+	}
+	if v.surface != nil {
+		t.Fatal("surface cache should be cleared after disconnect")
 	}
 }
 

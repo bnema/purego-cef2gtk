@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/glib"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
@@ -82,6 +83,8 @@ type View struct {
 	sizeTickSettler             sizeTickSettler
 	sizeObservationSampleFunc   func() sizeObservationSample
 	sizeTickRegistrar           func(*gtk.TickCallback) uint
+	surfaceRefFunc              func(*gdk.Surface)
+	surfaceUnrefFunc            func(*gdk.Surface)
 	surface                     *gdk.Surface
 	cachedWidth                 atomic.Int32
 	cachedHeight                atomic.Int32
@@ -185,7 +188,10 @@ func (v *View) connectRenderSignal() {
 	v.showFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.unrealizeFunc = func(gtk.Widget) {
-		v.disconnectSurfaceSignals()
+		// Keep surface signal connections across transient unrealize/realize churn.
+		// Reconnecting on every tab switch/map cycle allocates purego callback
+		// trampolines until the process aborts under stress. Destroy() still
+		// disconnects the signals when the view lifetime ends.
 		if v.renderer != nil {
 			v.renderer.InvalidateOnGTKThread()
 		}
@@ -242,7 +248,37 @@ func (v *View) refreshSurfaceSignals() {
 	v.surfaceScaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
 	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[0], &v.surfaceScaleNotify)
 	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[1], &v.surfaceScaleNotify)
+	v.setObservedSurface(surface)
+}
+
+func (v *View) setObservedSurface(surface *gdk.Surface) {
+	if v == nil || surface == nil {
+		return
+	}
+	v.retainObservedSurface(surface)
 	v.surface = surface
+}
+
+func (v *View) retainObservedSurface(surface *gdk.Surface) {
+	if surface == nil {
+		return
+	}
+	if v != nil && v.surfaceRefFunc != nil {
+		v.surfaceRefFunc(surface)
+		return
+	}
+	_ = surface.Object.Ref()
+}
+
+func (v *View) releaseObservedSurface(surface *gdk.Surface) {
+	if surface == nil {
+		return
+	}
+	if v != nil && v.surfaceUnrefFunc != nil {
+		v.surfaceUnrefFunc(surface)
+		return
+	}
+	surface.Object.Unref()
 }
 
 func (v *View) disconnectSurfaceSignals() {
@@ -272,7 +308,9 @@ func (v *View) disconnectSurfaceSignals() {
 	// Keep callback function fields alive after disconnect. GTK can still deliver
 	// already-queued notify/layout emissions while rapidly mapping/unmapping views;
 	// niling these fields lets puregotk's trampoline dereference a nil Go func.
+	surface := v.surface
 	v.surface = nil
+	v.releaseObservedSurface(surface)
 }
 
 func sameSurface(a, b *gdk.Surface) bool {
@@ -290,11 +328,14 @@ func (v *View) armSizeTickObservation() {
 	if v.sizeTickID != 0 {
 		return
 	}
-	cb := new(gtk.TickCallback)
-	*cb = func(_, _, _ uintptr) bool {
-		return v.runSizeTickObservation()
+	cb := v.sizeTickFunc
+	if cb == nil {
+		cb = new(gtk.TickCallback)
+		*cb = func(_, _, _ uintptr) bool {
+			return v.runSizeTickObservation()
+		}
+		v.sizeTickFunc = cb
 	}
-	v.sizeTickFunc = cb
 	v.sizeTickID = v.registerSizeTickCallback(cb)
 }
 
@@ -306,7 +347,6 @@ func (v *View) runSizeTickObservation() bool {
 	keepTicking := v.sizeTickSettler.Next(sample.width, sample.height, sample.scale)
 	if !keepTicking {
 		v.sizeTickID = 0
-		v.sizeTickFunc = nil
 	}
 	return keepTicking
 }
@@ -828,6 +868,9 @@ func (v *View) Destroy() error {
 	if v.widget != nil && v.sizeTickID != 0 {
 		v.widget.RemoveTickCallback(v.sizeTickID)
 		v.sizeTickID = 0
+	}
+	if v.sizeTickFunc != nil {
+		_ = glib.UnrefCallback(v.sizeTickFunc)
 		v.sizeTickFunc = nil
 	}
 	v.disconnectSurfaceSignals()
