@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/glib"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
@@ -293,11 +294,14 @@ func (v *View) armSizeTickObservation() {
 	if v.sizeTickID != 0 {
 		return
 	}
-	cb := new(gtk.TickCallback)
-	*cb = func(_, _, _ uintptr) bool {
-		return v.runSizeTickObservation()
+	cb := v.sizeTickFunc
+	if cb == nil {
+		cb = new(gtk.TickCallback)
+		*cb = func(_, _, _ uintptr) bool {
+			return v.runSizeTickObservation()
+		}
+		v.sizeTickFunc = cb
 	}
-	v.sizeTickFunc = cb
 	v.sizeTickID = v.registerSizeTickCallback(cb)
 }
 
@@ -309,7 +313,6 @@ func (v *View) runSizeTickObservation() bool {
 	keepTicking := v.sizeTickSettler.Next(sample.width, sample.height, sample.scale)
 	if !keepTicking {
 		v.sizeTickID = 0
-		v.sizeTickFunc = nil
 	}
 	return keepTicking
 }
@@ -831,6 +834,9 @@ func (v *View) Destroy() error {
 	if v.widget != nil && v.sizeTickID != 0 {
 		v.widget.RemoveTickCallback(v.sizeTickID)
 		v.sizeTickID = 0
+	}
+	if v.sizeTickFunc != nil {
+		_ = glib.UnrefCallback(v.sizeTickFunc)
 		v.sizeTickFunc = nil
 	}
 	v.disconnectSurfaceSignals()

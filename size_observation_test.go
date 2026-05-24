@@ -45,8 +45,37 @@ func TestViewSizeTickObservation_RearmWhileActiveResetsWithoutSecondRegistration
 	if v.runSizeTickObservation() {
 		t.Fatal("third stable tick after re-arm should stop")
 	}
-	if v.sizeTickID != 0 || v.sizeTickFunc != nil {
-		t.Fatalf("tick state not cleared after stop: id=%d callback=%v", v.sizeTickID, v.sizeTickFunc != nil)
+	if v.sizeTickID != 0 {
+		t.Fatalf("tick state not cleared after stop: id=%d", v.sizeTickID)
+	}
+	if v.sizeTickFunc == nil {
+		t.Fatal("size tick callback should be retained for reuse after stop")
+	}
+}
+
+func TestViewSizeTickObservation_ReusesCallbackAcrossCompletedArms(t *testing.T) {
+	sample := sizeObservationSample{width: 800, height: 600, scale: 1}
+	var callbacks []*gtk.TickCallback
+	v := &View{
+		widget:                    &gtk.Widget{},
+		sizeObservationSampleFunc: func() sizeObservationSample { return sample },
+		sizeTickRegistrar: func(cb *gtk.TickCallback) uint {
+			callbacks = append(callbacks, cb)
+			return uint(len(callbacks))
+		},
+	}
+
+	v.handleObservationSignal()
+	for v.sizeTickID != 0 {
+		v.runSizeTickObservation()
+	}
+	v.handleObservationSignal()
+
+	if len(callbacks) != 2 {
+		t.Fatalf("tick registrations = %d, want 2", len(callbacks))
+	}
+	if callbacks[0] != callbacks[1] {
+		t.Fatal("size tick callback pointer was replaced across completed observation arms")
 	}
 }
 
