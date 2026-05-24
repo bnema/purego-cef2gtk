@@ -44,51 +44,61 @@ type renderer interface {
 
 // View is a GTK-backed CEF OSR view.
 type View struct {
-	backend                   Backend
-	widget                    *gtk.Widget
-	area                      *gtk.GLArea
-	renderer                  renderer
-	signalObject              *gobject.Object
-	input                     *gtkgl.InputBridge
-	inputWidget               *gtk.Widget
-	diag                      *diagnosticsRecorder
-	hooks                     Hooks
-	handler                   *renderHandler
-	renderFunc                func(gtk.GLArea, uintptr) bool
-	mapFunc                   func(gtk.Widget)
-	showFunc                  func(gtk.Widget)
-	realizeFunc               func(gtk.Widget)
-	unrealizeFunc             func(gtk.Widget)
-	sizeTickFunc              *gtk.TickCallback
-	renderHandlerID           uint
-	mapHandlerID              uint
-	showHandlerID             uint
-	realizeHandlerID          uint
-	unrealizeHandlerID        uint
-	sizeTickID                uint
-	widthNotify               func(gobject.Object, *gobject.ParamSpec)
-	heightNotify              func(gobject.Object, *gobject.ParamSpec)
-	scaleNotify               func(gobject.Object, *gobject.ParamSpec)
-	widthHandlerID            uint
-	heightHandlerID           uint
-	scaleHandlerID            uint
-	sizeTickSettler           sizeTickSettler
-	sizeObservationSampleFunc func() sizeObservationSample
-	sizeTickRegistrar         func(*gtk.TickCallback) uint
-	cachedWidth               atomic.Int32
-	cachedHeight              atomic.Int32
-	scaleBits                 atomic.Uint64
-	inputScaleOverride        atomic.Uint64
-	scaleTraceCount           atomic.Uint64
-	osrTraceCount             atomic.Uint64
-	sizeHooksMu               sync.Mutex
-	sizeHooks                 map[uint64]func(width, height int32)
-	nextSizeHookID            uint64
-	profileMu                 sync.Mutex
-	profileEnabled            atomic.Bool
-	profilePtr                atomic.Pointer[internalprofile.Recorder]
-	profile                   *internalprofile.Recorder
-	profileOptions            ProfileOptions
+	backend                     Backend
+	widget                      *gtk.Widget
+	area                        *gtk.GLArea
+	renderer                    renderer
+	signalObject                *gobject.Object
+	input                       *gtkgl.InputBridge
+	inputWidget                 *gtk.Widget
+	diag                        *diagnosticsRecorder
+	hooks                       Hooks
+	handler                     *renderHandler
+	renderFunc                  func(gtk.GLArea, uintptr) bool
+	resizeFunc                  func(gtk.GLArea, int, int)
+	mapFunc                     func(gtk.Widget)
+	showFunc                    func(gtk.Widget)
+	realizeFunc                 func(gtk.Widget)
+	unrealizeFunc               func(gtk.Widget)
+	surfaceWidthNotify          func(gobject.Object, *gobject.ParamSpec)
+	surfaceHeightNotify         func(gobject.Object, *gobject.ParamSpec)
+	surfaceScaleNotify          func(gobject.Object, *gobject.ParamSpec)
+	sizeTickFunc                *gtk.TickCallback
+	renderHandlerID             uint
+	resizeHandlerID             uint
+	mapHandlerID                uint
+	showHandlerID               uint
+	realizeHandlerID            uint
+	unrealizeHandlerID          uint
+	surfaceWidthHandlerID       uint
+	surfaceHeightHandlerID      uint
+	surfaceScaleHandlerID       uint
+	surfaceScaleFactorHandlerID uint
+	sizeTickID                  uint
+	widthNotify                 func(gobject.Object, *gobject.ParamSpec)
+	heightNotify                func(gobject.Object, *gobject.ParamSpec)
+	scaleNotify                 func(gobject.Object, *gobject.ParamSpec)
+	widthHandlerID              uint
+	heightHandlerID             uint
+	scaleHandlerID              uint
+	sizeTickSettler             sizeTickSettler
+	sizeObservationSampleFunc   func() sizeObservationSample
+	sizeTickRegistrar           func(*gtk.TickCallback) uint
+	surface                     *gdk.Surface
+	cachedWidth                 atomic.Int32
+	cachedHeight                atomic.Int32
+	scaleBits                   atomic.Uint64
+	inputScaleOverride          atomic.Uint64
+	scaleTraceCount             atomic.Uint64
+	osrTraceCount               atomic.Uint64
+	sizeHooksMu                 sync.Mutex
+	sizeHooks                   map[uint64]func(width, height int32)
+	nextSizeHookID              uint64
+	profileMu                   sync.Mutex
+	profileEnabled              atomic.Bool
+	profilePtr                  atomic.Pointer[internalprofile.Recorder]
+	profile                     *internalprofile.Recorder
+	profileOptions              ProfileOptions
 }
 
 // NewView creates an accelerated CEF view using the default Vulkan/GDK DMABUF
@@ -180,6 +190,7 @@ func (v *View) connectRenderSignal() {
 	v.showFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.unrealizeFunc = func(gtk.Widget) {
+		v.disconnectSurfaceSignals()
 		if v.renderer != nil {
 			v.renderer.InvalidateOnGTKThread()
 		}
@@ -192,6 +203,8 @@ func (v *View) connectRenderSignal() {
 	if v.area == nil {
 		return
 	}
+	v.resizeFunc = func(gtk.GLArea, int, int) { v.handleObservationSignal() }
+	v.resizeHandlerID = v.area.ConnectResize(&v.resizeFunc)
 	v.renderFunc = func(_ gtk.GLArea, _ uintptr) bool {
 		v.updateCachedSizeOnGTKThread()
 		return v.renderOnGTKThread()
@@ -203,8 +216,64 @@ func (v *View) handleObservationSignal() {
 	if v == nil {
 		return
 	}
+	v.refreshSurfaceSignals()
 	v.currentSizeObservationOnGTKThread()
 	v.armSizeTickObservation()
+}
+
+func (v *View) refreshSurfaceSignals() {
+	if v == nil || v.widget == nil {
+		return
+	}
+	surface := widgetSurface(v.widget)
+	if sameSurface(v.surface, surface) {
+		return
+	}
+	v.disconnectSurfaceSignals()
+	if surface == nil {
+		return
+	}
+	v.surfaceWidthNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	v.surfaceHeightNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	v.surfaceScaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	v.surfaceWidthHandlerID = surface.ConnectNotifyWithDetail("width", &v.surfaceWidthNotify)
+	v.surfaceHeightHandlerID = surface.ConnectNotifyWithDetail("height", &v.surfaceHeightNotify)
+	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail("scale", &v.surfaceScaleNotify)
+	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail("scale-factor", &v.surfaceScaleNotify)
+	v.surface = surface
+}
+
+func (v *View) disconnectSurfaceSignals() {
+	if v == nil || v.surface == nil {
+		return
+	}
+	if v.surfaceWidthHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceWidthHandlerID)
+		v.surfaceWidthHandlerID = 0
+	}
+	if v.surfaceHeightHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceHeightHandlerID)
+		v.surfaceHeightHandlerID = 0
+	}
+	if v.surfaceScaleHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceScaleHandlerID)
+		v.surfaceScaleHandlerID = 0
+	}
+	if v.surfaceScaleFactorHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceScaleFactorHandlerID)
+		v.surfaceScaleFactorHandlerID = 0
+	}
+	v.surfaceWidthNotify = nil
+	v.surfaceHeightNotify = nil
+	v.surfaceScaleNotify = nil
+	v.surface = nil
+}
+
+func sameSurface(a, b *gdk.Surface) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.GoPointer() == b.GoPointer()
 }
 
 func (v *View) armSizeTickObservation() {
@@ -755,6 +824,7 @@ func (v *View) Destroy() error {
 		v.sizeTickID = 0
 		v.sizeTickFunc = nil
 	}
+	v.disconnectSurfaceSignals()
 	if v.signalObject != nil {
 		if v.widthHandlerID != 0 {
 			gobject.SignalHandlerDisconnect(v.signalObject, v.widthHandlerID)
@@ -786,9 +856,15 @@ func (v *View) Destroy() error {
 		}
 		v.signalObject = nil
 	}
-	if v.area != nil && v.renderHandlerID != 0 {
-		gobject.SignalHandlerDisconnect(&v.area.Object, v.renderHandlerID)
-		v.renderHandlerID = 0
+	if v.area != nil {
+		if v.resizeHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(&v.area.Object, v.resizeHandlerID)
+			v.resizeHandlerID = 0
+		}
+		if v.renderHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(&v.area.Object, v.renderHandlerID)
+			v.renderHandlerID = 0
+		}
 	}
 	if v.renderer != nil {
 		if v.area != nil {
