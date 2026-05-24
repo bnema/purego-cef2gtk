@@ -233,13 +233,15 @@ func (v *View) refreshSurfaceSignals() {
 		v.surfaceLayoutFunc = func(gdk.Surface, int, int) { v.handleObservationSignal() }
 		v.surfaceLayoutHandlerID = surface.ConnectLayout(&v.surfaceLayoutFunc)
 	}
-	v.surfaceWidthNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
-	v.surfaceHeightNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	if len(strategy.surfaceSizeNotifyDetails) > 0 {
+		v.surfaceWidthNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+		v.surfaceHeightNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+		v.surfaceWidthHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceSizeNotifyDetails[0], &v.surfaceWidthNotify)
+		v.surfaceHeightHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceSizeNotifyDetails[1], &v.surfaceHeightNotify)
+	}
 	v.surfaceScaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
-	v.surfaceWidthHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[0], &v.surfaceWidthNotify)
-	v.surfaceHeightHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[1], &v.surfaceHeightNotify)
-	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[2], &v.surfaceScaleNotify)
-	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[3], &v.surfaceScaleNotify)
+	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[0], &v.surfaceScaleNotify)
+	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[1], &v.surfaceScaleNotify)
 	v.surface = surface
 }
 
@@ -362,7 +364,7 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	if changed || scaleChanged {
 		v.traceScaleObservation("widget-update", width, height, prevScale, obs)
 	}
-	if (changed || scaleChanged) && width > 0 && height > 0 {
+	if shouldEmitSizeHooks(changed, scaleChanged) && width > 0 && height > 0 {
 		v.emitSizeHooks(width, height)
 	}
 }

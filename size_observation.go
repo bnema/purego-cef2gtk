@@ -14,19 +14,28 @@ type sizeObservationSample struct {
 }
 
 type sizeObservationStrategyConfig struct {
-	widgetNotifyDetails  []string
-	surfaceNotifyDetails []string
-	useGLAreaResize      bool
-	useSurfaceLayout     bool
+	widgetNotifyDetails       []string
+	surfaceSizeNotifyDetails  []string
+	surfaceScaleNotifyDetails []string
+	useGLAreaResize           bool
+	useSurfaceLayout          bool
 }
 
 func sizeObservationStrategy(hasGLArea bool) sizeObservationStrategyConfig {
-	return sizeObservationStrategyConfig{
-		widgetNotifyDetails:  []string{"scale-factor"},
-		surfaceNotifyDetails: []string{"width", "height", "scale", "scale-factor"},
-		useGLAreaResize:      hasGLArea,
-		useSurfaceLayout:     !hasGLArea,
+	cfg := sizeObservationStrategyConfig{
+		widgetNotifyDetails:       []string{"scale-factor"},
+		surfaceScaleNotifyDetails: []string{"scale", "scale-factor"},
+		useGLAreaResize:           hasGLArea,
+		useSurfaceLayout:          !hasGLArea,
 	}
+	if !hasGLArea {
+		cfg.surfaceSizeNotifyDetails = []string{"width", "height"}
+	}
+	return cfg
+}
+
+func shouldEmitSizeHooks(sizeChanged, _ bool) bool {
+	return sizeChanged
 }
 
 type sizeTickSettler struct {

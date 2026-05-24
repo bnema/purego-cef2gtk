@@ -120,6 +120,12 @@ func TestSizeObservationStrategy_GLAreaUsesWidgetScaleAndGLAreaResize(t *testing
 	if len(strategy.widgetNotifyDetails) != 1 || strategy.widgetNotifyDetails[0] != "scale-factor" {
 		t.Fatalf("widget notify details = %v, want only scale-factor", strategy.widgetNotifyDetails)
 	}
+	if len(strategy.surfaceSizeNotifyDetails) != 0 {
+		t.Fatalf("surface size notify details = %v, want none for GLArea", strategy.surfaceSizeNotifyDetails)
+	}
+	if len(strategy.surfaceScaleNotifyDetails) != 2 || strategy.surfaceScaleNotifyDetails[0] != "scale" || strategy.surfaceScaleNotifyDetails[1] != "scale-factor" {
+		t.Fatalf("surface scale notify details = %v, want [scale scale-factor]", strategy.surfaceScaleNotifyDetails)
+	}
 	if !strategy.useGLAreaResize {
 		t.Fatal("GLArea strategy should use GtkGLArea::resize")
 	}
@@ -133,10 +139,38 @@ func TestSizeObservationStrategy_GDKDMABUFUsesSurfaceLayoutWithoutDeadWidgetSize
 	if len(strategy.widgetNotifyDetails) != 1 || strategy.widgetNotifyDetails[0] != "scale-factor" {
 		t.Fatalf("widget notify details = %v, want only scale-factor", strategy.widgetNotifyDetails)
 	}
+	if len(strategy.surfaceSizeNotifyDetails) != 2 || strategy.surfaceSizeNotifyDetails[0] != "width" || strategy.surfaceSizeNotifyDetails[1] != "height" {
+		t.Fatalf("surface size notify details = %v, want [width height]", strategy.surfaceSizeNotifyDetails)
+	}
+	if len(strategy.surfaceScaleNotifyDetails) != 2 || strategy.surfaceScaleNotifyDetails[0] != "scale" || strategy.surfaceScaleNotifyDetails[1] != "scale-factor" {
+		t.Fatalf("surface scale notify details = %v, want [scale scale-factor]", strategy.surfaceScaleNotifyDetails)
+	}
 	if strategy.useGLAreaResize {
 		t.Fatal("GDKDMABUF strategy should not use GtkGLArea::resize")
 	}
 	if !strategy.useSurfaceLayout {
 		t.Fatal("GDKDMABUF strategy should use GdkSurface::layout to observe child allocation relayouts")
+	}
+}
+
+func TestShouldEmitSizeHooksOnSizeChangeOnly(t *testing.T) {
+	tests := []struct {
+		name         string
+		sizeChanged  bool
+		scaleChanged bool
+		want         bool
+	}{
+		{name: "size change only", sizeChanged: true, scaleChanged: false, want: true},
+		{name: "size and scale change", sizeChanged: true, scaleChanged: true, want: true},
+		{name: "scale change only", sizeChanged: false, scaleChanged: true, want: false},
+		{name: "no change", sizeChanged: false, scaleChanged: false, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldEmitSizeHooks(tt.sizeChanged, tt.scaleChanged); got != tt.want {
+				t.Fatalf("shouldEmitSizeHooks(%t, %t) = %t, want %t", tt.sizeChanged, tt.scaleChanged, got, tt.want)
+			}
+		})
 	}
 }
