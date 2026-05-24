@@ -83,6 +83,8 @@ type View struct {
 	sizeTickSettler             sizeTickSettler
 	sizeObservationSampleFunc   func() sizeObservationSample
 	sizeTickRegistrar           func(*gtk.TickCallback) uint
+	surfaceRefFunc              func(*gdk.Surface)
+	surfaceUnrefFunc            func(*gdk.Surface)
 	surface                     *gdk.Surface
 	cachedWidth                 atomic.Int32
 	cachedHeight                atomic.Int32
@@ -246,7 +248,37 @@ func (v *View) refreshSurfaceSignals() {
 	v.surfaceScaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
 	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[0], &v.surfaceScaleNotify)
 	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[1], &v.surfaceScaleNotify)
+	v.setObservedSurface(surface)
+}
+
+func (v *View) setObservedSurface(surface *gdk.Surface) {
+	if v == nil || surface == nil {
+		return
+	}
+	v.retainObservedSurface(surface)
 	v.surface = surface
+}
+
+func (v *View) retainObservedSurface(surface *gdk.Surface) {
+	if surface == nil {
+		return
+	}
+	if v != nil && v.surfaceRefFunc != nil {
+		v.surfaceRefFunc(surface)
+		return
+	}
+	_ = surface.Object.Ref()
+}
+
+func (v *View) releaseObservedSurface(surface *gdk.Surface) {
+	if surface == nil {
+		return
+	}
+	if v != nil && v.surfaceUnrefFunc != nil {
+		v.surfaceUnrefFunc(surface)
+		return
+	}
+	surface.Object.Unref()
 }
 
 func (v *View) disconnectSurfaceSignals() {
@@ -276,7 +308,9 @@ func (v *View) disconnectSurfaceSignals() {
 	// Keep callback function fields alive after disconnect. GTK can still deliver
 	// already-queued notify/layout emissions while rapidly mapping/unmapping views;
 	// niling these fields lets puregotk's trampoline dereference a nil Go func.
+	surface := v.surface
 	v.surface = nil
+	v.releaseObservedSurface(surface)
 }
 
 func sameSurface(a, b *gdk.Surface) bool {

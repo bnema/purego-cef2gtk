@@ -3,6 +3,7 @@ package cef2gtk
 import (
 	"testing"
 
+	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -141,6 +142,32 @@ func TestViewSizeTickObservation_StopsAfterBudgetDuringSentinelChurn(t *testing.
 	}
 	if v.sizeTickID != 0 {
 		t.Fatalf("sizeTickID = %d after budget stop, want 0", v.sizeTickID)
+	}
+}
+
+func TestViewSurfaceObservation_RetainsCachedSurfaceUntilDisconnect(t *testing.T) {
+	var retained int
+	var released int
+	v := &View{
+		surfaceRefFunc:   func(*gdk.Surface) { retained++ },
+		surfaceUnrefFunc: func(*gdk.Surface) { released++ },
+	}
+	surface := &gdk.Surface{}
+
+	v.setObservedSurface(surface)
+	if retained != 1 {
+		t.Fatalf("surface retain calls = %d, want 1", retained)
+	}
+	if released != 0 {
+		t.Fatalf("surface release calls = %d before disconnect, want 0", released)
+	}
+
+	v.disconnectSurfaceSignals()
+	if released != 1 {
+		t.Fatalf("surface release calls = %d after disconnect, want 1", released)
+	}
+	if v.surface != nil {
+		t.Fatal("surface cache should be cleared after disconnect")
 	}
 }
 
