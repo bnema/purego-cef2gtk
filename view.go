@@ -44,40 +44,59 @@ type renderer interface {
 
 // View is a GTK-backed CEF OSR view.
 type View struct {
-	backend            Backend
-	widget             *gtk.Widget
-	area               *gtk.GLArea
-	renderer           renderer
-	signalObject       *gobject.Object
-	input              *gtkgl.InputBridge
-	inputWidget        *gtk.Widget
-	diag               *diagnosticsRecorder
-	hooks              Hooks
-	handler            *renderHandler
-	renderFunc         func(gtk.GLArea, uintptr) bool
-	unrealizeFunc      func(gtk.Widget)
-	sizeTickFunc       *gtk.TickCallback
-	renderHandlerID    uint
-	unrealizeHandlerID uint
-	sizeTickID         uint
-	widthNotify        func(gobject.Object, *gobject.ParamSpec)
-	heightNotify       func(gobject.Object, *gobject.ParamSpec)
-	widthHandlerID     uint
-	heightHandlerID    uint
-	cachedWidth        atomic.Int32
-	cachedHeight       atomic.Int32
-	scaleBits          atomic.Uint64
-	inputScaleOverride atomic.Uint64
-	scaleTraceCount    atomic.Uint64
-	osrTraceCount      atomic.Uint64
-	sizeHooksMu        sync.Mutex
-	sizeHooks          map[uint64]func(width, height int32)
-	nextSizeHookID     uint64
-	profileMu          sync.Mutex
-	profileEnabled     atomic.Bool
-	profilePtr         atomic.Pointer[internalprofile.Recorder]
-	profile            *internalprofile.Recorder
-	profileOptions     ProfileOptions
+	backend                     Backend
+	widget                      *gtk.Widget
+	area                        *gtk.GLArea
+	renderer                    renderer
+	signalObject                *gobject.Object
+	input                       *gtkgl.InputBridge
+	inputWidget                 *gtk.Widget
+	diag                        *diagnosticsRecorder
+	hooks                       Hooks
+	handler                     *renderHandler
+	renderFunc                  func(gtk.GLArea, uintptr) bool
+	resizeFunc                  func(gtk.GLArea, int, int)
+	mapFunc                     func(gtk.Widget)
+	showFunc                    func(gtk.Widget)
+	realizeFunc                 func(gtk.Widget)
+	unrealizeFunc               func(gtk.Widget)
+	surfaceLayoutFunc           func(gdk.Surface, int, int)
+	surfaceWidthNotify          func(gobject.Object, *gobject.ParamSpec)
+	surfaceHeightNotify         func(gobject.Object, *gobject.ParamSpec)
+	surfaceScaleNotify          func(gobject.Object, *gobject.ParamSpec)
+	sizeTickFunc                *gtk.TickCallback
+	renderHandlerID             uint
+	resizeHandlerID             uint
+	mapHandlerID                uint
+	showHandlerID               uint
+	realizeHandlerID            uint
+	unrealizeHandlerID          uint
+	surfaceLayoutHandlerID      uint
+	surfaceWidthHandlerID       uint
+	surfaceHeightHandlerID      uint
+	surfaceScaleHandlerID       uint
+	surfaceScaleFactorHandlerID uint
+	sizeTickID                  uint
+	scaleNotify                 func(gobject.Object, *gobject.ParamSpec)
+	scaleHandlerID              uint
+	sizeTickSettler             sizeTickSettler
+	sizeObservationSampleFunc   func() sizeObservationSample
+	sizeTickRegistrar           func(*gtk.TickCallback) uint
+	surface                     *gdk.Surface
+	cachedWidth                 atomic.Int32
+	cachedHeight                atomic.Int32
+	scaleBits                   atomic.Uint64
+	inputScaleOverride          atomic.Uint64
+	scaleTraceCount             atomic.Uint64
+	osrTraceCount               atomic.Uint64
+	sizeHooksMu                 sync.Mutex
+	sizeHooks                   map[uint64]func(width, height int32)
+	nextSizeHookID              uint64
+	profileMu                   sync.Mutex
+	profileEnabled              atomic.Bool
+	profilePtr                  atomic.Pointer[internalprofile.Recorder]
+	profile                     *internalprofile.Recorder
+	profileOptions              ProfileOptions
 }
 
 // NewView creates an accelerated CEF view using the default Vulkan/GDK DMABUF
@@ -159,20 +178,28 @@ func (v *View) connectRenderSignal() {
 	}
 	v.updateCachedSizeOnGTKThread()
 	v.signalObject = &v.widget.Object
-	v.widthNotify = func(gobject.Object, *gobject.ParamSpec) { v.updateCachedSizeOnGTKThread() }
-	v.heightNotify = func(gobject.Object, *gobject.ParamSpec) { v.updateCachedSizeOnGTKThread() }
-	v.widthHandlerID = v.signalObject.ConnectNotifyWithDetail("width", &v.widthNotify)
-	v.heightHandlerID = v.signalObject.ConnectNotifyWithDetail("height", &v.heightNotify)
+	strategy := sizeObservationStrategy(v.area != nil)
+	v.scaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	v.scaleHandlerID = v.signalObject.ConnectNotifyWithDetail(strategy.widgetNotifyDetails[0], &v.scaleNotify)
+	v.mapFunc = func(gtk.Widget) { v.handleObservationSignal() }
+	v.showFunc = func(gtk.Widget) { v.handleObservationSignal() }
+	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.unrealizeFunc = func(gtk.Widget) {
+		v.disconnectSurfaceSignals()
 		if v.renderer != nil {
 			v.renderer.InvalidateOnGTKThread()
 		}
 	}
+	v.mapHandlerID = v.widget.ConnectMap(&v.mapFunc)
+	v.showHandlerID = v.widget.ConnectShow(&v.showFunc)
+	v.realizeHandlerID = v.widget.ConnectRealize(&v.realizeFunc)
 	v.unrealizeHandlerID = v.widget.ConnectUnrealize(&v.unrealizeFunc)
-	v.connectSizeTick()
-	if v.area == nil {
+	v.armSizeTickObservation()
+	if !strategy.useGLAreaResize {
 		return
 	}
+	v.resizeFunc = func(gtk.GLArea, int, int) { v.handleObservationSignal() }
+	v.resizeHandlerID = v.area.ConnectResize(&v.resizeFunc)
 	v.renderFunc = func(_ gtk.GLArea, _ uintptr) bool {
 		v.updateCachedSizeOnGTKThread()
 		return v.renderOnGTKThread()
@@ -180,20 +207,133 @@ func (v *View) connectRenderSignal() {
 	v.renderHandlerID = v.area.ConnectRender(&v.renderFunc)
 }
 
-func (v *View) connectSizeTick() {
-	if v == nil || v.widget == nil || v.sizeTickID != 0 {
+func (v *View) handleObservationSignal() {
+	if v == nil {
+		return
+	}
+	v.refreshSurfaceSignals()
+	v.currentSizeObservationOnGTKThread()
+	v.armSizeTickObservation()
+}
+
+func (v *View) refreshSurfaceSignals() {
+	if v == nil || v.widget == nil {
+		return
+	}
+	surface := widgetSurface(v.widget)
+	if sameSurface(v.surface, surface) {
+		return
+	}
+	v.disconnectSurfaceSignals()
+	if surface == nil {
+		return
+	}
+	strategy := sizeObservationStrategy(v.area != nil)
+	if strategy.useSurfaceLayout {
+		v.surfaceLayoutFunc = func(gdk.Surface, int, int) { v.handleObservationSignal() }
+		v.surfaceLayoutHandlerID = surface.ConnectLayout(&v.surfaceLayoutFunc)
+	}
+	if len(strategy.surfaceSizeNotifyDetails) > 0 {
+		v.surfaceWidthNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+		v.surfaceHeightNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+		v.surfaceWidthHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceSizeNotifyDetails[0], &v.surfaceWidthNotify)
+		v.surfaceHeightHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceSizeNotifyDetails[1], &v.surfaceHeightNotify)
+	}
+	v.surfaceScaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[0], &v.surfaceScaleNotify)
+	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceScaleNotifyDetails[1], &v.surfaceScaleNotify)
+	v.surface = surface
+}
+
+func (v *View) disconnectSurfaceSignals() {
+	if v == nil || v.surface == nil {
+		return
+	}
+	if v.surfaceLayoutHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceLayoutHandlerID)
+		v.surfaceLayoutHandlerID = 0
+	}
+	if v.surfaceWidthHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceWidthHandlerID)
+		v.surfaceWidthHandlerID = 0
+	}
+	if v.surfaceHeightHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceHeightHandlerID)
+		v.surfaceHeightHandlerID = 0
+	}
+	if v.surfaceScaleHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceScaleHandlerID)
+		v.surfaceScaleHandlerID = 0
+	}
+	if v.surfaceScaleFactorHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceScaleFactorHandlerID)
+		v.surfaceScaleFactorHandlerID = 0
+	}
+	// Keep callback function fields alive after disconnect. GTK can still deliver
+	// already-queued notify/layout emissions while rapidly mapping/unmapping views;
+	// niling these fields lets puregotk's trampoline dereference a nil Go func.
+	v.surface = nil
+}
+
+func sameSurface(a, b *gdk.Surface) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.GoPointer() == b.GoPointer()
+}
+
+func (v *View) armSizeTickObservation() {
+	if v == nil || v.widget == nil {
+		return
+	}
+	v.sizeTickSettler.Reset()
+	if v.sizeTickID != 0 {
 		return
 	}
 	cb := new(gtk.TickCallback)
 	*cb = func(_, _, _ uintptr) bool {
-		if v == nil || v.widget == nil {
-			return false
-		}
-		v.updateCachedSizeOnGTKThread()
-		return true
+		return v.runSizeTickObservation()
 	}
 	v.sizeTickFunc = cb
-	v.sizeTickID = v.widget.AddTickCallback(cb, 0, nil)
+	v.sizeTickID = v.registerSizeTickCallback(cb)
+}
+
+func (v *View) runSizeTickObservation() bool {
+	if v == nil || v.widget == nil {
+		return false
+	}
+	sample := v.currentSizeObservationOnGTKThread()
+	keepTicking := v.sizeTickSettler.Next(sample.width, sample.height, sample.scale)
+	if !keepTicking {
+		v.sizeTickID = 0
+		v.sizeTickFunc = nil
+	}
+	return keepTicking
+}
+
+func (v *View) currentSizeObservationOnGTKThread() sizeObservationSample {
+	if v == nil {
+		return sizeObservationSample{width: 1, height: 1, scale: 1}
+	}
+	if v.sizeObservationSampleFunc != nil {
+		return v.sizeObservationSampleFunc()
+	}
+	v.updateCachedSizeOnGTKThread()
+	return sizeObservationSample{
+		width:  v.cachedWidth.Load(),
+		height: v.cachedHeight.Load(),
+		scale:  v.observedScale(),
+	}
+}
+
+func (v *View) registerSizeTickCallback(cb *gtk.TickCallback) uint {
+	if v == nil || cb == nil {
+		return 0
+	}
+	if v.sizeTickRegistrar != nil {
+		return v.sizeTickRegistrar(cb)
+	}
+	return v.widget.AddTickCallback(cb, 0, nil)
 }
 
 func (v *View) updateCachedSizeOnGTKThread() {
@@ -223,7 +363,7 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	if changed || scaleChanged {
 		v.traceScaleObservation("widget-update", width, height, prevScale, obs)
 	}
-	if (changed || scaleChanged) && width > 0 && height > 0 {
+	if shouldEmitSizeHooks(changed, scaleChanged) && width > 0 && height > 0 {
 		v.emitSizeHooks(width, height)
 	}
 }
@@ -690,14 +830,23 @@ func (v *View) Destroy() error {
 		v.sizeTickID = 0
 		v.sizeTickFunc = nil
 	}
+	v.disconnectSurfaceSignals()
 	if v.signalObject != nil {
-		if v.widthHandlerID != 0 {
-			gobject.SignalHandlerDisconnect(v.signalObject, v.widthHandlerID)
-			v.widthHandlerID = 0
+		if v.scaleHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(v.signalObject, v.scaleHandlerID)
+			v.scaleHandlerID = 0
 		}
-		if v.heightHandlerID != 0 {
-			gobject.SignalHandlerDisconnect(v.signalObject, v.heightHandlerID)
-			v.heightHandlerID = 0
+		if v.mapHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(v.signalObject, v.mapHandlerID)
+			v.mapHandlerID = 0
+		}
+		if v.showHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(v.signalObject, v.showHandlerID)
+			v.showHandlerID = 0
+		}
+		if v.realizeHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(v.signalObject, v.realizeHandlerID)
+			v.realizeHandlerID = 0
 		}
 		if v.unrealizeHandlerID != 0 {
 			gobject.SignalHandlerDisconnect(v.signalObject, v.unrealizeHandlerID)
@@ -705,9 +854,15 @@ func (v *View) Destroy() error {
 		}
 		v.signalObject = nil
 	}
-	if v.area != nil && v.renderHandlerID != 0 {
-		gobject.SignalHandlerDisconnect(&v.area.Object, v.renderHandlerID)
-		v.renderHandlerID = 0
+	if v.area != nil {
+		if v.resizeHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(&v.area.Object, v.resizeHandlerID)
+			v.resizeHandlerID = 0
+		}
+		if v.renderHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(&v.area.Object, v.renderHandlerID)
+			v.renderHandlerID = 0
+		}
 	}
 	if v.renderer != nil {
 		if v.area != nil {

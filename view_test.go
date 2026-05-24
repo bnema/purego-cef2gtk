@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -67,6 +69,21 @@ func TestAddSizeObserverImmediatelyCallsWithObservedRealSizeIncludingOneByOne(t 
 
 	if !called {
 		t.Fatal("observer not called for real observed 1x1 size")
+	}
+}
+
+func TestDisconnectSurfaceSignalsKeepsCallbacksAlive(t *testing.T) {
+	v := &View{
+		surfaceLayoutFunc:   func(gdk.Surface, int, int) {},
+		surfaceWidthNotify:  func(gobject.Object, *gobject.ParamSpec) {},
+		surfaceHeightNotify: func(gobject.Object, *gobject.ParamSpec) {},
+		surfaceScaleNotify:  func(gobject.Object, *gobject.ParamSpec) {},
+	}
+
+	v.disconnectSurfaceSignals()
+
+	if v.surfaceLayoutFunc == nil || v.surfaceWidthNotify == nil || v.surfaceHeightNotify == nil || v.surfaceScaleNotify == nil {
+		t.Fatal("surface signal callbacks must remain alive after disconnect")
 	}
 }
 
