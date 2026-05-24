@@ -185,7 +185,10 @@ func (v *View) connectRenderSignal() {
 	v.showFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.unrealizeFunc = func(gtk.Widget) {
-		v.disconnectSurfaceSignals()
+		// Keep surface signal connections across transient unrealize/realize churn.
+		// Reconnecting on every tab switch/map cycle allocates purego callback
+		// trampolines until the process aborts under stress. Destroy() still
+		// disconnects the signals when the view lifetime ends.
 		if v.renderer != nil {
 			v.renderer.InvalidateOnGTKThread()
 		}
