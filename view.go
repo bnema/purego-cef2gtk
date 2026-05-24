@@ -269,10 +269,9 @@ func (v *View) disconnectSurfaceSignals() {
 		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceScaleFactorHandlerID)
 		v.surfaceScaleFactorHandlerID = 0
 	}
-	v.surfaceLayoutFunc = nil
-	v.surfaceWidthNotify = nil
-	v.surfaceHeightNotify = nil
-	v.surfaceScaleNotify = nil
+	// Keep callback function fields alive after disconnect. GTK can still deliver
+	// already-queued notify/layout emissions while rapidly mapping/unmapping views;
+	// niling these fields lets puregotk's trampoline dereference a nil Go func.
 	v.surface = nil
 }
 
