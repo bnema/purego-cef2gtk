@@ -13,6 +13,22 @@ type sizeObservationSample struct {
 	scale  float64
 }
 
+type sizeObservationStrategyConfig struct {
+	widgetNotifyDetails  []string
+	surfaceNotifyDetails []string
+	useGLAreaResize      bool
+	useSurfaceLayout     bool
+}
+
+func sizeObservationStrategy(hasGLArea bool) sizeObservationStrategyConfig {
+	return sizeObservationStrategyConfig{
+		widgetNotifyDetails:  []string{"scale-factor"},
+		surfaceNotifyDetails: []string{"width", "height", "scale", "scale-factor"},
+		useGLAreaResize:      hasGLArea,
+		useSurfaceLayout:     !hasGLArea,
+	}
+}
+
 type sizeTickSettler struct {
 	initialized   bool
 	totalFrames   int

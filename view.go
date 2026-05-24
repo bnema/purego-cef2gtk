@@ -60,6 +60,7 @@ type View struct {
 	showFunc                    func(gtk.Widget)
 	realizeFunc                 func(gtk.Widget)
 	unrealizeFunc               func(gtk.Widget)
+	surfaceLayoutFunc           func(gdk.Surface, int, int)
 	surfaceWidthNotify          func(gobject.Object, *gobject.ParamSpec)
 	surfaceHeightNotify         func(gobject.Object, *gobject.ParamSpec)
 	surfaceScaleNotify          func(gobject.Object, *gobject.ParamSpec)
@@ -70,16 +71,13 @@ type View struct {
 	showHandlerID               uint
 	realizeHandlerID            uint
 	unrealizeHandlerID          uint
+	surfaceLayoutHandlerID      uint
 	surfaceWidthHandlerID       uint
 	surfaceHeightHandlerID      uint
 	surfaceScaleHandlerID       uint
 	surfaceScaleFactorHandlerID uint
 	sizeTickID                  uint
-	widthNotify                 func(gobject.Object, *gobject.ParamSpec)
-	heightNotify                func(gobject.Object, *gobject.ParamSpec)
 	scaleNotify                 func(gobject.Object, *gobject.ParamSpec)
-	widthHandlerID              uint
-	heightHandlerID             uint
 	scaleHandlerID              uint
 	sizeTickSettler             sizeTickSettler
 	sizeObservationSampleFunc   func() sizeObservationSample
@@ -180,12 +178,9 @@ func (v *View) connectRenderSignal() {
 	}
 	v.updateCachedSizeOnGTKThread()
 	v.signalObject = &v.widget.Object
-	v.widthNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
-	v.heightNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
+	strategy := sizeObservationStrategy(v.area != nil)
 	v.scaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
-	v.widthHandlerID = v.signalObject.ConnectNotifyWithDetail("width", &v.widthNotify)
-	v.heightHandlerID = v.signalObject.ConnectNotifyWithDetail("height", &v.heightNotify)
-	v.scaleHandlerID = v.signalObject.ConnectNotifyWithDetail("scale-factor", &v.scaleNotify)
+	v.scaleHandlerID = v.signalObject.ConnectNotifyWithDetail(strategy.widgetNotifyDetails[0], &v.scaleNotify)
 	v.mapFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.showFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
@@ -200,7 +195,7 @@ func (v *View) connectRenderSignal() {
 	v.realizeHandlerID = v.widget.ConnectRealize(&v.realizeFunc)
 	v.unrealizeHandlerID = v.widget.ConnectUnrealize(&v.unrealizeFunc)
 	v.armSizeTickObservation()
-	if v.area == nil {
+	if !strategy.useGLAreaResize {
 		return
 	}
 	v.resizeFunc = func(gtk.GLArea, int, int) { v.handleObservationSignal() }
@@ -233,19 +228,28 @@ func (v *View) refreshSurfaceSignals() {
 	if surface == nil {
 		return
 	}
+	strategy := sizeObservationStrategy(v.area != nil)
+	if strategy.useSurfaceLayout {
+		v.surfaceLayoutFunc = func(gdk.Surface, int, int) { v.handleObservationSignal() }
+		v.surfaceLayoutHandlerID = surface.ConnectLayout(&v.surfaceLayoutFunc)
+	}
 	v.surfaceWidthNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
 	v.surfaceHeightNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
 	v.surfaceScaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
-	v.surfaceWidthHandlerID = surface.ConnectNotifyWithDetail("width", &v.surfaceWidthNotify)
-	v.surfaceHeightHandlerID = surface.ConnectNotifyWithDetail("height", &v.surfaceHeightNotify)
-	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail("scale", &v.surfaceScaleNotify)
-	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail("scale-factor", &v.surfaceScaleNotify)
+	v.surfaceWidthHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[0], &v.surfaceWidthNotify)
+	v.surfaceHeightHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[1], &v.surfaceHeightNotify)
+	v.surfaceScaleHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[2], &v.surfaceScaleNotify)
+	v.surfaceScaleFactorHandlerID = surface.ConnectNotifyWithDetail(strategy.surfaceNotifyDetails[3], &v.surfaceScaleNotify)
 	v.surface = surface
 }
 
 func (v *View) disconnectSurfaceSignals() {
 	if v == nil || v.surface == nil {
 		return
+	}
+	if v.surfaceLayoutHandlerID != 0 {
+		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceLayoutHandlerID)
+		v.surfaceLayoutHandlerID = 0
 	}
 	if v.surfaceWidthHandlerID != 0 {
 		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceWidthHandlerID)
@@ -263,6 +267,7 @@ func (v *View) disconnectSurfaceSignals() {
 		gobject.SignalHandlerDisconnect(&v.surface.Object, v.surfaceScaleFactorHandlerID)
 		v.surfaceScaleFactorHandlerID = 0
 	}
+	v.surfaceLayoutFunc = nil
 	v.surfaceWidthNotify = nil
 	v.surfaceHeightNotify = nil
 	v.surfaceScaleNotify = nil
@@ -826,14 +831,6 @@ func (v *View) Destroy() error {
 	}
 	v.disconnectSurfaceSignals()
 	if v.signalObject != nil {
-		if v.widthHandlerID != 0 {
-			gobject.SignalHandlerDisconnect(v.signalObject, v.widthHandlerID)
-			v.widthHandlerID = 0
-		}
-		if v.heightHandlerID != 0 {
-			gobject.SignalHandlerDisconnect(v.signalObject, v.heightHandlerID)
-			v.heightHandlerID = 0
-		}
 		if v.scaleHandlerID != 0 {
 			gobject.SignalHandlerDisconnect(v.signalObject, v.scaleHandlerID)
 			v.scaleHandlerID = 0

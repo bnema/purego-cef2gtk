@@ -114,3 +114,29 @@ func TestViewSizeTickObservation_StopsAfterBudgetDuringSentinelChurn(t *testing.
 		t.Fatalf("sizeTickID = %d after budget stop, want 0", v.sizeTickID)
 	}
 }
+
+func TestSizeObservationStrategy_GLAreaUsesWidgetScaleAndGLAreaResize(t *testing.T) {
+	strategy := sizeObservationStrategy(true)
+	if len(strategy.widgetNotifyDetails) != 1 || strategy.widgetNotifyDetails[0] != "scale-factor" {
+		t.Fatalf("widget notify details = %v, want only scale-factor", strategy.widgetNotifyDetails)
+	}
+	if !strategy.useGLAreaResize {
+		t.Fatal("GLArea strategy should use GtkGLArea::resize")
+	}
+	if strategy.useSurfaceLayout {
+		t.Fatal("GLArea strategy should not depend on GdkSurface::layout")
+	}
+}
+
+func TestSizeObservationStrategy_GDKDMABUFUsesSurfaceLayoutWithoutDeadWidgetSizeNotify(t *testing.T) {
+	strategy := sizeObservationStrategy(false)
+	if len(strategy.widgetNotifyDetails) != 1 || strategy.widgetNotifyDetails[0] != "scale-factor" {
+		t.Fatalf("widget notify details = %v, want only scale-factor", strategy.widgetNotifyDetails)
+	}
+	if strategy.useGLAreaResize {
+		t.Fatal("GDKDMABUF strategy should not use GtkGLArea::resize")
+	}
+	if !strategy.useSurfaceLayout {
+		t.Fatal("GDKDMABUF strategy should use GdkSurface::layout to observe child allocation relayouts")
+	}
+}
