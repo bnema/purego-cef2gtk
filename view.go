@@ -89,6 +89,7 @@ type View struct {
 	cachedWidth                 atomic.Int32
 	cachedHeight                atomic.Int32
 	scaleBits                   atomic.Uint64
+	scaleMultiplierBits         atomic.Uint64
 	inputScaleOverride          atomic.Uint64
 	scaleTraceCount             atomic.Uint64
 	osrTraceCount               atomic.Uint64
@@ -118,28 +119,30 @@ func NewViewWithOptions(opts ViewOptions) *View {
 	}
 
 	backend := opts.Backend
+	scaleMultiplier := normalizeDeviceScale(opts.ScaleMultiplier)
 	if backend == BackendAuto {
-		if v := newGDKDMABUFView(opts.Profile); v != nil {
+		if v := newGDKDMABUFView(opts.Profile, scaleMultiplier); v != nil {
 			return v
 		}
 		backend = BackendGLArea
 	}
 	switch backend {
 	case BackendGLArea:
-		return newGLAreaView(opts.Profile)
+		return newGLAreaView(opts.Profile, scaleMultiplier)
 	case BackendGDKDMABUF:
-		return newGDKDMABUFView(opts.Profile)
+		return newGDKDMABUFView(opts.Profile, scaleMultiplier)
 	default:
 		return nil
 	}
 }
 
-func newGLAreaView(profile ProfileOptions) *View {
+func newGLAreaView(profile ProfileOptions, scaleMultiplier float64) *View {
 	area := gtk.NewGLArea()
 	if area == nil {
 		return nil
 	}
 	v := &View{backend: BackendGLArea, widget: &area.Widget, area: area, diag: newDiagnosticsRecorder()}
+	v.setScaleMultiplier(scaleMultiplier)
 	area.SetAutoRender(false)
 	v.renderer = gtkgl.NewAcceleratedRenderer(area)
 	v.connectRenderSignal()
@@ -151,12 +154,13 @@ func newGLAreaView(profile ProfileOptions) *View {
 	return v
 }
 
-func newGDKDMABUFView(profile ProfileOptions) *View {
+func newGDKDMABUFView(profile ProfileOptions, scaleMultiplier float64) *View {
 	renderer, err := gtkgdk.NewRenderer(false)
 	if err != nil || renderer == nil || renderer.Widget() == nil {
 		return nil
 	}
 	v := &View{backend: BackendGDKDMABUF, widget: renderer.Widget(), renderer: renderer, diag: newDiagnosticsRecorder()}
+	v.setScaleMultiplier(scaleMultiplier)
 	v.connectRenderSignal()
 	if profile.Enabled {
 		if err := v.ConfigureProfiling(profile); err != nil {
@@ -398,7 +402,7 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	scaleChanged := prevScale != obs.scale
 	v.storeObservedScale(obs.scale)
 	if scaleChanged && v.input != nil {
-		v.input.SetScale(v.inputScaleForObservedScale(obs.scale))
+		v.input.SetScale(v.inputScaleForObservedScale(v.effectiveScaleForSurface(obs.scale)))
 	}
 	if changed || scaleChanged {
 		v.traceScaleObservation("widget-update", width, height, prevScale, obs)
@@ -467,7 +471,7 @@ func (v *View) DeviceScaleFactor() float32 {
 	if v == nil {
 		return 1
 	}
-	return float32(v.observedScale())
+	return float32(v.effectiveScaleForSurface(v.observedScale()))
 }
 
 func (v *View) observedScale() float64 {
@@ -486,6 +490,28 @@ func (v *View) storeObservedScale(scale float64) {
 		return
 	}
 	v.scaleBits.Store(math.Float64bits(normalizeDeviceScale(scale)))
+}
+
+func (v *View) setScaleMultiplier(scale float64) {
+	if v == nil {
+		return
+	}
+	v.scaleMultiplierBits.Store(math.Float64bits(normalizeDeviceScale(scale)))
+}
+
+func (v *View) scaleMultiplier() float64 {
+	if v == nil {
+		return 1
+	}
+	bits := v.scaleMultiplierBits.Load()
+	if bits == 0 {
+		return 1
+	}
+	return normalizeDeviceScale(math.Float64frombits(bits))
+}
+
+func (v *View) effectiveScaleForSurface(surfaceScale float64) float64 {
+	return normalizeDeviceScale(surfaceScale) * v.scaleMultiplier()
 }
 
 func normalizeDeviceScale(scale float64) float64 {

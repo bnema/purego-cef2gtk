@@ -34,8 +34,8 @@ func sizeObservationStrategy(hasGLArea bool) sizeObservationStrategyConfig {
 	return cfg
 }
 
-func shouldEmitSizeHooks(sizeChanged, _ bool) bool {
-	return sizeChanged
+func shouldEmitSizeHooks(sizeChanged, scaleChanged bool) bool {
+	return sizeChanged || scaleChanged
 }
 
 type sizeTickSettler struct {

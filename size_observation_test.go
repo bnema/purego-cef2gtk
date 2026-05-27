@@ -209,7 +209,7 @@ func TestSizeObservationStrategy_GDKDMABUFUsesSurfaceLayoutWithoutDeadWidgetSize
 	}
 }
 
-func TestShouldEmitSizeHooksOnSizeChangeOnly(t *testing.T) {
+func TestShouldEmitSizeHooksOnSizeOrScaleChange(t *testing.T) {
 	tests := []struct {
 		name         string
 		sizeChanged  bool
@@ -218,7 +218,7 @@ func TestShouldEmitSizeHooksOnSizeChangeOnly(t *testing.T) {
 	}{
 		{name: "size change only", sizeChanged: true, scaleChanged: false, want: true},
 		{name: "size and scale change", sizeChanged: true, scaleChanged: true, want: true},
-		{name: "scale change only", sizeChanged: false, scaleChanged: true, want: false},
+		{name: "scale change only", sizeChanged: false, scaleChanged: true, want: true},
 		{name: "no change", sizeChanged: false, scaleChanged: false, want: false},
 	}
 

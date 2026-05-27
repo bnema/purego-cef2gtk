@@ -38,6 +38,10 @@ type ViewOptions struct {
 	RenderStackPlan RenderStackPlan
 	// Profile optionally enables development render profiling during construction.
 	Profile ProfileOptions
+	// ScaleMultiplier is an application-level multiplier composed on top of the
+	// GTK/GDK surface scale for CEF OSR screen, backing, and input coordinates.
+	// Values <= 0, NaN, or Inf are treated as 1.
+	ScaleMultiplier float64
 }
 
 // Validate verifies that the requested backend/render stack is supported by the option schema.

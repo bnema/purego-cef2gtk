@@ -53,6 +53,19 @@ func TestViewSizeScaleAndObservers(t *testing.T) {
 	}
 }
 
+func TestDeviceScaleFactorAppliesViewScaleMultiplier(t *testing.T) {
+	v := &View{}
+	v.setScaleMultiplier(1.2)
+	v.storeObservedScale(1.2)
+
+	if got := v.DeviceScaleFactor(); got != float32(1.44) {
+		t.Fatalf("effective device scale=%v, want 1.44", got)
+	}
+	if got := v.observedScale(); got != 1.2 {
+		t.Fatalf("raw observed scale=%v, want 1.2", got)
+	}
+}
+
 func TestAddSizeObserverImmediatelyCallsWithObservedRealSizeIncludingOneByOne(t *testing.T) {
 	v := &View{}
 	v.cachedWidth.Store(1)

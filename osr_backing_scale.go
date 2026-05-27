@@ -47,9 +47,10 @@ func parseOSRBackingScaleMode(value string) osrBackingScaleMode {
 // CefScreenInfo.device_scale_factor while still emitting 1x/logical DMABUF
 // frames. When this compatibility path is active, purego-cef2gtk asks CEF for a
 // device-sized OSR view rect and reports a 1x screen scale. Applications that
-// expose page zoom should compensate their CEF zoom level by dividing by
-// OSRBackingScaleFactorForScale so the page's CSS viewport remains at the GTK
-// logical size while the OSR backing is device-sized.
+// expose page zoom should compensate their internal CEF zoom level by multiplying
+// the user-facing page zoom by OSRBackingScaleFactorForScale, then divide CEF
+// zoom readback by the same factor. This keeps the page's CSS viewport at the
+// GTK logical size while the OSR backing is device-sized.
 func OSRBackingScaleEnabledForScale(scale float64) bool {
 	return osrBackingScaleEnabledForScale(scale)
 }
@@ -81,14 +82,14 @@ func (v *View) osrBackingScaleEnabled() bool {
 	if v == nil {
 		return false
 	}
-	return osrBackingScaleEnabledForScale(v.observedScale())
+	return osrBackingScaleEnabledForScale(float64(v.DeviceScaleFactor()))
 }
 
 func (v *View) osrBackingScale() float64 {
 	if v == nil {
 		return 1
 	}
-	return OSRBackingScaleFactorForScale(v.observedScale())
+	return OSRBackingScaleFactorForScale(float64(v.DeviceScaleFactor()))
 }
 
 func (v *View) osrViewRectSize() (int32, int32) {
@@ -110,7 +111,7 @@ func (v *View) osrScreenPoint(viewX, viewY int32) (int32, int32) {
 		// pixels because GetScreenInfo reports a 1x scale.
 		return viewX, viewY
 	}
-	scale := normalizeDeviceScale(v.observedScale())
+	scale := normalizeDeviceScale(float64(v.DeviceScaleFactor()))
 	return scaleCoordinate(viewX, scale), scaleCoordinate(viewY, scale)
 }
 

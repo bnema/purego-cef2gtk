@@ -1,6 +1,7 @@
 package cef2gtk
 
 import (
+	"math"
 	"sync"
 	"testing"
 )
@@ -34,6 +35,17 @@ func TestOSRBackingScaleAutoEnablesOnlyAboveOne(t *testing.T) {
 	}
 	if got := OSRBackingScaleFactorForScale(1.2); got != 1.2 {
 		t.Fatalf("backing scale factor=%v, want 1.2", got)
+	}
+}
+
+func TestOSRBackingScaleUsesEffectiveDeviceScale(t *testing.T) {
+	setOSRBackingScaleEnv(t, "auto")
+	v := &View{}
+	v.setScaleMultiplier(1.2)
+	v.storeObservedScale(1.2)
+
+	if got := v.osrBackingScale(); math.Abs(got-1.44) > 1e-6 {
+		t.Fatalf("backing scale=%v, want effective scale 1.44", got)
 	}
 }
 
