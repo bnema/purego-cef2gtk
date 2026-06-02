@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -22,6 +23,11 @@ type InputOptions struct {
 	// OnMiddleClick is invoked when GTK receives a middle-button press. Returning
 	// true consumes the event before it is forwarded to CEF.
 	OnMiddleClick func(x, y float64) bool
+	// Scroll configures GTK scroll delta translation before forwarding to CEF.
+	Scroll ScrollOptions
+	// OnScroll is invoked for scroll begin/update/end/decelerate notifications.
+	// Returning ScrollConsume for an update prevents forwarding that event to CEF.
+	OnScroll func(ScrollEvent) ScrollDecision
 	// SelectionText returns the current browser selection for explicit clipboard
 	// shortcuts. When set with OnClipboardShortcut, Ctrl+C/Ctrl+X can be mirrored
 	// to application-level clipboard orchestration before forwarding to CEF.
@@ -29,6 +35,47 @@ type InputOptions struct {
 	// OnClipboardShortcut is invoked for explicit Ctrl+C/Ctrl+X shortcuts when
 	// SelectionText returns non-empty text. action is "copy" or "cut".
 	OnClipboardShortcut func(action, text string)
+}
+
+// ScrollPhase identifies the stage of a GTK scroll operation.
+type ScrollPhase int
+
+const (
+	ScrollPhaseUnknown ScrollPhase = iota
+	ScrollPhaseBegin
+	ScrollPhaseUpdate
+	ScrollPhaseEnd
+	ScrollPhaseDecelerate
+)
+
+// ScrollDecision controls whether a scroll update should be forwarded to CEF.
+type ScrollDecision int
+
+const (
+	ScrollForwardToCEF ScrollDecision = iota
+	ScrollConsume
+)
+
+// ScrollOptions configures GTK scroll delta translation before forwarding to CEF.
+// Zero values preserve the default CEF2GTK behavior.
+type ScrollOptions struct {
+	WheelMultiplier      float64
+	TouchpadMultiplier   float64
+	HorizontalMultiplier float64
+	VerticalMultiplier   float64
+	MaxDelta             int32
+}
+
+// ScrollEvent describes a GTK scroll event after CEF delta translation.
+type ScrollEvent struct {
+	Phase                ScrollPhase
+	X, Y                 float64
+	DX, DY               float64
+	DeltaX, DeltaY       int32
+	Modifiers            uint
+	Unit                 gdk.ScrollUnit
+	UnitKnown            bool
+	VelocityX, VelocityY float64
 }
 
 func (o InputOptions) normalizedScale(fallback float64) float64 {
@@ -95,10 +142,61 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input = gtkgl.NewInputBridge(host, scale)
 	v.input.SetProfiler(v.profileRecorder())
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
+	v.input.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(targetWidget)
 	v.inputWidget = targetWidget
 	return nil
+}
+
+func toGTKGLScrollOptions(opts ScrollOptions) gtkgl.ScrollOptions {
+	return gtkgl.ScrollOptions{
+		WheelMultiplier:      opts.WheelMultiplier,
+		TouchpadMultiplier:   opts.TouchpadMultiplier,
+		HorizontalMultiplier: opts.HorizontalMultiplier,
+		VerticalMultiplier:   opts.VerticalMultiplier,
+		MaxDelta:             opts.MaxDelta,
+	}
+}
+
+func toGTKGLScrollHandler(fn func(ScrollEvent) ScrollDecision) func(gtkgl.ScrollEvent) gtkgl.ScrollDecision {
+	if fn == nil {
+		return nil
+	}
+	return func(event gtkgl.ScrollEvent) gtkgl.ScrollDecision {
+		if fn(ScrollEvent{
+			Phase:     toPublicScrollPhase(event.Phase),
+			X:         event.X,
+			Y:         event.Y,
+			DX:        event.DX,
+			DY:        event.DY,
+			DeltaX:    event.DeltaX,
+			DeltaY:    event.DeltaY,
+			Modifiers: event.Modifiers,
+			Unit:      event.Unit,
+			UnitKnown: event.UnitKnown,
+			VelocityX: event.VelocityX,
+			VelocityY: event.VelocityY,
+		}) == ScrollConsume {
+			return gtkgl.ScrollConsume
+		}
+		return gtkgl.ScrollForwardToCEF
+	}
+}
+
+func toPublicScrollPhase(phase gtkgl.ScrollPhase) ScrollPhase {
+	switch phase {
+	case gtkgl.ScrollPhaseBegin:
+		return ScrollPhaseBegin
+	case gtkgl.ScrollPhaseUpdate:
+		return ScrollPhaseUpdate
+	case gtkgl.ScrollPhaseEnd:
+		return ScrollPhaseEnd
+	case gtkgl.ScrollPhaseDecelerate:
+		return ScrollPhaseDecelerate
+	default:
+		return ScrollPhaseUnknown
+	}
 }
 
 // DetachInput removes input controllers attached by AttachInput.
