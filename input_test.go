@@ -154,3 +154,79 @@ func TestScrollHandlerNilStaysNil(t *testing.T) {
 		t.Fatalf("nil handler converted to non-nil")
 	}
 }
+
+func TestTouchpadSwipeHandlerConvertsFromGTKGL(t *testing.T) {
+	tests := []struct {
+		name         string
+		inputPhase   gtkgl.TouchpadGesturePhase
+		wantPhase    TouchpadGesturePhase
+		decision     TouchpadSwipeDecision
+		wantDecision gtkgl.TouchpadSwipeDecision
+	}{
+		{
+			name:         "begin passthrough",
+			inputPhase:   gtkgl.TouchpadGesturePhaseBegin,
+			wantPhase:    TouchpadGesturePhaseBegin,
+			decision:     TouchpadSwipePassthrough,
+			wantDecision: gtkgl.TouchpadSwipePassthrough,
+		},
+		{
+			name:         "update consume",
+			inputPhase:   gtkgl.TouchpadGesturePhaseUpdate,
+			wantPhase:    TouchpadGesturePhaseUpdate,
+			decision:     TouchpadSwipeConsume,
+			wantDecision: gtkgl.TouchpadSwipeConsume,
+		},
+		{
+			name:         "end passthrough",
+			inputPhase:   gtkgl.TouchpadGesturePhaseEnd,
+			wantPhase:    TouchpadGesturePhaseEnd,
+			decision:     TouchpadSwipePassthrough,
+			wantDecision: gtkgl.TouchpadSwipePassthrough,
+		},
+		{
+			name:         "cancel passthrough",
+			inputPhase:   gtkgl.TouchpadGesturePhaseCancel,
+			wantPhase:    TouchpadGesturePhaseCancel,
+			decision:     TouchpadSwipePassthrough,
+			wantDecision: gtkgl.TouchpadSwipePassthrough,
+		},
+		{
+			name:         "unknown passthrough",
+			inputPhase:   gtkgl.TouchpadGesturePhase(99),
+			wantPhase:    TouchpadGesturePhaseUnknown,
+			decision:     TouchpadSwipePassthrough,
+			wantDecision: gtkgl.TouchpadSwipePassthrough,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := toGTKGLTouchpadSwipeHandler(func(event TouchpadSwipeEvent) TouchpadSwipeDecision {
+				if event.Phase != tt.wantPhase {
+					t.Fatalf("phase = %v, want %v", event.Phase, tt.wantPhase)
+				}
+				if event.DX != 12 || event.DY != -3 || event.Fingers != 2 {
+					t.Fatalf("event = %+v, want dx=12 dy=-3 fingers=2", event)
+				}
+				return tt.decision
+			})
+
+			got := handler(gtkgl.TouchpadSwipeEvent{
+				Phase:   tt.inputPhase,
+				DX:      12,
+				DY:      -3,
+				Fingers: 2,
+			})
+			if got != tt.wantDecision {
+				t.Fatalf("decision = %v, want %v", got, tt.wantDecision)
+			}
+		})
+	}
+}
+
+func TestTouchpadSwipeHandlerNilStaysNil(t *testing.T) {
+	if got := toGTKGLTouchpadSwipeHandler(nil); got != nil {
+		t.Fatalf("nil handler converted to non-nil")
+	}
+}

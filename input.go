@@ -28,6 +28,9 @@ type InputOptions struct {
 	// OnScroll is invoked for scroll begin/update/end/decelerate notifications.
 	// Returning ScrollConsume for an update prevents forwarding that event to CEF.
 	OnScroll func(ScrollEvent) ScrollDecision
+	// OnTouchpadSwipe is invoked for GDK touchpad swipe gesture events. Returning
+	// TouchpadSwipeConsume prevents further GTK propagation for that event.
+	OnTouchpadSwipe func(TouchpadSwipeEvent) TouchpadSwipeDecision
 	// SelectionText returns the current browser selection for explicit clipboard
 	// shortcuts. When set with OnClipboardShortcut, Ctrl+C/Ctrl+X can be mirrored
 	// to application-level clipboard orchestration before forwarding to CEF.
@@ -76,6 +79,34 @@ type ScrollEvent struct {
 	Unit                 gdk.ScrollUnit
 	UnitKnown            bool
 	VelocityX, VelocityY float64
+}
+
+// TouchpadGesturePhase identifies the phase of a touchpad gesture.
+type TouchpadGesturePhase int
+
+const (
+	TouchpadGesturePhaseUnknown TouchpadGesturePhase = iota
+	TouchpadGesturePhaseBegin
+	TouchpadGesturePhaseUpdate
+	TouchpadGesturePhaseEnd
+	TouchpadGesturePhaseCancel
+)
+
+// TouchpadSwipeDecision controls GTK propagation for a touchpad swipe event.
+type TouchpadSwipeDecision int
+
+const (
+	TouchpadSwipePassthrough TouchpadSwipeDecision = iota
+	TouchpadSwipeConsume
+)
+
+// TouchpadSwipeEvent describes a GDK touchpad swipe gesture event.
+type TouchpadSwipeEvent struct {
+	Phase     TouchpadGesturePhase
+	X, Y      float64
+	DX, DY    float64
+	Fingers   uint
+	Modifiers uint
 }
 
 func (o InputOptions) normalizedScale(fallback float64) float64 {
@@ -143,6 +174,7 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input.SetProfiler(v.profileRecorder())
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
+	v.input.SetTouchpadSwipeHandler(toGTKGLTouchpadSwipeHandler(opts.OnTouchpadSwipe))
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(targetWidget)
 	v.inputWidget = targetWidget
@@ -196,6 +228,41 @@ func toPublicScrollPhase(phase gtkgl.ScrollPhase) ScrollPhase {
 		return ScrollPhaseDecelerate
 	default:
 		return ScrollPhaseUnknown
+	}
+}
+
+func toGTKGLTouchpadSwipeHandler(fn func(TouchpadSwipeEvent) TouchpadSwipeDecision) func(gtkgl.TouchpadSwipeEvent) gtkgl.TouchpadSwipeDecision {
+	if fn == nil {
+		return nil
+	}
+	return func(event gtkgl.TouchpadSwipeEvent) gtkgl.TouchpadSwipeDecision {
+		if fn(TouchpadSwipeEvent{
+			Phase:     toPublicTouchpadGesturePhase(event.Phase),
+			X:         event.X,
+			Y:         event.Y,
+			DX:        event.DX,
+			DY:        event.DY,
+			Fingers:   event.Fingers,
+			Modifiers: event.Modifiers,
+		}) == TouchpadSwipeConsume {
+			return gtkgl.TouchpadSwipeConsume
+		}
+		return gtkgl.TouchpadSwipePassthrough
+	}
+}
+
+func toPublicTouchpadGesturePhase(phase gtkgl.TouchpadGesturePhase) TouchpadGesturePhase {
+	switch phase {
+	case gtkgl.TouchpadGesturePhaseBegin:
+		return TouchpadGesturePhaseBegin
+	case gtkgl.TouchpadGesturePhaseUpdate:
+		return TouchpadGesturePhaseUpdate
+	case gtkgl.TouchpadGesturePhaseEnd:
+		return TouchpadGesturePhaseEnd
+	case gtkgl.TouchpadGesturePhaseCancel:
+		return TouchpadGesturePhaseCancel
+	default:
+		return TouchpadGesturePhaseUnknown
 	}
 }
 
