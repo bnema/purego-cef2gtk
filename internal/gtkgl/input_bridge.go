@@ -44,6 +44,7 @@ type InputBridge struct {
 	middleClickConsumed bool
 	scrollOptions       ScrollOptions
 	onScroll            func(ScrollEvent) ScrollDecision
+	onTouchpadSwipe     func(TouchpadSwipeEvent) TouchpadSwipeDecision
 	selectionText       func() string
 	onClipboardShortcut func(action, text string)
 	profiler            atomic.Pointer[internalprofile.Recorder]
@@ -89,6 +90,34 @@ type ScrollEvent struct {
 	VelocityX, VelocityY float64
 }
 
+// TouchpadGesturePhase identifies the phase of a touchpad gesture.
+type TouchpadGesturePhase int
+
+const (
+	TouchpadGesturePhaseUnknown TouchpadGesturePhase = iota
+	TouchpadGesturePhaseBegin
+	TouchpadGesturePhaseUpdate
+	TouchpadGesturePhaseEnd
+	TouchpadGesturePhaseCancel
+)
+
+// TouchpadSwipeDecision controls GTK propagation for a touchpad swipe event.
+type TouchpadSwipeDecision int
+
+const (
+	TouchpadSwipePassthrough TouchpadSwipeDecision = iota
+	TouchpadSwipeConsume
+)
+
+// TouchpadSwipeEvent describes a GDK touchpad swipe gesture event.
+type TouchpadSwipeEvent struct {
+	Phase     TouchpadGesturePhase
+	X, Y      float64
+	DX, DY    float64
+	Fingers   uint
+	Modifiers uint
+}
+
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
 func NewInputBridge(host cef.BrowserHost, scale float64) *InputBridge {
 	return &InputBridge{host: host, scale: normalizeScale(scale)}
@@ -126,6 +155,17 @@ func (ib *InputBridge) SetScrollOptions(opts ScrollOptions, fn func(ScrollEvent)
 	ib.mu.Lock()
 	ib.scrollOptions = opts
 	ib.onScroll = fn
+	ib.mu.Unlock()
+}
+
+// SetTouchpadSwipeHandler configures an optional touchpad swipe gesture callback.
+// If the callback returns TouchpadSwipeConsume, the GTK event is consumed.
+func (ib *InputBridge) SetTouchpadSwipeHandler(fn func(TouchpadSwipeEvent) TouchpadSwipeDecision) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.onTouchpadSwipe = fn
 	ib.mu.Unlock()
 }
 
@@ -226,6 +266,25 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	}
 	scroll.ConnectDecelerate(&scrollDecelerateCb)
 	ib.addController(widget, &scroll.EventController, &scrollBeginCb, &scrollCb, &scrollEndCb, &scrollDecelerateCb)
+
+	swipe := gtk.NewGestureSwipe()
+	touchpadBeginCb := func(g gtk.Gesture, seq uintptr) {
+		ib.onTouchpadGestureEvent(g, seq)
+	}
+	swipe.ConnectBegin(&touchpadBeginCb)
+	touchpadUpdateCb := func(g gtk.Gesture, seq uintptr) {
+		ib.onTouchpadGestureEvent(g, seq)
+	}
+	swipe.ConnectUpdate(&touchpadUpdateCb)
+	touchpadEndCb := func(g gtk.Gesture, seq uintptr) {
+		ib.onTouchpadGestureEvent(g, seq)
+	}
+	swipe.ConnectEnd(&touchpadEndCb)
+	touchpadCancelCb := func(g gtk.Gesture, seq uintptr) {
+		ib.onTouchpadGestureEvent(g, seq)
+	}
+	swipe.ConnectCancel(&touchpadCancelCb)
+	ib.addController(widget, &swipe.EventController, &touchpadBeginCb, &touchpadUpdateCb, &touchpadEndCb, &touchpadCancelCb)
 
 	focus := gtk.NewEventControllerFocus()
 	focusEnterCb := func(_ gtk.EventControllerFocus) {
@@ -403,6 +462,12 @@ func (ib *InputBridge) currentScrollState() (cef.BrowserHost, float64, float64, 
 	return ib.host, ib.lastX, ib.lastY, ib.scale, ib.scrollOptions, ib.onScroll
 }
 
+func (ib *InputBridge) currentTouchpadSwipeState() (float64, float64, func(TouchpadSwipeEvent) TouchpadSwipeDecision) {
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	return ib.lastX, ib.lastY, ib.onTouchpadSwipe
+}
+
 func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
 	host, x, y, scale, opts, handler := ib.currentScrollState()
 	if profiler := ib.profiler.Load(); profiler != nil {
@@ -468,6 +533,69 @@ func (ib *InputBridge) onScrollDecelerate(velocityX, velocityY float64, unit gdk
 		VelocityX: velocityX,
 		VelocityY: velocityY,
 	})
+}
+
+func (ib *InputBridge) onTouchpadGestureEvent(gesture gtk.Gesture, seq uintptr) {
+	eventPtr := touchpadGestureEventPtr(gesture, seq)
+	if eventPtr == 0 {
+		return
+	}
+	event := gdk.EventNewFromInternalPtr(eventPtr)
+	if event == nil || event.GetEventType() != gdk.TouchpadSwipeValue {
+		return
+	}
+	touchpadEvent := gdk.TouchpadEventNewFromInternalPtr(eventPtr)
+	var dx, dy float64
+	touchpadEvent.GetDeltas(&dx, &dy)
+	if ib.onTouchpadSwipeEvent(
+		toTouchpadGesturePhase(touchpadEvent.GetGesturePhase()),
+		dx,
+		dy,
+		touchpadEvent.GetNFingers(),
+		uint(gesture.GetCurrentEventState()),
+	) {
+		gesture.SetState(gtk.EventSequenceClaimedValue)
+	}
+}
+
+func touchpadGestureEventPtr(gesture gtk.Gesture, seq uintptr) uintptr {
+	sequence := gdk.EventSequenceNewFromInternalPtr(seq)
+	event := gesture.GetLastEvent(sequence)
+	if event == nil {
+		return 0
+	}
+	return event.GoPointer()
+}
+
+func (ib *InputBridge) onTouchpadSwipeEvent(phase TouchpadGesturePhase, dx, dy float64, fingers, mods uint) bool {
+	x, y, handler := ib.currentTouchpadSwipeState()
+	if handler == nil {
+		return false
+	}
+	return handler(TouchpadSwipeEvent{
+		Phase:     phase,
+		X:         x,
+		Y:         y,
+		DX:        dx,
+		DY:        dy,
+		Fingers:   fingers,
+		Modifiers: mods,
+	}) == TouchpadSwipeConsume
+}
+
+func toTouchpadGesturePhase(phase gdk.TouchpadGesturePhase) TouchpadGesturePhase {
+	switch phase {
+	case gdk.TouchpadGesturePhaseBeginValue:
+		return TouchpadGesturePhaseBegin
+	case gdk.TouchpadGesturePhaseUpdateValue:
+		return TouchpadGesturePhaseUpdate
+	case gdk.TouchpadGesturePhaseEndValue:
+		return TouchpadGesturePhaseEnd
+	case gdk.TouchpadGesturePhaseCancelValue:
+		return TouchpadGesturePhaseCancel
+	default:
+		return TouchpadGesturePhaseUnknown
+	}
 }
 
 func (ib *InputBridge) onFocusIn() { syncWindowlessBrowserFocus(ib.currentHost()) }

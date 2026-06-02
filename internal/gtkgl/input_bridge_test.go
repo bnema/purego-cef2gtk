@@ -105,6 +105,63 @@ func TestInputBridgeScrollUpdateUsesWheelTranslationWhenUnitUnknown(t *testing.T
 	}
 }
 
+func TestInputBridgeTouchpadSwipeHandlerCanConsumeEvent(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	ib.mu.Lock()
+	ib.lastX = 11
+	ib.lastY = 22
+	ib.mu.Unlock()
+
+	var got TouchpadSwipeEvent
+	ib.SetTouchpadSwipeHandler(func(event TouchpadSwipeEvent) TouchpadSwipeDecision {
+		got = event
+		return TouchpadSwipeConsume
+	})
+
+	consumed := ib.onTouchpadSwipeEvent(TouchpadGesturePhaseUpdate, 42, -3, 2, uint(gdk.ShiftMaskValue))
+
+	if !consumed {
+		t.Fatalf("consumed = false, want true")
+	}
+	if got.Phase != TouchpadGesturePhaseUpdate || got.DX != 42 || got.DY != -3 || got.Fingers != 2 {
+		t.Fatalf("touchpad swipe event = %+v", got)
+	}
+	if got.X != 11 || got.Y != 22 {
+		t.Fatalf("touchpad swipe position = (%v,%v), want (11,22)", got.X, got.Y)
+	}
+	if got.Modifiers != uint(gdk.ShiftMaskValue) {
+		t.Fatalf("modifiers = %#x, want shift", got.Modifiers)
+	}
+}
+
+func TestInputBridgeTouchpadSwipeHandlerPassthroughByDefault(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	if consumed := ib.onTouchpadSwipeEvent(TouchpadGesturePhaseUpdate, 1, 0, 2, 0); consumed {
+		t.Fatalf("consumed = true, want false with nil handler")
+	}
+}
+
+func TestTouchpadGesturePhaseConversion(t *testing.T) {
+	tests := []struct {
+		name  string
+		input gdk.TouchpadGesturePhase
+		want  TouchpadGesturePhase
+	}{
+		{name: "begin", input: gdk.TouchpadGesturePhaseBeginValue, want: TouchpadGesturePhaseBegin},
+		{name: "update", input: gdk.TouchpadGesturePhaseUpdateValue, want: TouchpadGesturePhaseUpdate},
+		{name: "end", input: gdk.TouchpadGesturePhaseEndValue, want: TouchpadGesturePhaseEnd},
+		{name: "cancel", input: gdk.TouchpadGesturePhaseCancelValue, want: TouchpadGesturePhaseCancel},
+		{name: "unknown", input: gdk.TouchpadGesturePhase(99), want: TouchpadGesturePhaseUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toTouchpadGesturePhase(tt.input); got != tt.want {
+				t.Fatalf("toTouchpadGesturePhase(%v) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInputBridgeRecordsScrollInProfiler(t *testing.T) {
 	recorder := internalprofile.NewRecorder()
 	start := time.Unix(100, 0)
