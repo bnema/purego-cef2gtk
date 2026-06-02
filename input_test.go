@@ -3,6 +3,9 @@ package cef2gtk
 import (
 	"math"
 	"testing"
+
+	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
+	"github.com/bnema/puregotk/v4/gdk"
 )
 
 func TestInputOptionsNormalizedScale(t *testing.T) {
@@ -55,5 +58,99 @@ func TestInputScaleOverrideRemainsStickyAcrossObservedScaleChanges(t *testing.T)
 	v.setInputScaleOverride(math.Inf(1))
 	if got := v.inputScaleForObservedScale(1.25); got != 1.25 {
 		t.Fatalf("input scale after infinite override = %v, want auto 1.25", got)
+	}
+}
+
+func TestScrollOptionsConvertsToGTKGL(t *testing.T) {
+	got := toGTKGLScrollOptions(ScrollOptions{
+		WheelMultiplier:      1.5,
+		TouchpadMultiplier:   0.35,
+		HorizontalMultiplier: 0.75,
+		VerticalMultiplier:   1.25,
+		MaxDelta:             120,
+	})
+
+	if got.WheelMultiplier != 1.5 ||
+		got.TouchpadMultiplier != 0.35 ||
+		got.HorizontalMultiplier != 0.75 ||
+		got.VerticalMultiplier != 1.25 ||
+		got.MaxDelta != 120 {
+		t.Fatalf("converted scroll options = %+v", got)
+	}
+}
+
+func TestScrollHandlerConvertsFromGTKGL(t *testing.T) {
+	tests := []struct {
+		name         string
+		inputPhase   gtkgl.ScrollPhase
+		wantPhase    ScrollPhase
+		decision     ScrollDecision
+		wantDecision gtkgl.ScrollDecision
+	}{
+		{
+			name:         "begin forward",
+			inputPhase:   gtkgl.ScrollPhaseBegin,
+			wantPhase:    ScrollPhaseBegin,
+			decision:     ScrollForwardToCEF,
+			wantDecision: gtkgl.ScrollForwardToCEF,
+		},
+		{
+			name:         "update consume",
+			inputPhase:   gtkgl.ScrollPhaseUpdate,
+			wantPhase:    ScrollPhaseUpdate,
+			decision:     ScrollConsume,
+			wantDecision: gtkgl.ScrollConsume,
+		},
+		{
+			name:         "end forward",
+			inputPhase:   gtkgl.ScrollPhaseEnd,
+			wantPhase:    ScrollPhaseEnd,
+			decision:     ScrollForwardToCEF,
+			wantDecision: gtkgl.ScrollForwardToCEF,
+		},
+		{
+			name:         "decelerate forward",
+			inputPhase:   gtkgl.ScrollPhaseDecelerate,
+			wantPhase:    ScrollPhaseDecelerate,
+			decision:     ScrollForwardToCEF,
+			wantDecision: gtkgl.ScrollForwardToCEF,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := toGTKGLScrollHandler(func(event ScrollEvent) ScrollDecision {
+				if event.Phase != tt.wantPhase {
+					t.Fatalf("phase = %v, want %v", event.Phase, tt.wantPhase)
+				}
+				if event.Unit != gdk.ScrollUnitSurfaceValue {
+					t.Fatalf("unit = %v, want surface", event.Unit)
+				}
+				if !event.UnitKnown {
+					t.Fatalf("UnitKnown = false, want true")
+				}
+				if event.DeltaX != 12 || event.DeltaY != -24 {
+					t.Fatalf("deltas = (%d,%d), want (12,-24)", event.DeltaX, event.DeltaY)
+				}
+				return tt.decision
+			})
+
+			got := handler(gtkgl.ScrollEvent{
+				Phase:     tt.inputPhase,
+				DeltaX:    12,
+				DeltaY:    -24,
+				Unit:      gdk.ScrollUnitSurfaceValue,
+				UnitKnown: true,
+			})
+			if got != tt.wantDecision {
+				t.Fatalf("decision = %v, want %v", got, tt.wantDecision)
+			}
+		})
+	}
+}
+
+func TestScrollHandlerNilStaysNil(t *testing.T) {
+	if got := toGTKGLScrollHandler(nil); got != nil {
+		t.Fatalf("nil handler converted to non-nil")
 	}
 }

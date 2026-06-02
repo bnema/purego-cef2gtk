@@ -16,6 +16,95 @@ func TestTranslateScrollDeltas(t *testing.T) {
 	}
 }
 
+func TestTranslateScrollDeltasWithOptionsDefaultsToLegacyBehavior(t *testing.T) {
+	x, y := TranslateScrollDeltasWithOptions(1.5, -2, gdk.ScrollUnitWheelValue, ScrollOptions{})
+	if x != 360 || y != 480 {
+		t.Fatalf("TranslateScrollDeltasWithOptions = (%d,%d), want (360,480)", x, y)
+	}
+}
+
+func TestTranslateScrollDeltasWithOptionsKeepsLegacyWheelTruncation(t *testing.T) {
+	x, y := TranslateScrollDeltasWithOptions(0.003, -0.003, gdk.ScrollUnitWheelValue, ScrollOptions{})
+	if x != 0 || y != 0 {
+		t.Fatalf("fractional wheel deltas = (%d,%d), want legacy truncation (0,0)", x, y)
+	}
+}
+
+func TestTranslateScrollDeltasWithOptionsUsesTouchpadMultiplierForSurfaceUnits(t *testing.T) {
+	x, y := TranslateScrollDeltasWithOptions(123, -40, gdk.ScrollUnitSurfaceValue, ScrollOptions{
+		TouchpadMultiplier: 0.25,
+	})
+	if x != 31 || y != 10 {
+		t.Fatalf("touchpad deltas = (%d,%d), want scaled surface pixels (31,10)", x, y)
+	}
+}
+
+func TestTranslateScrollDeltasWithOptionsRoundsSurfacePixels(t *testing.T) {
+	x, y := TranslateScrollDeltasWithOptions(1.6, -1.6, gdk.ScrollUnitSurfaceValue, ScrollOptions{})
+	if x != 2 || y != 2 {
+		t.Fatalf("surface pixel deltas = (%d,%d), want rounded pixels (2,2)", x, y)
+	}
+}
+
+func TestTranslateScrollDeltasWithOptionsAppliesAxisMultipliersAndClamp(t *testing.T) {
+	x, y := TranslateScrollDeltasWithOptions(2, -2, gdk.ScrollUnitWheelValue, ScrollOptions{
+		HorizontalMultiplier: 0.5,
+		VerticalMultiplier:   2,
+		MaxDelta:             300,
+	})
+	if x != 240 || y != 300 {
+		t.Fatalf("scaled/clamped deltas = (%d,%d), want (240,300)", x, y)
+	}
+}
+
+func TestInputBridgeScrollHandlerCanConsumeUpdate(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var got ScrollEvent
+	ib.SetScrollOptions(ScrollOptions{TouchpadMultiplier: 0.25}, func(event ScrollEvent) ScrollDecision {
+		got = event
+		return ScrollConsume
+	})
+
+	ib.onScrollUpdate(123, -40, gdk.ScrollUnitSurfaceValue, true, uint(gdk.ShiftMaskValue))
+
+	if got.Phase != ScrollPhaseUpdate {
+		t.Fatalf("phase = %v, want update", got.Phase)
+	}
+	if got.Unit != gdk.ScrollUnitSurfaceValue {
+		t.Fatalf("unit = %v, want surface", got.Unit)
+	}
+	if !got.UnitKnown {
+		t.Fatalf("UnitKnown = false, want true for update")
+	}
+	if got.DeltaX != 31 || got.DeltaY != 10 {
+		t.Fatalf("callback deltas = (%d,%d), want (31,10)", got.DeltaX, got.DeltaY)
+	}
+	if got.Modifiers != uint(gdk.ShiftMaskValue) {
+		t.Fatalf("modifiers = %#x, want shift", got.Modifiers)
+	}
+}
+
+func TestInputBridgeScrollUpdateUsesWheelTranslationWhenUnitUnknown(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var got ScrollEvent
+	ib.SetScrollOptions(ScrollOptions{TouchpadMultiplier: 0.25}, func(event ScrollEvent) ScrollDecision {
+		got = event
+		return ScrollConsume
+	})
+
+	ib.onScrollUpdate(1, -1, gdk.ScrollUnitSurfaceValue, false, 0)
+
+	if got.Unit != gdk.ScrollUnitSurfaceValue {
+		t.Fatalf("reported unit = %v, want original stale surface unit", got.Unit)
+	}
+	if got.UnitKnown {
+		t.Fatalf("UnitKnown = true, want false")
+	}
+	if got.DeltaX != 240 || got.DeltaY != 240 {
+		t.Fatalf("unknown-unit deltas = (%d,%d), want wheel translation (240,240)", got.DeltaX, got.DeltaY)
+	}
+}
+
 func TestInputBridgeRecordsScrollInProfiler(t *testing.T) {
 	recorder := internalprofile.NewRecorder()
 	start := time.Unix(100, 0)
@@ -23,7 +112,7 @@ func TestInputBridgeRecordsScrollInProfiler(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	ib.SetProfiler(recorder)
 
-	ib.onScroll(1.5, -2.25, 0)
+	ib.onScrollUpdate(1.5, -2.25, gdk.ScrollUnitWheelValue, true, 0)
 
 	snap, ok := recorder.MaybeSnapshot(start.Add(time.Second), time.Second)
 	if !ok {

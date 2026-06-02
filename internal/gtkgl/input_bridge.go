@@ -42,9 +42,51 @@ type InputBridge struct {
 
 	onMiddleClick       func(x, y float64) bool
 	middleClickConsumed bool
+	scrollOptions       ScrollOptions
+	onScroll            func(ScrollEvent) ScrollDecision
 	selectionText       func() string
 	onClipboardShortcut func(action, text string)
 	profiler            atomic.Pointer[internalprofile.Recorder]
+}
+
+// ScrollPhase identifies the stage of a GTK scroll operation.
+type ScrollPhase int
+
+const (
+	ScrollPhaseBegin ScrollPhase = iota
+	ScrollPhaseUpdate
+	ScrollPhaseEnd
+	ScrollPhaseDecelerate
+)
+
+// ScrollDecision controls whether a scroll event should be forwarded to CEF.
+type ScrollDecision int
+
+const (
+	ScrollForwardToCEF ScrollDecision = iota
+	ScrollConsume
+)
+
+// ScrollOptions configures GTK scroll delta translation before forwarding to CEF.
+// Zero values preserve the default CEF2GTK behavior.
+type ScrollOptions struct {
+	WheelMultiplier      float64
+	TouchpadMultiplier   float64
+	HorizontalMultiplier float64
+	VerticalMultiplier   float64
+	MaxDelta             int32
+}
+
+// ScrollEvent describes a GTK scroll event after CEF delta translation.
+type ScrollEvent struct {
+	Phase                ScrollPhase
+	X, Y                 float64
+	DX, DY               float64
+	DeltaX, DeltaY       int32
+	Modifiers            uint
+	Unit                 gdk.ScrollUnit
+	UnitKnown            bool
+	VelocityX, VelocityY float64
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
@@ -71,6 +113,19 @@ func (ib *InputBridge) SetMiddleClickHandler(fn func(x, y float64) bool) {
 	}
 	ib.mu.Lock()
 	ib.onMiddleClick = fn
+	ib.mu.Unlock()
+}
+
+// SetScrollOptions configures scroll translation and an optional interception
+// callback. If the callback returns ScrollConsume, the update event is not
+// forwarded to CEF.
+func (ib *InputBridge) SetScrollOptions(opts ScrollOptions, fn func(ScrollEvent) ScrollDecision) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.scrollOptions = opts
+	ib.onScroll = fn
 	ib.mu.Unlock()
 }
 
@@ -149,12 +204,28 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	ib.addController(widget, &click.EventController, &pressedCb, &releasedCb)
 
 	scroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollBothAxesValue | gtk.EventControllerScrollKineticValue)
+	scrollBeginCb := func(g gtk.EventControllerScroll) {
+		unit, unitKnown := currentScrollUnit(g)
+		ib.onScrollBoundary(ScrollPhaseBegin, unit, unitKnown, uint(g.GetCurrentEventState()))
+	}
+	scroll.ConnectScrollBegin(&scrollBeginCb)
 	scrollCb := func(g gtk.EventControllerScroll, dx, dy float64) bool {
-		ib.onScroll(dx, dy, uint(g.GetCurrentEventState()))
+		unit, unitKnown := currentScrollUnit(g)
+		ib.onScrollUpdate(dx, dy, unit, unitKnown, uint(g.GetCurrentEventState()))
 		return true
 	}
 	scroll.ConnectScroll(&scrollCb)
-	ib.addController(widget, &scroll.EventController, &scrollCb)
+	scrollEndCb := func(g gtk.EventControllerScroll) {
+		unit, unitKnown := currentScrollUnit(g)
+		ib.onScrollBoundary(ScrollPhaseEnd, unit, unitKnown, uint(g.GetCurrentEventState()))
+	}
+	scroll.ConnectScrollEnd(&scrollEndCb)
+	scrollDecelerateCb := func(g gtk.EventControllerScroll, velocityX, velocityY float64) {
+		unit, unitKnown := currentScrollUnit(g)
+		ib.onScrollDecelerate(velocityX, velocityY, unit, unitKnown, uint(g.GetCurrentEventState()))
+	}
+	scroll.ConnectDecelerate(&scrollDecelerateCb)
+	ib.addController(widget, &scroll.EventController, &scrollBeginCb, &scrollCb, &scrollEndCb, &scrollDecelerateCb)
 
 	focus := gtk.NewEventControllerFocus()
 	focusEnterCb := func(_ gtk.EventControllerFocus) {
@@ -326,19 +397,77 @@ func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCoun
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 1, int32(clickCount))
 }
 
-func (ib *InputBridge) onScroll(dx, dy float64, mods uint) {
+func (ib *InputBridge) currentScrollState() (cef.BrowserHost, float64, float64, float64, ScrollOptions, func(ScrollEvent) ScrollDecision) {
 	ib.mu.Lock()
-	host, x, y, scale := ib.host, ib.lastX, ib.lastY, ib.scale
-	ib.mu.Unlock()
+	defer ib.mu.Unlock()
+	return ib.host, ib.lastX, ib.lastY, ib.scale, ib.scrollOptions, ib.onScroll
+}
+
+func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
+	host, x, y, scale, opts, handler := ib.currentScrollState()
 	if profiler := ib.profiler.Load(); profiler != nil {
 		profiler.RecordScroll(dx, dy)
+	}
+	effectiveUnit := unit
+	if !unitKnown {
+		effectiveUnit = gdk.ScrollUnitWheelValue
+	}
+	deltaX, deltaY := TranslateScrollDeltasWithOptions(dx, dy, effectiveUnit, opts)
+	event := ScrollEvent{
+		Phase:     ScrollPhaseUpdate,
+		X:         x,
+		Y:         y,
+		DX:        dx,
+		DY:        dy,
+		DeltaX:    deltaX,
+		DeltaY:    deltaY,
+		Modifiers: mods,
+		Unit:      unit,
+		UnitKnown: unitKnown,
+	}
+	if handler != nil && handler(event) == ScrollConsume {
+		return
 	}
 	if host == nil {
 		return
 	}
 	evt := BuildMouseEvent(x, y, mods, scale)
-	deltaX, deltaY := TranslateScrollDeltas(dx, dy)
+	if unitKnown && unit == gdk.ScrollUnitSurfaceValue {
+		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
+	}
 	host.SendMouseWheelEvent(&evt, deltaX, deltaY)
+}
+
+func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
+	_, x, y, _, _, handler := ib.currentScrollState()
+	if handler == nil {
+		return
+	}
+	handler(ScrollEvent{
+		Phase:     phase,
+		X:         x,
+		Y:         y,
+		Modifiers: mods,
+		Unit:      unit,
+		UnitKnown: unitKnown,
+	})
+}
+
+func (ib *InputBridge) onScrollDecelerate(velocityX, velocityY float64, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
+	_, x, y, _, _, handler := ib.currentScrollState()
+	if handler == nil {
+		return
+	}
+	handler(ScrollEvent{
+		Phase:     ScrollPhaseDecelerate,
+		X:         x,
+		Y:         y,
+		Modifiers: mods,
+		Unit:      unit,
+		UnitKnown: unitKnown,
+		VelocityX: velocityX,
+		VelocityY: velocityY,
+	})
 }
 
 func (ib *InputBridge) onFocusIn() { syncWindowlessBrowserFocus(ib.currentHost()) }
@@ -583,6 +712,56 @@ const cefScrollUnitsPerNotch = 240
 func TranslateScrollDeltas(dx, dy float64) (int32, int32) {
 	return int32(dx * cefScrollUnitsPerNotch), int32(-dy * cefScrollUnitsPerNotch)
 }
+
+func TranslateScrollDeltasWithOptions(dx, dy float64, unit gdk.ScrollUnit, opts ScrollOptions) (int32, int32) {
+	multiplier := normalizeMultiplier(opts.WheelMultiplier)
+	unitScale := float64(cefScrollUnitsPerNotch)
+	round := false
+	if unit == gdk.ScrollUnitSurfaceValue {
+		multiplier = normalizeMultiplier(opts.TouchpadMultiplier)
+		unitScale = 1
+		round = true
+	}
+	horizontal := normalizeMultiplier(opts.HorizontalMultiplier)
+	vertical := normalizeMultiplier(opts.VerticalMultiplier)
+	deltaX := clampScrollDelta(dx*unitScale*multiplier*horizontal, opts.MaxDelta, round)
+	deltaY := clampScrollDelta(-dy*unitScale*multiplier*vertical, opts.MaxDelta, round)
+	return deltaX, deltaY
+}
+
+func normalizeMultiplier(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 1
+	}
+	return value
+}
+
+func clampScrollDelta(value float64, maxAbs int32, round bool) int32 {
+	limit := maxInt32Float
+	if maxAbs > 0 {
+		limit = float64(maxAbs)
+	}
+	if value > limit {
+		value = limit
+	}
+	if value < -limit {
+		value = -limit
+	}
+	if round {
+		value = math.Round(value)
+	}
+	return int32(value)
+}
+
+func currentScrollUnit(controller gtk.EventControllerScroll) (gdk.ScrollUnit, bool) {
+	event := controller.GetCurrentEvent()
+	if event == nil || event.GetEventType() != gdk.ScrollValue {
+		return controller.GetUnit(), false
+	}
+	return gdk.ScrollEventNewFromInternalPtr(event.GoPointer()).GetUnit(), true
+}
+
+const maxInt32Float = float64(int32(1<<31 - 1))
 
 const (
 	gdkKeyReturn          = 0xff0d
