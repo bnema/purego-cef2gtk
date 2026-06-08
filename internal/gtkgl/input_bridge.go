@@ -44,7 +44,7 @@ type InputBridge struct {
 	middleClickConsumed bool
 	scrollOptions       ScrollOptions
 	onScroll            func(ScrollEvent) ScrollDecision
-	onTouchpadSwipe     func(TouchpadSwipeEvent) TouchpadSwipeDecision
+	navigationSwipe     navigationSwipeState
 	selectionText       func() string
 	onClipboardShortcut func(action, text string)
 	profiler            atomic.Pointer[internalprofile.Recorder]
@@ -69,10 +69,11 @@ const (
 )
 
 // ScrollOptions configures GTK scroll delta translation before forwarding to CEF.
-// Zero values preserve the default CEF2GTK behavior.
+// Wheel zero values keep legacy wheel behavior; precise zero values use a
+// WebKitGTK-like touchpad/surface scale.
 type ScrollOptions struct {
 	WheelMultiplier      float64
-	TouchpadMultiplier   float64
+	PreciseMultiplier    float64
 	HorizontalMultiplier float64
 	VerticalMultiplier   float64
 	MaxDelta             int32
@@ -90,32 +91,30 @@ type ScrollEvent struct {
 	VelocityX, VelocityY float64
 }
 
-// TouchpadGesturePhase identifies the phase of a touchpad gesture.
-type TouchpadGesturePhase int
+// NavigationSwipeAction identifies a browser-history swipe action derived
+// from precise horizontal touchpad scrolling.
+type NavigationSwipeAction int
 
 const (
-	TouchpadGesturePhaseUnknown TouchpadGesturePhase = iota
-	TouchpadGesturePhaseBegin
-	TouchpadGesturePhaseUpdate
-	TouchpadGesturePhaseEnd
-	TouchpadGesturePhaseCancel
+	NavigationSwipeBack NavigationSwipeAction = iota
+	NavigationSwipeForward
 )
 
-// TouchpadSwipeDecision controls GTK propagation for a touchpad swipe event.
-type TouchpadSwipeDecision int
+// NavigationSwipeOptions configures WebKitGTK-like back/forward swipe recognition.
+type NavigationSwipeOptions struct {
+	Enabled          bool
+	MinDelta         float64
+	MaxVerticalRatio float64
+}
 
-const (
-	TouchpadSwipePassthrough TouchpadSwipeDecision = iota
-	TouchpadSwipeConsume
-)
-
-// TouchpadSwipeEvent describes a GDK touchpad swipe gesture event.
-type TouchpadSwipeEvent struct {
-	Phase     TouchpadGesturePhase
-	X, Y      float64
-	DX, DY    float64
-	Fingers   uint
-	Modifiers uint
+type navigationSwipeState struct {
+	options            NavigationSwipeOptions
+	canNavigateBack    func() bool
+	canNavigateForward func() bool
+	onNavigate         func(NavigationSwipeAction)
+	cumulativeDX       float64
+	cumulativeDY       float64
+	recognized         bool
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
@@ -158,14 +157,19 @@ func (ib *InputBridge) SetScrollOptions(opts ScrollOptions, fn func(ScrollEvent)
 	ib.mu.Unlock()
 }
 
-// SetTouchpadSwipeHandler configures an optional touchpad swipe gesture callback.
-// If the callback returns TouchpadSwipeConsume, the GTK event is consumed.
-func (ib *InputBridge) SetTouchpadSwipeHandler(fn func(TouchpadSwipeEvent) TouchpadSwipeDecision) {
+// SetNavigationSwipeHandler configures browser-history navigation recognition
+// from precise horizontal touchpad scroll streams.
+func (ib *InputBridge) SetNavigationSwipeHandler(opts NavigationSwipeOptions, canBack, canForward func() bool, onNavigate func(NavigationSwipeAction)) {
 	if ib == nil {
 		return
 	}
 	ib.mu.Lock()
-	ib.onTouchpadSwipe = fn
+	ib.navigationSwipe = navigationSwipeState{
+		options:            opts,
+		canNavigateBack:    canBack,
+		canNavigateForward: canForward,
+		onNavigate:         onNavigate,
+	}
 	ib.mu.Unlock()
 }
 
@@ -266,25 +270,6 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	}
 	scroll.ConnectDecelerate(&scrollDecelerateCb)
 	ib.addController(widget, &scroll.EventController, &scrollBeginCb, &scrollCb, &scrollEndCb, &scrollDecelerateCb)
-
-	swipe := gtk.NewGestureSwipe()
-	touchpadBeginCb := func(g gtk.Gesture, seq uintptr) {
-		ib.onTouchpadGestureEvent(g, seq)
-	}
-	swipe.ConnectBegin(&touchpadBeginCb)
-	touchpadUpdateCb := func(g gtk.Gesture, seq uintptr) {
-		ib.onTouchpadGestureEvent(g, seq)
-	}
-	swipe.ConnectUpdate(&touchpadUpdateCb)
-	touchpadEndCb := func(g gtk.Gesture, seq uintptr) {
-		ib.onTouchpadGestureEvent(g, seq)
-	}
-	swipe.ConnectEnd(&touchpadEndCb)
-	touchpadCancelCb := func(g gtk.Gesture, seq uintptr) {
-		ib.onTouchpadGestureEvent(g, seq)
-	}
-	swipe.ConnectCancel(&touchpadCancelCb)
-	ib.addController(widget, &swipe.EventController, &touchpadBeginCb, &touchpadUpdateCb, &touchpadEndCb, &touchpadCancelCb)
 
 	focus := gtk.NewEventControllerFocus()
 	focusEnterCb := func(_ gtk.EventControllerFocus) {
@@ -462,10 +447,24 @@ func (ib *InputBridge) currentScrollState() (cef.BrowserHost, float64, float64, 
 	return ib.host, ib.lastX, ib.lastY, ib.scale, ib.scrollOptions, ib.onScroll
 }
 
-func (ib *InputBridge) currentTouchpadSwipeState() (float64, float64, func(TouchpadSwipeEvent) TouchpadSwipeDecision) {
+func (ib *InputBridge) currentNavigationSwipeState() navigationSwipeState {
 	ib.mu.Lock()
 	defer ib.mu.Unlock()
-	return ib.lastX, ib.lastY, ib.onTouchpadSwipe
+	return ib.navigationSwipe
+}
+
+func (ib *InputBridge) setNavigationSwipeState(state navigationSwipeState) {
+	ib.mu.Lock()
+	ib.navigationSwipe = state
+	ib.mu.Unlock()
+}
+
+func (ib *InputBridge) resetNavigationSwipe() {
+	ib.mu.Lock()
+	ib.navigationSwipe.cumulativeDX = 0
+	ib.navigationSwipe.cumulativeDY = 0
+	ib.navigationSwipe.recognized = false
+	ib.mu.Unlock()
 }
 
 func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
@@ -493,6 +492,9 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 	if handler != nil && handler(event) == ScrollConsume {
 		return
 	}
+	if ib.handleNavigationSwipe(event) {
+		return
+	}
 	if host == nil {
 		return
 	}
@@ -505,6 +507,9 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 
 func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
 	_, x, y, _, _, handler := ib.currentScrollState()
+	if phase == ScrollPhaseEnd {
+		ib.resetNavigationSwipe()
+	}
 	if handler == nil {
 		return
 	}
@@ -535,67 +540,67 @@ func (ib *InputBridge) onScrollDecelerate(velocityX, velocityY float64, unit gdk
 	})
 }
 
-func (ib *InputBridge) onTouchpadGestureEvent(gesture gtk.Gesture, seq uintptr) {
-	eventPtr := touchpadGestureEventPtr(gesture, seq)
-	if eventPtr == 0 {
-		return
-	}
-	event := gdk.EventNewFromInternalPtr(eventPtr)
-	if event == nil || event.GetEventType() != gdk.TouchpadSwipeValue {
-		return
-	}
-	touchpadEvent := gdk.TouchpadEventNewFromInternalPtr(eventPtr)
-	var dx, dy float64
-	touchpadEvent.GetDeltas(&dx, &dy)
-	if ib.onTouchpadSwipeEvent(
-		toTouchpadGesturePhase(touchpadEvent.GetGesturePhase()),
-		dx,
-		dy,
-		touchpadEvent.GetNFingers(),
-		uint(gesture.GetCurrentEventState()),
-	) {
-		gesture.SetState(gtk.EventSequenceClaimedValue)
-	}
-}
-
-func touchpadGestureEventPtr(gesture gtk.Gesture, seq uintptr) uintptr {
-	sequence := gdk.EventSequenceNewFromInternalPtr(seq)
-	event := gesture.GetLastEvent(sequence)
-	if event == nil {
-		return 0
-	}
-	return event.GoPointer()
-}
-
-func (ib *InputBridge) onTouchpadSwipeEvent(phase TouchpadGesturePhase, dx, dy float64, fingers, mods uint) bool {
-	x, y, handler := ib.currentTouchpadSwipeState()
-	if handler == nil {
+func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
+	state := ib.currentNavigationSwipeState()
+	if !state.options.Enabled || state.onNavigate == nil || !isPreciseScrollEvent(event) {
 		return false
 	}
-	return handler(TouchpadSwipeEvent{
-		Phase:     phase,
-		X:         x,
-		Y:         y,
-		DX:        dx,
-		DY:        dy,
-		Fingers:   fingers,
-		Modifiers: mods,
-	}) == TouchpadSwipeConsume
+	if state.recognized {
+		return true
+	}
+
+	state.cumulativeDX += event.DX
+	state.cumulativeDY += event.DY
+	absDX, absDY := math.Abs(state.cumulativeDX), math.Abs(state.cumulativeDY)
+	ratio := normalizedNavigationSwipeRatio(state.options.MaxVerticalRatio)
+	if absDY >= absDX*ratio {
+		state.cumulativeDX = 0
+		state.cumulativeDY = 0
+		ib.setNavigationSwipeState(state)
+		return false
+	}
+	if absDX < normalizedNavigationSwipeMinDelta(state.options.MinDelta) {
+		ib.setNavigationSwipeState(state)
+		return false
+	}
+
+	action, ok := navigationSwipeActionForDelta(state.cumulativeDX, state.canNavigateBack, state.canNavigateForward)
+	if !ok {
+		ib.setNavigationSwipeState(state)
+		return false
+	}
+	state.recognized = true
+	ib.setNavigationSwipeState(state)
+	state.onNavigate(action)
+	return true
 }
 
-func toTouchpadGesturePhase(phase gdk.TouchpadGesturePhase) TouchpadGesturePhase {
-	switch phase {
-	case gdk.TouchpadGesturePhaseBeginValue:
-		return TouchpadGesturePhaseBegin
-	case gdk.TouchpadGesturePhaseUpdateValue:
-		return TouchpadGesturePhaseUpdate
-	case gdk.TouchpadGesturePhaseEndValue:
-		return TouchpadGesturePhaseEnd
-	case gdk.TouchpadGesturePhaseCancelValue:
-		return TouchpadGesturePhaseCancel
-	default:
-		return TouchpadGesturePhaseUnknown
+func isPreciseScrollEvent(event ScrollEvent) bool {
+	return event.UnitKnown && event.Unit == gdk.ScrollUnitSurfaceValue
+}
+
+func navigationSwipeActionForDelta(dx float64, canBack, canForward func() bool) (NavigationSwipeAction, bool) {
+	if dx > 0 && canBack != nil && canBack() {
+		return NavigationSwipeBack, true
 	}
+	if dx < 0 && canForward != nil && canForward() {
+		return NavigationSwipeForward, true
+	}
+	return NavigationSwipeBack, false
+}
+
+func normalizedNavigationSwipeMinDelta(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 15
+	}
+	return value
+}
+
+func normalizedNavigationSwipeRatio(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0.5
+	}
+	return value
 }
 
 func (ib *InputBridge) onFocusIn() { syncWindowlessBrowserFocus(ib.currentHost()) }
@@ -846,7 +851,7 @@ func TranslateScrollDeltasWithOptions(dx, dy float64, unit gdk.ScrollUnit, opts 
 	unitScale := float64(cefScrollUnitsPerNotch)
 	round := false
 	if unit == gdk.ScrollUnitSurfaceValue {
-		multiplier = normalizeMultiplier(opts.TouchpadMultiplier)
+		multiplier = normalizePreciseMultiplier(opts.PreciseMultiplier)
 		unitScale = 1
 		round = true
 	}
@@ -860,6 +865,13 @@ func TranslateScrollDeltasWithOptions(dx, dy float64, unit gdk.ScrollUnit, opts 
 func normalizeMultiplier(value float64) float64 {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
 		return 1
+	}
+	return value
+}
+
+func normalizePreciseMultiplier(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 2.5
 	}
 	return value
 }

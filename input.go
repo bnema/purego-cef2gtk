@@ -28,9 +28,15 @@ type InputOptions struct {
 	// OnScroll is invoked for scroll begin/update/end/decelerate notifications.
 	// Returning ScrollConsume for an update prevents forwarding that event to CEF.
 	OnScroll func(ScrollEvent) ScrollDecision
-	// OnTouchpadSwipe is invoked for GDK touchpad swipe gesture events. Returning
-	// TouchpadSwipeConsume prevents further GTK propagation for that event.
-	OnTouchpadSwipe func(TouchpadSwipeEvent) TouchpadSwipeDecision
+	// NavigationSwipe configures browser-history swipe recognition from precise
+	// horizontal touchpad scroll streams.
+	NavigationSwipe NavigationSwipeOptions
+	// CanNavigateBack reports whether a recognized back swipe may navigate.
+	CanNavigateBack func() bool
+	// CanNavigateForward reports whether a recognized forward swipe may navigate.
+	CanNavigateForward func() bool
+	// OnNavigateSwipe is invoked when a back/forward navigation swipe is recognized.
+	OnNavigateSwipe func(NavigationSwipeAction)
 	// SelectionText returns the current browser selection for explicit clipboard
 	// shortcuts. When set with OnClipboardShortcut, Ctrl+C/Ctrl+X can be mirrored
 	// to application-level clipboard orchestration before forwarding to CEF.
@@ -60,10 +66,11 @@ const (
 )
 
 // ScrollOptions configures GTK scroll delta translation before forwarding to CEF.
-// Zero values preserve the default CEF2GTK behavior.
+// Wheel zero values keep legacy wheel behavior; precise zero values use a
+// WebKitGTK-like touchpad/surface scale.
 type ScrollOptions struct {
 	WheelMultiplier      float64
-	TouchpadMultiplier   float64
+	PreciseMultiplier    float64
 	HorizontalMultiplier float64
 	VerticalMultiplier   float64
 	MaxDelta             int32
@@ -81,32 +88,20 @@ type ScrollEvent struct {
 	VelocityX, VelocityY float64
 }
 
-// TouchpadGesturePhase identifies the phase of a touchpad gesture.
-type TouchpadGesturePhase int
+// NavigationSwipeAction identifies a browser-history swipe action derived
+// from precise horizontal touchpad scrolling.
+type NavigationSwipeAction int
 
 const (
-	TouchpadGesturePhaseUnknown TouchpadGesturePhase = iota
-	TouchpadGesturePhaseBegin
-	TouchpadGesturePhaseUpdate
-	TouchpadGesturePhaseEnd
-	TouchpadGesturePhaseCancel
+	NavigationSwipeBack NavigationSwipeAction = iota
+	NavigationSwipeForward
 )
 
-// TouchpadSwipeDecision controls GTK propagation for a touchpad swipe event.
-type TouchpadSwipeDecision int
-
-const (
-	TouchpadSwipePassthrough TouchpadSwipeDecision = iota
-	TouchpadSwipeConsume
-)
-
-// TouchpadSwipeEvent describes a GDK touchpad swipe gesture event.
-type TouchpadSwipeEvent struct {
-	Phase     TouchpadGesturePhase
-	X, Y      float64
-	DX, DY    float64
-	Fingers   uint
-	Modifiers uint
+// NavigationSwipeOptions configures WebKitGTK-like back/forward swipe recognition.
+type NavigationSwipeOptions struct {
+	Enabled          bool
+	MinDelta         float64
+	MaxVerticalRatio float64
 }
 
 func (o InputOptions) normalizedScale(fallback float64) float64 {
@@ -174,7 +169,7 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input.SetProfiler(v.profileRecorder())
 	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
 	v.input.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
-	v.input.SetTouchpadSwipeHandler(toGTKGLTouchpadSwipeHandler(opts.OnTouchpadSwipe))
+	v.input.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(targetWidget)
 	v.inputWidget = targetWidget
@@ -184,7 +179,7 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 func toGTKGLScrollOptions(opts ScrollOptions) gtkgl.ScrollOptions {
 	return gtkgl.ScrollOptions{
 		WheelMultiplier:      opts.WheelMultiplier,
-		TouchpadMultiplier:   opts.TouchpadMultiplier,
+		PreciseMultiplier:    opts.PreciseMultiplier,
 		HorizontalMultiplier: opts.HorizontalMultiplier,
 		VerticalMultiplier:   opts.VerticalMultiplier,
 		MaxDelta:             opts.MaxDelta,
@@ -231,38 +226,25 @@ func toPublicScrollPhase(phase gtkgl.ScrollPhase) ScrollPhase {
 	}
 }
 
-func toGTKGLTouchpadSwipeHandler(fn func(TouchpadSwipeEvent) TouchpadSwipeDecision) func(gtkgl.TouchpadSwipeEvent) gtkgl.TouchpadSwipeDecision {
-	if fn == nil {
-		return nil
-	}
-	return func(event gtkgl.TouchpadSwipeEvent) gtkgl.TouchpadSwipeDecision {
-		if fn(TouchpadSwipeEvent{
-			Phase:     toPublicTouchpadGesturePhase(event.Phase),
-			X:         event.X,
-			Y:         event.Y,
-			DX:        event.DX,
-			DY:        event.DY,
-			Fingers:   event.Fingers,
-			Modifiers: event.Modifiers,
-		}) == TouchpadSwipeConsume {
-			return gtkgl.TouchpadSwipeConsume
-		}
-		return gtkgl.TouchpadSwipePassthrough
+func toGTKGLNavigationSwipeOptions(opts NavigationSwipeOptions) gtkgl.NavigationSwipeOptions {
+	return gtkgl.NavigationSwipeOptions{
+		Enabled:          opts.Enabled,
+		MinDelta:         opts.MinDelta,
+		MaxVerticalRatio: opts.MaxVerticalRatio,
 	}
 }
 
-func toPublicTouchpadGesturePhase(phase gtkgl.TouchpadGesturePhase) TouchpadGesturePhase {
-	switch phase {
-	case gtkgl.TouchpadGesturePhaseBegin:
-		return TouchpadGesturePhaseBegin
-	case gtkgl.TouchpadGesturePhaseUpdate:
-		return TouchpadGesturePhaseUpdate
-	case gtkgl.TouchpadGesturePhaseEnd:
-		return TouchpadGesturePhaseEnd
-	case gtkgl.TouchpadGesturePhaseCancel:
-		return TouchpadGesturePhaseCancel
-	default:
-		return TouchpadGesturePhaseUnknown
+func toGTKGLNavigationSwipeHandler(fn func(NavigationSwipeAction)) func(gtkgl.NavigationSwipeAction) {
+	if fn == nil {
+		return nil
+	}
+	return func(action gtkgl.NavigationSwipeAction) {
+		switch action {
+		case gtkgl.NavigationSwipeBack:
+			fn(NavigationSwipeBack)
+		case gtkgl.NavigationSwipeForward:
+			fn(NavigationSwipeForward)
+		}
 	}
 }
 
