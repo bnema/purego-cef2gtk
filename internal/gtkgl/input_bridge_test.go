@@ -105,18 +105,33 @@ func TestInputBridgeScrollUpdateUsesWheelTranslationWhenUnitUnknown(t *testing.T
 	}
 }
 
-func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadScroll(t *testing.T) {
+func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadBackScroll(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	var actions []NavigationSwipeAction
 	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
 		actions = append(actions, action)
 	})
 
-	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
-	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
 		t.Fatalf("actions = %v, want one back action", actions)
+	}
+}
+
+func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadForwardScroll(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return false }, func() bool { return true }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 1 || actions[0] != NavigationSwipeForward {
+		t.Fatalf("actions = %v, want one forward action", actions)
 	}
 }
 
@@ -156,7 +171,7 @@ func TestInputBridgeNavigationSwipeRequiresCapability(t *testing.T) {
 		called = true
 	})
 
-	ib.onScrollUpdate(20, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-20, 0, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if called {
 		t.Fatalf("navigation swipe fired without navigation capability")

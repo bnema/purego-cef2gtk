@@ -549,7 +549,10 @@ func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
 		return true
 	}
 
-	state.cumulativeDX += event.DX
+	// GTK scroll deltas are inverted compared to WebKit's navigation swipe
+	// direction model. Match WebKitGTK's ViewGestureController, which negates
+	// scroll deltas before deciding Back vs Forward.
+	state.cumulativeDX += -event.DX
 	state.cumulativeDY += event.DY
 	absDX, absDY := math.Abs(state.cumulativeDX), math.Abs(state.cumulativeDY)
 	ratio := normalizedNavigationSwipeRatio(state.options.MaxVerticalRatio)
