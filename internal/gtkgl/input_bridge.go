@@ -115,6 +115,7 @@ type navigationSwipeState struct {
 	cumulativeDX       float64
 	cumulativeDY       float64
 	recognized         bool
+	verticalCanceled   bool
 }
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
@@ -464,6 +465,7 @@ func (ib *InputBridge) resetNavigationSwipe() {
 	ib.navigationSwipe.cumulativeDX = 0
 	ib.navigationSwipe.cumulativeDY = 0
 	ib.navigationSwipe.recognized = false
+	ib.navigationSwipe.verticalCanceled = false
 	ib.mu.Unlock()
 }
 
@@ -489,10 +491,10 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 		Unit:      unit,
 		UnitKnown: unitKnown,
 	}
-	if handler != nil && handler(event) == ScrollConsume {
+	if ib.handleNavigationSwipe(event) {
 		return
 	}
-	if ib.handleNavigationSwipe(event) {
+	if handler != nil && handler(event) == ScrollConsume {
 		return
 	}
 	if host == nil {
@@ -547,6 +549,13 @@ func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
 		return false
 	}
 
+	if state.verticalCanceled {
+		state.cumulativeDX = 0
+		state.cumulativeDY = 0
+		ib.setNavigationSwipeState(state)
+		return false
+	}
+
 	// GTK scroll deltas are inverted compared to WebKit's navigation swipe
 	// direction model. Match WebKitGTK's ViewGestureController, which negates
 	// scroll deltas before deciding Back vs Forward.
@@ -555,6 +564,7 @@ func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
 	if navigationSwipeIsTooVertical(state) {
 		state.cumulativeDX = 0
 		state.cumulativeDY = 0
+		state.verticalCanceled = true
 	}
 	ib.setNavigationSwipeState(state)
 	return false
@@ -562,7 +572,7 @@ func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
 
 func (ib *InputBridge) finishNavigationSwipe() {
 	state := ib.currentNavigationSwipeState()
-	if !state.options.Enabled || state.onNavigate == nil || state.recognized {
+	if !state.options.Enabled || state.onNavigate == nil || state.recognized || state.verticalCanceled {
 		return
 	}
 	absDX := math.Abs(state.cumulativeDX)

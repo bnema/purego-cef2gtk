@@ -171,6 +171,40 @@ func TestInputBridgeNavigationSwipeCancelsVerticalGestures(t *testing.T) {
 	}
 }
 
+func TestInputBridgeNavigationSwipeVerticalCancelPersistsUntilScrollEnd(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	called := false
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true, MaxVerticalRatio: 0.5}, func() bool { return true }, func() bool { return false }, func(NavigationSwipeAction) {
+		called = true
+	})
+
+	ib.onScrollUpdate(-100, 60, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-250, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if called {
+		t.Fatalf("navigation swipe fired after vertical cancellation in same gesture")
+	}
+}
+
+func TestInputBridgeNavigationSwipeTracksConsumedScrollUpdates(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	ib.SetScrollOptions(ScrollOptions{}, func(ScrollEvent) ScrollDecision {
+		return ScrollConsume
+	})
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(-201, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
+		t.Fatalf("actions = %v, want one back action", actions)
+	}
+}
+
 func TestInputBridgeNavigationSwipeRequiresCapability(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	called := false
