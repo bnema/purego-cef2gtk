@@ -894,11 +894,12 @@ func clampScrollDelta(value float64, maxAbs int32, round bool) int32 {
 }
 
 func currentScrollUnit(controller gtk.EventControllerScroll) (gdk.ScrollUnit, bool) {
-	event := controller.GetCurrentEvent()
-	if event == nil || event.GetEventType() != gdk.ScrollValue {
-		return controller.GetUnit(), false
-	}
-	return gdk.ScrollEventNewFromInternalPtr(event.GoPointer()).GetUnit(), true
+	// Do not call GtkEventController.GetCurrentEvent here. The current puregotk
+	// binding treats the returned GdkEvent as a GObject and refs it with
+	// g_object_ref_sink(), but GdkEvent is a boxed type. That produces a GLib
+	// assertion on every scroll event. GtkEventControllerScroll.GetUnit() exposes
+	// the scroll unit we need without wrapping the current event.
+	return controller.GetUnit(), true
 }
 
 const maxInt32Float = float64(int32(1<<31 - 1))
