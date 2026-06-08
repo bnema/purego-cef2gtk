@@ -508,6 +508,7 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
 	_, x, y, _, _, handler := ib.currentScrollState()
 	if phase == ScrollPhaseEnd {
+		ib.finishNavigationSwipe()
 		ib.resetNavigationSwipe()
 	}
 	if handler == nil {
@@ -545,37 +546,41 @@ func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
 	if !state.options.Enabled || state.onNavigate == nil || !isPreciseScrollEvent(event) {
 		return false
 	}
-	if state.recognized {
-		return true
-	}
 
 	// GTK scroll deltas are inverted compared to WebKit's navigation swipe
 	// direction model. Match WebKitGTK's ViewGestureController, which negates
 	// scroll deltas before deciding Back vs Forward.
 	state.cumulativeDX += -event.DX
 	state.cumulativeDY += event.DY
-	absDX, absDY := math.Abs(state.cumulativeDX), math.Abs(state.cumulativeDY)
-	ratio := normalizedNavigationSwipeRatio(state.options.MaxVerticalRatio)
-	if absDY >= absDX*ratio {
+	if navigationSwipeIsTooVertical(state) {
 		state.cumulativeDX = 0
 		state.cumulativeDY = 0
-		ib.setNavigationSwipeState(state)
-		return false
 	}
-	if absDX < normalizedNavigationSwipeMinDelta(state.options.MinDelta) {
-		ib.setNavigationSwipeState(state)
-		return false
-	}
+	ib.setNavigationSwipeState(state)
+	return false
+}
 
+func (ib *InputBridge) finishNavigationSwipe() {
+	state := ib.currentNavigationSwipeState()
+	if !state.options.Enabled || state.onNavigate == nil || state.recognized {
+		return
+	}
+	absDX := math.Abs(state.cumulativeDX)
+	if absDX < normalizedNavigationSwipeMinDelta(state.options.MinDelta) || navigationSwipeIsTooVertical(state) {
+		return
+	}
 	action, ok := navigationSwipeActionForDelta(state.cumulativeDX, state.canNavigateBack, state.canNavigateForward)
 	if !ok {
-		ib.setNavigationSwipeState(state)
-		return false
+		return
 	}
 	state.recognized = true
 	ib.setNavigationSwipeState(state)
 	state.onNavigate(action)
-	return true
+}
+
+func navigationSwipeIsTooVertical(state navigationSwipeState) bool {
+	absDX, absDY := math.Abs(state.cumulativeDX), math.Abs(state.cumulativeDY)
+	return absDX == 0 || absDY >= absDX*normalizedNavigationSwipeRatio(state.options.MaxVerticalRatio)
 }
 
 func isPreciseScrollEvent(event ScrollEvent) bool {

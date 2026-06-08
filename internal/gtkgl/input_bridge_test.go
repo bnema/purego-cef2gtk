@@ -114,6 +114,10 @@ func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadBackScroll(t *tes
 
 	ib.onScrollUpdate(-8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollUpdate(-8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	if len(actions) != 0 {
+		t.Fatalf("actions before end = %v, want none", actions)
+	}
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
 		t.Fatalf("actions = %v, want one back action", actions)
@@ -129,6 +133,10 @@ func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadForwardScroll(t *
 
 	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	if len(actions) != 0 {
+		t.Fatalf("actions before end = %v, want none", actions)
+	}
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if len(actions) != 1 || actions[0] != NavigationSwipeForward {
 		t.Fatalf("actions = %v, want one forward action", actions)
@@ -158,6 +166,7 @@ func TestInputBridgeNavigationSwipeCancelsVerticalGestures(t *testing.T) {
 	})
 
 	ib.onScrollUpdate(20, 11, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if called {
 		t.Fatalf("navigation swipe fired for vertical-dominant gesture")
@@ -172,6 +181,7 @@ func TestInputBridgeNavigationSwipeRequiresCapability(t *testing.T) {
 	})
 
 	ib.onScrollUpdate(-20, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if called {
 		t.Fatalf("navigation swipe fired without navigation capability")
