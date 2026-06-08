@@ -112,8 +112,7 @@ func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadBackScroll(t *tes
 		actions = append(actions, action)
 	})
 
-	ib.onScrollUpdate(-8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
-	ib.onScrollUpdate(-8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-201, 1, gdk.ScrollUnitSurfaceValue, true, 0)
 	if len(actions) != 0 {
 		t.Fatalf("actions before end = %v, want none", actions)
 	}
@@ -131,8 +130,7 @@ func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadForwardScroll(t *
 		actions = append(actions, action)
 	})
 
-	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
-	ib.onScrollUpdate(8, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(201, 1, gdk.ScrollUnitSurfaceValue, true, 0)
 	if len(actions) != 0 {
 		t.Fatalf("actions before end = %v, want none", actions)
 	}
@@ -180,11 +178,28 @@ func TestInputBridgeNavigationSwipeRequiresCapability(t *testing.T) {
 		called = true
 	})
 
-	ib.onScrollUpdate(-20, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-201, 0, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 
 	if called {
 		t.Fatalf("navigation swipe fired without navigation capability")
+	}
+}
+
+func TestInputBridgeNavigationSwipeRequiresWebKitCommitDistance(t *testing.T) {
+	for _, dx := range []float64{-197.7, -200} {
+		ib := NewInputBridge(nil, 1)
+		called := false
+		ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(NavigationSwipeAction) {
+			called = true
+		})
+
+		ib.onScrollUpdate(dx, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+		ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+		if called {
+			t.Fatalf("navigation swipe fired for dx %v, want none", dx)
+		}
 	}
 }
 

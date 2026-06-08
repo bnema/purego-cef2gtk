@@ -566,7 +566,7 @@ func (ib *InputBridge) finishNavigationSwipe() {
 		return
 	}
 	absDX := math.Abs(state.cumulativeDX)
-	if absDX < normalizedNavigationSwipeMinDelta(state.options.MinDelta) || navigationSwipeIsTooVertical(state) {
+	if absDX <= normalizedNavigationSwipeMinDelta(state.options.MinDelta) || navigationSwipeIsTooVertical(state) {
 		return
 	}
 	action, ok := navigationSwipeActionForDelta(state.cumulativeDX, state.canNavigateBack, state.canNavigateForward)
@@ -597,9 +597,14 @@ func navigationSwipeActionForDelta(dx float64, canBack, canForward func() bool) 
 	return NavigationSwipeBack, false
 }
 
+const defaultNavigationSwipeCommitDistance = 400 * 0.5
+
 func normalizedNavigationSwipeMinDelta(value float64) float64 {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
-		return 15
+		// WebKitGTK tracks touchpad swipe progress as distance / 400 and commits
+		// past 0.5 progress. In this bridge MinDelta represents that raw GTK
+		// surface-unit commit distance, not translated CEF wheel deltas.
+		return defaultNavigationSwipeCommitDistance
 	}
 	return value
 }
