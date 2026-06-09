@@ -8,3 +8,9 @@ require (
 	github.com/bnema/puregotk v0.6.0
 	golang.org/x/sys v0.43.0
 )
+
+replace github.com/bnema/puregotk => ../puregotk
+
+replace github.com/bnema/purego => ../purego
+
+replace github.com/bnema/purego-cef => ../purego-cef

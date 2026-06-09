@@ -13,6 +13,7 @@ import (
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gio"
+	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -26,6 +27,11 @@ const (
 )
 
 // InputBridge translates GTK/GDK input events from a GTK widget into CEF OSR input.
+type controllerBinding struct {
+	controller *gtk.EventController
+	handlers   []uint
+}
+
 type InputBridge struct {
 	mu    sync.Mutex
 	host  cef.BrowserHost
@@ -36,9 +42,10 @@ type InputBridge struct {
 	imContext    *gtk.IMContextSimple
 	detached     bool
 
-	widget      *gtk.Widget
-	controllers []*gtk.EventController
-	callbacks   []any
+	widget                 *gtk.Widget
+	controllers            []controllerBinding
+	callbacks              []any
+	imContextCommitHandler uint
 
 	onMiddleClick       func(x, y float64) bool
 	middleClickConsumed bool
@@ -228,12 +235,12 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	motionCb := func(g gtk.EventControllerMotion, x, y float64) {
 		ib.onMouseMove(x, y, uint(g.GetCurrentEventState()), false)
 	}
-	motion.ConnectMotion(&motionCb)
+	motionHandlerID := motion.ConnectMotion(&motionCb)
 	leaveCb := func(g gtk.EventControllerMotion) {
 		ib.onMouseMove(0, 0, uint(g.GetCurrentEventState()), true)
 	}
-	motion.ConnectLeave(&leaveCb)
-	ib.addController(widget, &motion.EventController, &motionCb, &leaveCb)
+	leaveHandlerID := motion.ConnectLeave(&leaveCb)
+	ib.addController(widget, &motion.EventController, []uint{motionHandlerID, leaveHandlerID}, &motionCb, &leaveCb)
 
 	click := gtk.NewGestureClick()
 	click.SetButton(0)
@@ -241,36 +248,36 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 		widget.GrabFocus()
 		ib.onMousePress(x, y, g.GetCurrentButton(), uint(g.GetCurrentEventState()), nPress)
 	}
-	click.ConnectPressed(&pressedCb)
+	pressedHandlerID := click.ConnectPressed(&pressedCb)
 	releasedCb := func(g gtk.GestureClick, nPress int, x, y float64) {
 		ib.onMouseRelease(x, y, g.GetCurrentButton(), uint(g.GetCurrentEventState()), nPress)
 	}
-	click.ConnectReleased(&releasedCb)
-	ib.addController(widget, &click.EventController, &pressedCb, &releasedCb)
+	releasedHandlerID := click.ConnectReleased(&releasedCb)
+	ib.addController(widget, &click.EventController, []uint{pressedHandlerID, releasedHandlerID}, &pressedCb, &releasedCb)
 
 	scroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollBothAxesValue | gtk.EventControllerScrollKineticValue)
 	scrollBeginCb := func(g gtk.EventControllerScroll) {
 		unit, unitKnown := currentScrollUnit(g)
 		ib.onScrollBoundary(ScrollPhaseBegin, unit, unitKnown, uint(g.GetCurrentEventState()))
 	}
-	scroll.ConnectScrollBegin(&scrollBeginCb)
+	scrollBeginHandlerID := scroll.ConnectScrollBegin(&scrollBeginCb)
 	scrollCb := func(g gtk.EventControllerScroll, dx, dy float64) bool {
 		unit, unitKnown := currentScrollUnit(g)
 		ib.onScrollUpdate(dx, dy, unit, unitKnown, uint(g.GetCurrentEventState()))
 		return true
 	}
-	scroll.ConnectScroll(&scrollCb)
+	scrollHandlerID := scroll.ConnectScroll(&scrollCb)
 	scrollEndCb := func(g gtk.EventControllerScroll) {
 		unit, unitKnown := currentScrollUnit(g)
 		ib.onScrollBoundary(ScrollPhaseEnd, unit, unitKnown, uint(g.GetCurrentEventState()))
 	}
-	scroll.ConnectScrollEnd(&scrollEndCb)
+	scrollEndHandlerID := scroll.ConnectScrollEnd(&scrollEndCb)
 	scrollDecelerateCb := func(g gtk.EventControllerScroll, velocityX, velocityY float64) {
 		unit, unitKnown := currentScrollUnit(g)
 		ib.onScrollDecelerate(velocityX, velocityY, unit, unitKnown, uint(g.GetCurrentEventState()))
 	}
-	scroll.ConnectDecelerate(&scrollDecelerateCb)
-	ib.addController(widget, &scroll.EventController, &scrollBeginCb, &scrollCb, &scrollEndCb, &scrollDecelerateCb)
+	scrollDecelerateHandlerID := scroll.ConnectDecelerate(&scrollDecelerateCb)
+	ib.addController(widget, &scroll.EventController, []uint{scrollBeginHandlerID, scrollHandlerID, scrollEndHandlerID, scrollDecelerateHandlerID}, &scrollBeginCb, &scrollCb, &scrollEndCb, &scrollDecelerateCb)
 
 	focus := gtk.NewEventControllerFocus()
 	focusEnterCb := func(_ gtk.EventControllerFocus) {
@@ -279,7 +286,7 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 		}
 		ib.onFocusIn()
 	}
-	focus.ConnectEnter(&focusEnterCb)
+	focusEnterHandlerID := focus.ConnectEnter(&focusEnterCb)
 	focusLeaveCb := func(_ gtk.EventControllerFocus) {
 		if ib.imContext != nil {
 			ib.imContext.Reset()
@@ -287,17 +294,18 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 		}
 		ib.onFocusOut()
 	}
-	focus.ConnectLeave(&focusLeaveCb)
-	ib.addController(widget, &focus.EventController, &focusEnterCb, &focusLeaveCb)
+	focusLeaveHandlerID := focus.ConnectLeave(&focusLeaveCb)
+	ib.addController(widget, &focus.EventController, []uint{focusEnterHandlerID, focusLeaveHandlerID}, &focusEnterCb, &focusLeaveCb)
 
 	key := gtk.NewEventControllerKey()
 	ib.imContext = gtk.NewIMContextSimple()
 	if ib.imContext != nil {
 		commitCb := func(_ gtk.IMContext, text string) { ib.onIMCommit(text) }
-		ib.imContext.ConnectCommit(&commitCb)
+		commitHandlerID := ib.imContext.ConnectCommit(&commitCb)
 		key.SetImContext(&ib.imContext.IMContext)
 		ib.imContext.SetClientWidget(widget)
 		ib.callbacks = append(ib.callbacks, &commitCb)
+		ib.imContextCommitHandler = commitHandlerID
 	}
 	keyPressCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) bool {
 		mods := uint(state)
@@ -315,21 +323,21 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 		}
 		return true
 	}
-	key.ConnectKeyPressed(&keyPressCb)
+	keyPressHandlerID := key.ConnectKeyPressed(&keyPressCb)
 	keyReleaseCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) {
 		ib.onKeyRelease(keyval, keycode, uint(state))
 	}
-	key.ConnectKeyReleased(&keyReleaseCb)
-	ib.addController(widget, &key.EventController, &keyPressCb, &keyReleaseCb)
+	keyReleaseHandlerID := key.ConnectKeyReleased(&keyReleaseCb)
+	ib.addController(widget, &key.EventController, []uint{keyPressHandlerID, keyReleaseHandlerID}, &keyPressCb, &keyReleaseCb)
 
 	widget.SetFocusable(true)
 	widget.SetCanFocus(true)
 }
 
-func (ib *InputBridge) addController(widget *gtk.Widget, controller *gtk.EventController, callbacks ...any) {
+func (ib *InputBridge) addController(widget *gtk.Widget, controller *gtk.EventController, handlers []uint, callbacks ...any) {
 	widget.AddController(controller)
 	ib.mu.Lock()
-	ib.controllers = append(ib.controllers, controller)
+	ib.controllers = append(ib.controllers, controllerBinding{controller: controller, handlers: handlers})
 	ib.callbacks = append(ib.callbacks, callbacks...)
 	ib.mu.Unlock()
 }
@@ -341,21 +349,34 @@ func (ib *InputBridge) Detach() {
 	}
 	ib.mu.Lock()
 	widget := ib.widget
-	controllers := append([]*gtk.EventController(nil), ib.controllers...)
+	controllers := append([]controllerBinding(nil), ib.controllers...)
+	imContext := ib.imContext
+	imContextCommitHandler := ib.imContextCommitHandler
 	ib.detached = true
 	ib.controllers = nil
 	ib.callbacks = nil
 	ib.imContext = nil
+	ib.imContextCommitHandler = 0
 	ib.widget = nil
 	ib.clipboard = nil
 	ib.mu.Unlock()
+	if imContext != nil && imContextCommitHandler != 0 {
+		gobject.SignalHandlerDisconnect(&imContext.Object, imContextCommitHandler)
+	}
 	if widget == nil {
 		return
 	}
-	for _, controller := range controllers {
-		if controller != nil {
-			widget.RemoveController(controller)
+	for _, binding := range controllers {
+		controller := binding.controller
+		if controller == nil {
+			continue
 		}
+		for _, handlerID := range binding.handlers {
+			if handlerID != 0 {
+				gobject.SignalHandlerDisconnect(&controller.Object, handlerID)
+			}
+		}
+		widget.RemoveController(controller)
 	}
 }
 
