@@ -187,6 +187,23 @@ func TestInputBridgeNavigationSwipeVerticalCancelPersistsUntilScrollEnd(t *testi
 	}
 }
 
+func TestInputBridgeNavigationSwipeBeginClearsInterruptedVerticalCancel(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true, MaxVerticalRatio: 0.5}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(-100, 60, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseBegin, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-250, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
+		t.Fatalf("actions = %v, want one back action after new scroll begin", actions)
+	}
+}
+
 func TestInputBridgeNavigationSwipeTracksConsumedScrollUpdates(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	ib.SetScrollOptions(ScrollOptions{}, func(ScrollEvent) ScrollDecision {

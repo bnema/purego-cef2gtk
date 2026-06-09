@@ -509,7 +509,10 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 
 func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
 	_, x, y, _, _, handler := ib.currentScrollState()
-	if phase == ScrollPhaseEnd {
+	switch phase {
+	case ScrollPhaseBegin:
+		ib.resetNavigationSwipe()
+	case ScrollPhaseEnd:
 		ib.finishNavigationSwipe()
 		ib.resetNavigationSwipe()
 	}
