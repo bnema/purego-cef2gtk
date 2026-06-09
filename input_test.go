@@ -64,18 +64,30 @@ func TestInputScaleOverrideRemainsStickyAcrossObservedScaleChanges(t *testing.T)
 func TestScrollOptionsConvertsToGTKGL(t *testing.T) {
 	got := toGTKGLScrollOptions(ScrollOptions{
 		WheelMultiplier:      1.5,
-		TouchpadMultiplier:   0.35,
+		PreciseMultiplier:    2.5,
 		HorizontalMultiplier: 0.75,
 		VerticalMultiplier:   1.25,
 		MaxDelta:             120,
 	})
 
 	if got.WheelMultiplier != 1.5 ||
-		got.TouchpadMultiplier != 0.35 ||
+		got.PreciseMultiplier != 2.5 ||
 		got.HorizontalMultiplier != 0.75 ||
 		got.VerticalMultiplier != 1.25 ||
 		got.MaxDelta != 120 {
 		t.Fatalf("converted scroll options = %+v", got)
+	}
+}
+
+func TestNavigationSwipeOptionsConvertsToGTKGL(t *testing.T) {
+	got := toGTKGLNavigationSwipeOptions(NavigationSwipeOptions{
+		Enabled:          true,
+		MinDelta:         15,
+		MaxVerticalRatio: 0.5,
+	})
+
+	if !got.Enabled || got.MinDelta != 15 || got.MaxVerticalRatio != 0.5 {
+		t.Fatalf("converted navigation swipe options = %+v", got)
 	}
 }
 
@@ -155,78 +167,25 @@ func TestScrollHandlerNilStaysNil(t *testing.T) {
 	}
 }
 
-func TestTouchpadSwipeHandlerConvertsFromGTKGL(t *testing.T) {
-	tests := []struct {
-		name         string
-		inputPhase   gtkgl.TouchpadGesturePhase
-		wantPhase    TouchpadGesturePhase
-		decision     TouchpadSwipeDecision
-		wantDecision gtkgl.TouchpadSwipeDecision
-	}{
-		{
-			name:         "begin passthrough",
-			inputPhase:   gtkgl.TouchpadGesturePhaseBegin,
-			wantPhase:    TouchpadGesturePhaseBegin,
-			decision:     TouchpadSwipePassthrough,
-			wantDecision: gtkgl.TouchpadSwipePassthrough,
-		},
-		{
-			name:         "update consume",
-			inputPhase:   gtkgl.TouchpadGesturePhaseUpdate,
-			wantPhase:    TouchpadGesturePhaseUpdate,
-			decision:     TouchpadSwipeConsume,
-			wantDecision: gtkgl.TouchpadSwipeConsume,
-		},
-		{
-			name:         "end passthrough",
-			inputPhase:   gtkgl.TouchpadGesturePhaseEnd,
-			wantPhase:    TouchpadGesturePhaseEnd,
-			decision:     TouchpadSwipePassthrough,
-			wantDecision: gtkgl.TouchpadSwipePassthrough,
-		},
-		{
-			name:         "cancel passthrough",
-			inputPhase:   gtkgl.TouchpadGesturePhaseCancel,
-			wantPhase:    TouchpadGesturePhaseCancel,
-			decision:     TouchpadSwipePassthrough,
-			wantDecision: gtkgl.TouchpadSwipePassthrough,
-		},
-		{
-			name:         "unknown passthrough",
-			inputPhase:   gtkgl.TouchpadGesturePhase(99),
-			wantPhase:    TouchpadGesturePhaseUnknown,
-			decision:     TouchpadSwipePassthrough,
-			wantDecision: gtkgl.TouchpadSwipePassthrough,
-		},
+func TestNavigationSwipeHandlerConvertsFromGTKGL(t *testing.T) {
+	var got NavigationSwipeAction
+	handler := toGTKGLNavigationSwipeHandler(func(action NavigationSwipeAction) {
+		got = action
+	})
+
+	handler(gtkgl.NavigationSwipeBack)
+	if got != NavigationSwipeBack {
+		t.Fatalf("action = %v, want back", got)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			handler := toGTKGLTouchpadSwipeHandler(func(event TouchpadSwipeEvent) TouchpadSwipeDecision {
-				if event.Phase != tt.wantPhase {
-					t.Fatalf("phase = %v, want %v", event.Phase, tt.wantPhase)
-				}
-				if event.DX != 12 || event.DY != -3 || event.Fingers != 2 {
-					t.Fatalf("event = %+v, want dx=12 dy=-3 fingers=2", event)
-				}
-				return tt.decision
-			})
-
-			got := handler(gtkgl.TouchpadSwipeEvent{
-				Phase:   tt.inputPhase,
-				DX:      12,
-				DY:      -3,
-				Fingers: 2,
-			})
-			if got != tt.wantDecision {
-				t.Fatalf("decision = %v, want %v", got, tt.wantDecision)
-			}
-		})
+	handler(gtkgl.NavigationSwipeForward)
+	if got != NavigationSwipeForward {
+		t.Fatalf("action = %v, want forward", got)
 	}
 }
 
-func TestTouchpadSwipeHandlerNilStaysNil(t *testing.T) {
-	if got := toGTKGLTouchpadSwipeHandler(nil); got != nil {
+func TestNavigationSwipeHandlerNilStaysNil(t *testing.T) {
+	if got := toGTKGLNavigationSwipeHandler(nil); got != nil {
 		t.Fatalf("nil handler converted to non-nil")
 	}
 }

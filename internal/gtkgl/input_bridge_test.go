@@ -30,19 +30,19 @@ func TestTranslateScrollDeltasWithOptionsKeepsLegacyWheelTruncation(t *testing.T
 	}
 }
 
-func TestTranslateScrollDeltasWithOptionsUsesTouchpadMultiplierForSurfaceUnits(t *testing.T) {
+func TestTranslateScrollDeltasWithOptionsUsesPreciseMultiplierForSurfaceUnits(t *testing.T) {
 	x, y := TranslateScrollDeltasWithOptions(123, -40, gdk.ScrollUnitSurfaceValue, ScrollOptions{
-		TouchpadMultiplier: 0.25,
+		PreciseMultiplier: 2.5,
 	})
-	if x != 31 || y != 10 {
-		t.Fatalf("touchpad deltas = (%d,%d), want scaled surface pixels (31,10)", x, y)
+	if x != 308 || y != 100 {
+		t.Fatalf("precise deltas = (%d,%d), want scaled surface pixels (308,100)", x, y)
 	}
 }
 
-func TestTranslateScrollDeltasWithOptionsRoundsSurfacePixels(t *testing.T) {
+func TestTranslateScrollDeltasWithOptionsDefaultsSurfaceUnitsToWebKitGTKScale(t *testing.T) {
 	x, y := TranslateScrollDeltasWithOptions(1.6, -1.6, gdk.ScrollUnitSurfaceValue, ScrollOptions{})
-	if x != 2 || y != 2 {
-		t.Fatalf("surface pixel deltas = (%d,%d), want rounded pixels (2,2)", x, y)
+	if x != 4 || y != 4 {
+		t.Fatalf("surface pixel deltas = (%d,%d), want WebKitGTK-like scale (4,4)", x, y)
 	}
 }
 
@@ -60,7 +60,7 @@ func TestTranslateScrollDeltasWithOptionsAppliesAxisMultipliersAndClamp(t *testi
 func TestInputBridgeScrollHandlerCanConsumeUpdate(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	var got ScrollEvent
-	ib.SetScrollOptions(ScrollOptions{TouchpadMultiplier: 0.25}, func(event ScrollEvent) ScrollDecision {
+	ib.SetScrollOptions(ScrollOptions{PreciseMultiplier: 2.5}, func(event ScrollEvent) ScrollDecision {
 		got = event
 		return ScrollConsume
 	})
@@ -76,8 +76,8 @@ func TestInputBridgeScrollHandlerCanConsumeUpdate(t *testing.T) {
 	if !got.UnitKnown {
 		t.Fatalf("UnitKnown = false, want true for update")
 	}
-	if got.DeltaX != 31 || got.DeltaY != 10 {
-		t.Fatalf("callback deltas = (%d,%d), want (31,10)", got.DeltaX, got.DeltaY)
+	if got.DeltaX != 308 || got.DeltaY != 100 {
+		t.Fatalf("callback deltas = (%d,%d), want (308,100)", got.DeltaX, got.DeltaY)
 	}
 	if got.Modifiers != uint(gdk.ShiftMaskValue) {
 		t.Fatalf("modifiers = %#x, want shift", got.Modifiers)
@@ -87,7 +87,7 @@ func TestInputBridgeScrollHandlerCanConsumeUpdate(t *testing.T) {
 func TestInputBridgeScrollUpdateUsesWheelTranslationWhenUnitUnknown(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	var got ScrollEvent
-	ib.SetScrollOptions(ScrollOptions{TouchpadMultiplier: 0.25}, func(event ScrollEvent) ScrollDecision {
+	ib.SetScrollOptions(ScrollOptions{PreciseMultiplier: 2.5}, func(event ScrollEvent) ScrollDecision {
 		got = event
 		return ScrollConsume
 	})
@@ -105,60 +105,168 @@ func TestInputBridgeScrollUpdateUsesWheelTranslationWhenUnitUnknown(t *testing.T
 	}
 }
 
-func TestInputBridgeTouchpadSwipeHandlerCanConsumeEvent(t *testing.T) {
+func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadBackScroll(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
-	ib.mu.Lock()
-	ib.lastX = 11
-	ib.lastY = 22
-	ib.mu.Unlock()
-
-	var got TouchpadSwipeEvent
-	ib.SetTouchpadSwipeHandler(func(event TouchpadSwipeEvent) TouchpadSwipeDecision {
-		got = event
-		return TouchpadSwipeConsume
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
 	})
 
-	consumed := ib.onTouchpadSwipeEvent(TouchpadGesturePhaseUpdate, 42, -3, 2, uint(gdk.ShiftMaskValue))
+	ib.onScrollUpdate(-201, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	if len(actions) != 0 {
+		t.Fatalf("actions before end = %v, want none", actions)
+	}
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 
-	if !consumed {
-		t.Fatalf("consumed = false, want true")
-	}
-	if got.Phase != TouchpadGesturePhaseUpdate || got.DX != 42 || got.DY != -3 || got.Fingers != 2 {
-		t.Fatalf("touchpad swipe event = %+v", got)
-	}
-	if got.X != 11 || got.Y != 22 {
-		t.Fatalf("touchpad swipe position = (%v,%v), want (11,22)", got.X, got.Y)
-	}
-	if got.Modifiers != uint(gdk.ShiftMaskValue) {
-		t.Fatalf("modifiers = %#x, want shift", got.Modifiers)
+	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
+		t.Fatalf("actions = %v, want one back action", actions)
 	}
 }
 
-func TestInputBridgeTouchpadSwipeHandlerPassthroughByDefault(t *testing.T) {
+func TestInputBridgeNavigationSwipeRecognizesHorizontalTouchpadForwardScroll(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
-	if consumed := ib.onTouchpadSwipeEvent(TouchpadGesturePhaseUpdate, 1, 0, 2, 0); consumed {
-		t.Fatalf("consumed = true, want false with nil handler")
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return false }, func() bool { return true }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(201, 1, gdk.ScrollUnitSurfaceValue, true, 0)
+	if len(actions) != 0 {
+		t.Fatalf("actions before end = %v, want none", actions)
+	}
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 1 || actions[0] != NavigationSwipeForward {
+		t.Fatalf("actions = %v, want one forward action", actions)
 	}
 }
 
-func TestTouchpadGesturePhaseConversion(t *testing.T) {
-	tests := []struct {
-		name  string
-		input gdk.TouchpadGesturePhase
-		want  TouchpadGesturePhase
-	}{
-		{name: "begin", input: gdk.TouchpadGesturePhaseBeginValue, want: TouchpadGesturePhaseBegin},
-		{name: "update", input: gdk.TouchpadGesturePhaseUpdateValue, want: TouchpadGesturePhaseUpdate},
-		{name: "end", input: gdk.TouchpadGesturePhaseEndValue, want: TouchpadGesturePhaseEnd},
-		{name: "cancel", input: gdk.TouchpadGesturePhaseCancelValue, want: TouchpadGesturePhaseCancel},
-		{name: "unknown", input: gdk.TouchpadGesturePhase(99), want: TouchpadGesturePhaseUnknown},
+func TestInputBridgeNavigationSwipeIgnoresMouseWheel(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	called := false
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return true }, func(NavigationSwipeAction) {
+		called = true
+	})
+
+	ib.onScrollUpdate(8, 0, gdk.ScrollUnitWheelValue, true, 0)
+	ib.onScrollUpdate(8, 0, gdk.ScrollUnitWheelValue, true, 0)
+
+	if called {
+		t.Fatalf("navigation swipe fired for mouse wheel")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := toTouchpadGesturePhase(tt.input); got != tt.want {
-				t.Fatalf("toTouchpadGesturePhase(%v) = %v, want %v", tt.input, got, tt.want)
-			}
+}
+
+func TestInputBridgeNavigationSwipeCancelsVerticalGestures(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	called := false
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true, MinDelta: 15, MaxVerticalRatio: 0.5}, func() bool { return true }, func() bool { return false }, func(NavigationSwipeAction) {
+		called = true
+	})
+
+	ib.onScrollUpdate(20, 11, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if called {
+		t.Fatalf("navigation swipe fired for vertical-dominant gesture")
+	}
+}
+
+func TestInputBridgeNavigationSwipeVerticalCancelPersistsUntilScrollEnd(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	called := false
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true, MaxVerticalRatio: 0.5}, func() bool { return true }, func() bool { return false }, func(NavigationSwipeAction) {
+		called = true
+	})
+
+	ib.onScrollUpdate(-100, 60, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-250, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if called {
+		t.Fatalf("navigation swipe fired after vertical cancellation in same gesture")
+	}
+}
+
+func TestInputBridgeNavigationSwipeBeginClearsInterruptedVerticalCancel(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true, MaxVerticalRatio: 0.5}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(-100, 60, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseBegin, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(-250, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
+		t.Fatalf("actions = %v, want one back action after new scroll begin", actions)
+	}
+}
+
+func TestInputBridgeNavigationSwipeTracksConsumedScrollUpdates(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	ib.SetScrollOptions(ScrollOptions{}, func(ScrollEvent) ScrollDecision {
+		return ScrollConsume
+	})
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(-201, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
+		t.Fatalf("actions = %v, want one back action", actions)
+	}
+}
+
+func TestInputBridgeNavigationSwipeRequiresCapability(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	called := false
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return false }, func() bool { return false }, func(NavigationSwipeAction) {
+		called = true
+	})
+
+	ib.onScrollUpdate(-201, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if called {
+		t.Fatalf("navigation swipe fired without navigation capability")
+	}
+}
+
+func TestInputBridgeNavigationSwipeRequiresWebKitCommitDistance(t *testing.T) {
+	for _, dx := range []float64{-197.7, -200} {
+		ib := NewInputBridge(nil, 1)
+		called := false
+		ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(NavigationSwipeAction) {
+			called = true
 		})
+
+		ib.onScrollUpdate(dx, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+		ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+
+		if called {
+			t.Fatalf("navigation swipe fired for dx %v, want none", dx)
+		}
+	}
+}
+
+func TestInputBridgeNavigationSwipeResetsOnScrollEnd(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	var actions []NavigationSwipeAction
+	ib.SetNavigationSwipeHandler(NavigationSwipeOptions{Enabled: true}, func() bool { return true }, func() bool { return false }, func(action NavigationSwipeAction) {
+		actions = append(actions, action)
+	})
+
+	ib.onScrollUpdate(8, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
+	ib.onScrollUpdate(8, 0, gdk.ScrollUnitSurfaceValue, true, 0)
+
+	if len(actions) != 0 {
+		t.Fatalf("actions = %v, want none after reset below threshold", actions)
 	}
 }
 
