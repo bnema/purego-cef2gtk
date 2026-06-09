@@ -190,13 +190,13 @@ func TestSizeObservationStrategy_GLAreaUsesWidgetScaleAndGLAreaResize(t *testing
 	}
 }
 
-func TestSizeObservationStrategy_GDKDMABUFUsesSurfaceLayoutWithoutDeadWidgetSizeNotify(t *testing.T) {
+func TestSizeObservationStrategy_GDKDMABUFUsesSurfaceLayoutAndSurfaceSizeNotify(t *testing.T) {
 	strategy := sizeObservationStrategy(false)
 	if len(strategy.widgetNotifyDetails) != 1 || strategy.widgetNotifyDetails[0] != "scale-factor" {
 		t.Fatalf("widget notify details = %v, want only scale-factor", strategy.widgetNotifyDetails)
 	}
 	if len(strategy.surfaceSizeNotifyDetails) != 2 || strategy.surfaceSizeNotifyDetails[0] != "width" || strategy.surfaceSizeNotifyDetails[1] != "height" {
-		t.Fatalf("surface size notify details = %v, want [width height]", strategy.surfaceSizeNotifyDetails)
+		t.Fatalf("surface size notify details = %v, want [width height] for GDKDMABUF", strategy.surfaceSizeNotifyDetails)
 	}
 	if len(strategy.surfaceScaleNotifyDetails) != 2 || strategy.surfaceScaleNotifyDetails[0] != "scale" || strategy.surfaceScaleNotifyDetails[1] != "scale-factor" {
 		t.Fatalf("surface scale notify details = %v, want [scale scale-factor]", strategy.surfaceScaleNotifyDetails)
@@ -206,6 +206,36 @@ func TestSizeObservationStrategy_GDKDMABUFUsesSurfaceLayoutWithoutDeadWidgetSize
 	}
 	if !strategy.useSurfaceLayout {
 		t.Fatal("GDKDMABUF strategy should use GdkSurface::layout to observe child allocation relayouts")
+	}
+}
+
+func TestSizeObservationStrategy_SurfaceCallbackBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		hasGLArea          bool
+		wantSurfaceSignals int
+	}{
+		{name: "glarea", hasGLArea: true, wantSurfaceSignals: 1},
+		{name: "gdkdmabuf", hasGLArea: false, wantSurfaceSignals: 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			strategy := sizeObservationStrategy(tt.hasGLArea)
+			got := 0
+			if strategy.useSurfaceLayout {
+				got++
+			}
+			if len(strategy.surfaceSizeNotifyDetails) > 0 {
+				got += len(strategy.surfaceSizeNotifyDetails)
+			}
+			if len(strategy.surfaceScaleNotifyDetails) > 0 {
+				// refreshSurfaceSignals intentionally reuses one callback function for
+				// both scale and scale-factor notify handlers.
+				got++
+			}
+			if got != tt.wantSurfaceSignals {
+				t.Fatalf("surface signal callback budget = %d, want %d", got, tt.wantSurfaceSignals)
+			}
+		})
 	}
 }
 
