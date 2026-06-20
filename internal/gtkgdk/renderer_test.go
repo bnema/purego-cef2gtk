@@ -126,9 +126,6 @@ func TestBuildTextureDuplicatesFDAndTransfersDuplicateToGDKDestroyNotify(t *test
 	if builder.destroyPtr == 0 || builder.data != uintptr(builder.fd) {
 		t.Fatalf("destroy notify/data not passed to builder: destroy=%#x data=%#x fd=%d", builder.destroyPtr, builder.data, builder.fd)
 	}
-	if built.fd != -1 {
-		t.Fatalf("renderer should not own fd after successful build, got %d", built.fd)
-	}
 	// Avoid Unref on the fake texture pointer; this unit only verifies FD
 	// ownership. Runtime texture unrefs are covered by live GTK validation.
 	built.texture = nil
@@ -138,49 +135,89 @@ func TestBuildTextureDuplicatesFDAndTransfersDuplicateToGDKDestroyNotify(t *test
 	assertFDOpen(t, int(file.Fd()))
 }
 
-func TestRetireOwnedTextureKeepsRecentFDsOpen(t *testing.T) {
+func TestRetireOwnedTextureLimitsRetiredTextures(t *testing.T) {
+	r := &Renderer{}
+
+	// Push up to the limit.
+	for i := 0; i < retiredTextureLimit; i++ {
+		r.retireOwnedTexture(&ownedTexture{})
+	}
+	if got := len(r.retired); got != retiredTextureLimit {
+		t.Fatalf("retired length after filling = %d, want %d", got, retiredTextureLimit)
+	}
+
+	// Adding one more should release the oldest but stay at the limit.
+	r.retireOwnedTexture(&ownedTexture{})
+	if got := len(r.retired); got != retiredTextureLimit {
+		t.Fatalf("retired length after overflow = %d, want %d", got, retiredTextureLimit)
+	}
+
+	r.releaseRetiredTextures()
+	if got := len(r.retired); got != 0 {
+		t.Fatalf("retired length after release = %d, want 0", got)
+	}
+}
+
+func TestNewRendererFailsWhenNativeCloseUnavailable(t *testing.T) {
+	if os.Getenv("PUREGO_CEF2GTK_LIVE_GTK_TEST") == "" {
+		t.Skip("requires live GTK runtime; set PUREGO_CEF2GTK_LIVE_GTK_TEST=1")
+	}
+
+	origResolve := resolveDestroyNotify
+	resolveDestroyNotify = func() (uintptr, error) {
+		return 0, ErrCloseDestroyNotifyUnavailable
+	}
+	defer func() { resolveDestroyNotify = origResolve }()
+
+	_, err := NewRenderer(false)
+	if err == nil {
+		t.Fatal("NewRenderer should fail when native close GDestroyNotify is unavailable")
+	}
+	if !errors.Is(err, ErrCloseDestroyNotifyUnavailable) {
+		t.Fatalf("NewRenderer error = %v, want wrapping of %v", err, ErrCloseDestroyNotifyUnavailable)
+	}
+}
+
+func TestBuildTextureFailsWhenNativeCloseUnavailable(t *testing.T) {
+	// Force the native close GDestroyNotify to be unavailable.
+	// This verifies that texture construction returns an error and the
+	// duplicated FD is properly closed (no FD leak).
+	origResolve := resolveDestroyNotify
+	resolveDestroyNotify = func() (uintptr, error) {
+		return 0, ErrCloseDestroyNotifyUnavailable
+	}
+	defer func() { resolveDestroyNotify = origResolve }()
+
 	file, err := os.Open("/dev/null")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeTestFile(t, file)
 
-	r := &Renderer{closeFD: unix.Close}
-	fds := make([]int, 0, retiredTextureLimit+1)
-	defer func() {
-		for _, fd := range fds {
-			_ = unix.Close(fd)
-		}
-	}()
-
-	for range retiredTextureLimit {
-		fd, err := dupFDClOExec(int(file.Fd()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		fds = append(fds, fd)
-		r.retireOwnedTexture(&ownedTexture{fd: fd})
+	var duplicateFD int
+	builder := &fakeBuilder{texture: fakeTexture()}
+	r := &Renderer{
+		builder: builder,
+		dupFD: func(fd int) (int, error) {
+			d, err := dupFDClOExec(fd)
+			duplicateFD = d
+			return d, err
+		},
+		closeFD: unix.Close,
 	}
-	for _, fd := range fds {
-		assertFDOpen(t, fd)
+	if _, err := buildTextureFromFrameForTest(r, validFrame(int(file.Fd()))); !errors.Is(err, ErrCloseDestroyNotifyUnavailable) {
+		t.Fatalf("buildTextureFromFrame error = %v, want %v", err, ErrCloseDestroyNotifyUnavailable)
 	}
-
-	extraFD, err := dupFDClOExec(int(file.Fd()))
-	if err != nil {
-		t.Fatal(err)
+	if builder.builds != 0 {
+		t.Fatalf("builder should not have been called: builds=%d", builder.builds)
 	}
-	fds = append(fds, extraFD)
-	r.retireOwnedTexture(&ownedTexture{fd: extraFD})
-
-	assertFDClosed(t, fds[0])
-	for _, fd := range fds[1:] {
-		assertFDOpen(t, fd)
+	// The duplicate FD should be closed by the deferred cleanup.
+	if duplicateFD < 0 {
+		t.Fatal("duplicate FD was not created")
 	}
-
-	r.releaseRetiredTextures()
-	for _, fd := range fds[1:] {
-		assertFDClosed(t, fd)
-	}
+	assertFDClosed(t, duplicateFD)
+	// The original CEF FD must remain open.
+	assertFDOpen(t, int(file.Fd()))
 }
 
 func TestEnqueueOwnedFrameDoesNotDuplicateFreshPendingIdle(t *testing.T) {
