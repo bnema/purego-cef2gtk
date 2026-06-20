@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/glib"
+	"github.com/bnema/puregotk/v4/gtk"
 )
 
 type fakeFormats struct {
@@ -82,6 +83,43 @@ func fakeTexture() *gdk.Texture {
 	texture := &gdk.Texture{}
 	texture.SetGoPointer(1)
 	return texture
+}
+
+type fakePresenterPicture struct {
+	canShrink     bool
+	contentFit    gtk.ContentFit
+	hexpand       bool
+	vexpand       bool
+	widthRequest  int
+	heightRequest int
+}
+
+func (p *fakePresenterPicture) SetCanShrink(v bool)            { p.canShrink = v }
+func (p *fakePresenterPicture) SetContentFit(v gtk.ContentFit) { p.contentFit = v }
+func (p *fakePresenterPicture) SetHexpand(v bool)              { p.hexpand = v }
+func (p *fakePresenterPicture) SetVexpand(v bool)              { p.vexpand = v }
+func (p *fakePresenterPicture) SetSizeRequest(width, height int) {
+	p.widthRequest = width
+	p.heightRequest = height
+}
+
+func TestConfigurePresenterPictureFillsAllocationDuringResize(t *testing.T) {
+	picture := &fakePresenterPicture{}
+
+	configurePresenterPicture(picture)
+
+	if !picture.canShrink {
+		t.Fatal("presenter picture should be allowed to shrink with its allocation")
+	}
+	if picture.contentFit != gtk.ContentFitFillValue {
+		t.Fatalf("content fit = %v, want %v", picture.contentFit, gtk.ContentFitFillValue)
+	}
+	if !picture.hexpand || !picture.vexpand {
+		t.Fatalf("expand flags = h:%t v:%t, want both true", picture.hexpand, picture.vexpand)
+	}
+	if picture.widthRequest != 1 || picture.heightRequest != 1 {
+		t.Fatalf("size request = %dx%d, want 1x1", picture.widthRequest, picture.heightRequest)
+	}
 }
 
 func buildTextureFromFrameForTest(r *Renderer, frame dmabuf.BorrowedFrame) (*ownedTexture, error) {
