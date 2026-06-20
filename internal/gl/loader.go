@@ -98,6 +98,7 @@ type Loader struct {
 	viewport   func(x, y, width, height int32)
 	drawArrays func(mode uint32, first, count int32)
 	getError   func() uint32
+	readPixels func(x, y, width, height int32, format, xtype uint32, pixels unsafe.Pointer)
 
 	genQueries          func(n int32, ids *uint32)
 	deleteQueries       func(n int32, ids *uint32)
@@ -204,6 +205,7 @@ func (l *Loader) registerAll() (retErr error) {
 	register(&l.viewport, "glViewport")
 	register(&l.drawArrays, "glDrawArrays")
 	register(&l.getError, "glGetError")
+	register(&l.readPixels, "glReadPixels")
 
 	l.registerOptional("glGenQueries", &l.genQueries)
 	l.registerOptional("glDeleteQueries", &l.deleteQueries)

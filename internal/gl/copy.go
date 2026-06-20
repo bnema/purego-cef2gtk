@@ -158,6 +158,9 @@ func (l *Loader) CheckFramebufferStatus(target uint32) uint32 {
 func (l *Loader) Viewport(x, y, width, height int32)         { l.viewport(x, y, width, height) }
 func (l *Loader) DrawArrays(mode uint32, first, count int32) { l.drawArrays(mode, first, count) }
 func (l *Loader) GetError() uint32                           { return l.getError() }
+func (l *Loader) ReadPixels(x, y, width, height int32, format, xtype uint32, pixels unsafe.Pointer) {
+	l.readPixels(x, y, width, height, format, xtype, pixels)
+}
 func (l *Loader) TimerQuerySupported() bool {
 	return l != nil && l.genQueries != nil && l.deleteQueries != nil && l.beginQuery != nil && l.endQuery != nil && l.getQueryObjectuiv != nil && l.getQueryObjectui64v != nil
 }

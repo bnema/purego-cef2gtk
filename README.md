@@ -98,6 +98,27 @@ See `examples/simple-browser` for a complete accelerated-only GTK+CEF setup.
 The module depends on the published `github.com/bnema/puregotk` module. During local puregotk development,
 you can temporarily add your own `replace github.com/bnema/puregotk => ../puregotk` directive.
 
+### Local smoke execution
+
+The integration smoke suite exercises GTK/EGL context probing, the deterministic DMABUF import-copy
+pipeline (synthetic GL texture through FBO render-to-texture and swap), and a build of the example
+browser. Smoke tests are skipped by default and require both `WAYLAND_DISPLAY` and the opt-in
+environment variable:
+
+```sh
+PUREGO_CEF2GTK_CEF_RUNTIME_SMOKE=1 rtk go test ./integration/ -run TestRuntimeSmokeGate -v
+```
+
+The probe-import-copy step validates the accelerated frame import/swap path deterministically:
+it allocates a real DRM dumb buffer dma-buf through `/dev/dri/card0` (falling back to a synthetic
+4×4 GL texture when DRM access is unavailable), fills it with a deterministic 4×4 RGBA pattern,
+imports it through `eglImporter.ImportDMABUF` + `glEGLImageTargetTexture2DOES`, and exercises the
+`CopyImportedToOwned` FBO render-to-texture pipeline and `DrawTextureToCurrentFramebuffer` swap
+path. After the copy pipeline, the result is read back through an FBO and compared with the
+original pixel data to verify data integrity. All GL errors, framebuffer completeness, and shader
+compilation are checked, providing strict end-to-end coverage of the accelerated EGL import + copy
+pipeline.
+
 ```sh
 rtk make check
 ```

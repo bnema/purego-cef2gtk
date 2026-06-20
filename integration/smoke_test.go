@@ -21,6 +21,7 @@ func TestRuntimeSmokeGate(t *testing.T) {
 
 	root := projectRoot(t)
 	runBounded(t, root, 20*time.Second, "GTK/EGL probe", "go", "run", "./cmd/probe-gtk-egl")
+	runBounded(t, root, 30*time.Second, "DMABUF import-copy probe", "go", "run", "./cmd/probe-import-copy")
 	runBounded(t, root, 30*time.Second, "simple browser build", "go", "build", "./examples/simple-browser")
 }
 
