@@ -23,6 +23,17 @@ func (f FourCC) Supported() bool {
 	}
 }
 
+// BytesPerPixel returns bytes per pixel for the four supported RGB formats.
+// Returns 0 for unsupported or unknown formats.
+func (f FourCC) BytesPerPixel() int {
+	switch f {
+	case FormatARGB8888, FormatXRGB8888, FormatABGR8888, FormatXBGR8888:
+		return 4
+	default:
+		return 0
+	}
+}
+
 func (f FourCC) String() string {
 	if f == 0 {
 		return "<zero>"

@@ -8,11 +8,13 @@ import (
 const supportedPlaneCount = 1
 
 var (
-	ErrInvalidCodedSize  = errors.New("invalid coded size")
-	ErrUnsupportedFormat = errors.New("unsupported dmabuf format")
-	ErrUnsupportedPlanes = errors.New("unsupported dmabuf plane count")
-	ErrInvalidPlaneFD    = errors.New("invalid dmabuf plane fd")
-	ErrInvalidStride     = errors.New("invalid dmabuf plane stride")
+	ErrInvalidCodedSize    = errors.New("invalid coded size")
+	ErrUnsupportedFormat   = errors.New("unsupported dmabuf format")
+	ErrUnsupportedPlanes   = errors.New("unsupported dmabuf plane count")
+	ErrInvalidPlaneFD      = errors.New("invalid dmabuf plane fd")
+	ErrInvalidStride       = errors.New("invalid dmabuf plane stride")
+	ErrPlaneExtentOverflow = errors.New("dmabuf plane extent arithmetic overflow")
+	ErrPlaneSizeTooSmall   = errors.New("dmabuf plane size too small for coded extent")
 )
 
 // Size describes pixel dimensions.
@@ -57,8 +59,26 @@ type BorrowedFrame struct {
 	Planes   []Plane
 }
 
+// checkedMulUint64 returns a*b and a boolean indicating whether the result is valid
+// (false on overflow). A zero result is always valid.
+func checkedMulUint64(a, b uint64) (uint64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	result := a * b
+	return result, result/b == a
+}
+
+// checkedAddUint64 returns a+b and a boolean indicating whether the result is valid
+// (false on overflow).
+func checkedAddUint64(a, b uint64) (uint64, bool) {
+	result := a + b
+	return result, result >= a
+}
+
 // Validate enforces the intentionally small initial support matrix: exactly one
-// plane, one of four RGB formats, positive coded size, non-negative fd, and non-zero stride.
+// plane, one of four RGB formats, positive coded size, non-negative fd, non-zero stride,
+// and overflow-safe plane extent bounds.
 func (f BorrowedFrame) Validate() error {
 	if !f.CodedSize.Valid() {
 		return fmt.Errorf("%w: %dx%d", ErrInvalidCodedSize, f.CodedSize.Width, f.CodedSize.Height)
@@ -75,6 +95,31 @@ func (f BorrowedFrame) Validate() error {
 	}
 	if plane.Stride == 0 {
 		return fmt.Errorf("%w: %d", ErrInvalidStride, plane.Stride)
+	}
+
+	// Stride must be wide enough for one coded row at the format's bpp.
+	bpp := uint64(f.Format.BytesPerPixel())
+	minStride, ok := checkedMulUint64(uint64(f.CodedSize.Width), bpp)
+	if !ok {
+		return fmt.Errorf("%w: width %d * %d bytes-per-pixel overflows uint64", ErrPlaneExtentOverflow, f.CodedSize.Width, bpp)
+	}
+	if uint64(plane.Stride) < minStride {
+		return fmt.Errorf("%w: stride %d < minimum %d (width %d * %d bytes-per-pixel)", ErrInvalidStride, plane.Stride, minStride, f.CodedSize.Width, bpp)
+	}
+
+	// Overflow-safe minimum buffer extent validation.
+	stride := uint64(plane.Stride)
+	height := uint64(f.CodedSize.Height)
+	rowBytes, ok := checkedMulUint64(stride, height)
+	if !ok {
+		return fmt.Errorf("%w: stride %d * coded height %d overflows uint64", ErrPlaneExtentOverflow, plane.Stride, f.CodedSize.Height)
+	}
+	requiredExtent, ok := checkedAddUint64(plane.Offset, rowBytes)
+	if !ok {
+		return fmt.Errorf("%w: offset %d + stride*coded height %d overflows uint64", ErrPlaneExtentOverflow, plane.Offset, rowBytes)
+	}
+	if plane.Size > 0 && plane.Size < requiredExtent {
+		return fmt.Errorf("%w: plane size %d < required minimum extent %d (offset %d + stride %d * coded height %d)", ErrPlaneSizeTooSmall, plane.Size, requiredExtent, plane.Offset, plane.Stride, f.CodedSize.Height)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package dmabuf
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -92,5 +93,97 @@ func TestBorrowedFrameValidateRejectsZeroStride(t *testing.T) {
 	frame.Planes[0].Stride = 0
 	if err := frame.Validate(); !errors.Is(err, ErrInvalidStride) {
 		t.Fatalf("Validate error = %v, want %v", err, ErrInvalidStride)
+	}
+}
+
+func TestBorrowedFrameValidateRejectsStrideSmallerThanWidthTimesBPP(t *testing.T) {
+	// 640x480 ARGB8888 (4 bytes/pixel) with stride=1 — regression test.
+	// Before the stride-vs-width check this passed even though EGL/GDK would
+	// receive an impossible pitch.
+	frame := validFrame()
+	frame.Planes[0].Stride = 1
+	frame.Planes[0].Size = 480 // offset(0) + stride(1)*height(480) = 480 passes old extent check
+	if err := frame.Validate(); !errors.Is(err, ErrInvalidStride) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrInvalidStride)
+	}
+
+	// stride = width*4 - 1 should also fail
+	frame2 := validFrame()
+	frame2.Planes[0].Stride = 2559 // 640*4 - 1
+	frame2.Planes[0].Size = 2559 * 480
+	if err := frame2.Validate(); !errors.Is(err, ErrInvalidStride) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrInvalidStride)
+	}
+}
+
+func TestBorrowedFrameValidateAcceptsStrideEqualToWidthTimesBPP(t *testing.T) {
+	// Boundary: stride == width*4 (2560 == 640*4)
+	frame := validFrame()
+	if err := frame.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil", err)
+	}
+}
+
+func TestBorrowedFrameValidateRejectsOffsetOverflow(t *testing.T) {
+	// offset + stride*height overflows uint64
+	frame := validFrame()
+	frame.Planes[0].Stride = math.MaxUint32
+	frame.Planes[0].Offset = math.MaxUint64
+	if err := frame.Validate(); !errors.Is(err, ErrPlaneExtentOverflow) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrPlaneExtentOverflow)
+	}
+}
+
+func TestBorrowedFrameValidateRejectsPlaneSizeTooSmall(t *testing.T) {
+	frame := validFrame()
+	// stride=2560, height=480 → rowBytes=1,228,800
+	// offset 0 + 1,228,800 = 1,228,800 minimum extent
+	frame.Planes[0].Size = 1_000_000
+	if err := frame.Validate(); !errors.Is(err, ErrPlaneSizeTooSmall) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrPlaneSizeTooSmall)
+	}
+
+	// With non-zero offset
+	frame2 := validFrame()
+	frame2.Planes[0].Offset = 500_000
+	// minExtent = 500,000 + 1,228,800 = 1,728,800
+	frame2.Planes[0].Size = 1_000_000
+	if err := frame2.Validate(); !errors.Is(err, ErrPlaneSizeTooSmall) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrPlaneSizeTooSmall)
+	}
+}
+
+func TestBorrowedFrameValidateAcceptsExactPlaneSize(t *testing.T) {
+	// Size exactly equal to minimum extent
+	frame := validFrame()
+	frame.Planes[0].Size = 2560 * 480 // stride * height
+	if err := frame.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil", err)
+	}
+}
+
+func TestBorrowedFrameValidateAcceptsLargerPlaneSize(t *testing.T) {
+	frame := validFrame()
+	frame.Planes[0].Size = 2560 * 480 * 2
+	if err := frame.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil", err)
+	}
+}
+
+func TestBorrowedFrameValidateAcceptsZeroPlaneSize(t *testing.T) {
+	// Size=0 means unspecified; no size check performed.
+	frame := validFrame()
+	frame.Planes[0].Size = 0
+	if err := frame.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil", err)
+	}
+}
+
+func TestBorrowedFrameValidateAcceptsLargeOffset(t *testing.T) {
+	frame := validFrame()
+	frame.Planes[0].Offset = 1 << 40
+	frame.Planes[0].Size = 1<<40 + 2560*480
+	if err := frame.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil", err)
 	}
 }
