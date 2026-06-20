@@ -76,9 +76,10 @@ type dmabufTextureBuilder interface {
 
 type idleOnceScheduler func(*glib.SourceOnceFunc, uintptr) uint
 
+// ownedTexture pairs a GdkTexture whose plane FD lifetime is managed by GDK's
+// native close(2) GDestroyNotify.
 type ownedTexture struct {
 	texture *gdk.Texture
-	fd      int
 }
 
 type ownedPlane struct {
@@ -164,6 +165,9 @@ var (
 	closeDestroyNotifyErr  error
 )
 
+// resolveDestroyNotify is overridable in tests to simulate native close failure.
+var resolveDestroyNotify = nativeCloseDestroyNotify
+
 // NewRenderer creates a GtkPicture-backed GDK DMABUF renderer. When useOffload
 // is true and GtkGraphicsOffload can be constructed, Widget returns the offload
 // wrapper; otherwise it returns the picture widget directly.
@@ -195,6 +199,14 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Validate native close(2) GDestroyNotify availability at construction time
+	// so BackendAuto callers can detect the failure and fall back to the GLArea
+	// renderer without waiting for the first frame to fail.
+	if _, err := resolveDestroyNotify(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCloseDestroyNotifyUnavailable, err)
+	}
+
 	return &Renderer{
 		widget:      widget,
 		picture:     picture,
@@ -542,7 +554,11 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 			frame.Planes[0].FD = -1
 		}
 	}()
-	destroyNotify, destroyNotifyErr := nativeCloseDestroyNotify()
+	destroyNotify, destroyNotifyErr := resolveDestroyNotify()
+	if destroyNotifyErr != nil {
+		r.recordTextureBuildFailure()
+		return nil, fmt.Errorf("%w: native close GDestroyNotify unavailable: %w", ErrTextureBuildFailed, destroyNotifyErr)
+	}
 
 	plane := borrowed.Planes[0]
 	r.builder.SetWidth(uint(borrowed.CodedSize.Width))
@@ -566,22 +582,15 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 		}
 	}()
 	// GDK requires the caller to keep plane FDs open until the returned texture is
-	// released. On known-compatible Linux ABIs, pass libc close(2) as a native
-	// GDestroyNotify so GTK/GSK closes the duplicated FD at the exact
-	// texture-finalization point, without calling back into Go from renderer/
-	// finalizer code. This relies on the standard C ABI convention GLib documents
-	// for destroy callbacks: the gpointer data value is passed in the first
-	// integer/pointer argument register, and close(2) reads the low int fd from
-	// that register. If the native symbol or ABI compatibility check is unavailable,
-	// fall back to renderer-owned FD lifetime management.
-	textureFD := -1
-	destroyData := uintptr(ownedFD)
-	if destroyNotifyErr != nil {
-		textureFD = ownedFD
-		destroyNotify = 0
-		destroyData = 0
-	}
-	texture, err := r.builder.BuildWithDestroyNotifyPointer(destroyNotify, destroyData)
+	// released. Pass libc close(2) as a native GDestroyNotify so GTK/GSK closes
+	// the duplicated FD at the exact texture-finalization point, without calling
+	// back into Go from renderer/finalizer code. This relies on the standard C ABI
+	// convention GLib documents for destroy callbacks: the gpointer data value is
+	// passed in the first integer/pointer argument register, and close(2) reads
+	// the low int fd from that register. If the native symbol or ABI compatibility
+	// check is unavailable, texture construction fails and the caller can fall
+	// back to the GLArea rendering backend.
+	texture, err := r.builder.BuildWithDestroyNotifyPointer(destroyNotify, uintptr(ownedFD))
 	if err != nil {
 		r.recordTextureBuildFailure()
 		return nil, fmt.Errorf("%w: %v", ErrTextureBuildFailed, err)
@@ -594,7 +603,7 @@ func (r *Renderer) buildTextureFromOwnedFrame(frame *ownedFrame) (built *ownedTe
 	frame.Planes[0].FD = -1
 	r.recordTextureBuilt()
 	r.traceTexturePresent(borrowed, gdkFormat, texture)
-	return &ownedTexture{texture: texture, fd: textureFD}, nil
+	return &ownedTexture{texture: texture}, nil
 }
 
 // QueueRender is a no-op for GtkPicture; GTK schedules painting for paintable changes.
@@ -683,14 +692,6 @@ func (r *Renderer) releaseOwnedTexture(owned *ownedTexture) {
 	if owned.texture != nil {
 		owned.texture.Unref()
 		runtime.KeepAlive(owned.texture)
-	}
-	if owned.fd >= 0 {
-		closeFD := r.closeFD
-		if closeFD == nil {
-			closeFD = unix.Close
-		}
-		_ = closeFD(owned.fd)
-		owned.fd = -1
 	}
 }
 
