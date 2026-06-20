@@ -12,10 +12,13 @@ import (
 // fakeRenderQueue keeps handler tests small and records queue/error behavior
 // directly; generated mocks would add noise for this package-local interface.
 type fakeRenderQueue struct {
-	err          error
-	importCalled bool
-	renderCalled bool
-	queued       bool
+	err            error
+	importCalled   bool
+	renderCalled   bool
+	queued         bool
+	closeStarted   chan struct{}
+	continueClose  chan struct{}
+	closeStartedOK bool
 }
 
 type fakeAsyncRenderQueue struct {
@@ -41,9 +44,17 @@ func (f *fakeRenderQueue) RenderQueuedOnGTKThread() error {
 	f.renderCalled = true
 	return f.err
 }
-func (f *fakeRenderQueue) InvalidateOnGTKThread()                {}
+func (f *fakeRenderQueue) InvalidateOnGTKThread()                { f.Close() }
 func (f *fakeRenderQueue) SetProfiler(*internalprofile.Recorder) {}
-func (f *fakeRenderQueue) Close()                                {}
+func (f *fakeRenderQueue) Close() {
+	if f.closeStarted != nil && !f.closeStartedOK {
+		f.closeStartedOK = true
+		close(f.closeStarted)
+	}
+	if f.continueClose != nil {
+		<-f.continueClose
+	}
+}
 
 func TestOnPaintFailLoudRecordsAndHooks(t *testing.T) {
 	d := newDiagnosticsRecorder()
@@ -272,6 +283,66 @@ func TestGetScreenInfoAndViewRectUseAutoBackingScaleAboveOne(t *testing.T) {
 	}
 	if info.Rect.Width != 800 || info.Rect.Height != 600 {
 		t.Fatalf("unexpected rects: rect=%+v", info.Rect)
+	}
+}
+
+func TestStaleHandlerAfterDestroyDoesNotCallRenderer(t *testing.T) {
+	f := &fakeRenderQueue{}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{})
+
+	if err := v.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	// Late CEF callback on the previously-obtained handler.
+	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+
+	if f.importCalled {
+		t.Fatal("stale handler called accelerated renderer after Destroy")
+	}
+	if f.queued {
+		t.Fatal("stale handler queued render after Destroy")
+	}
+
+	d := v.Diagnostics()
+	if d.StaleAcceleratedPaints != 1 {
+		t.Fatalf("StaleAcceleratedPaints=%d, want 1", d.StaleAcceleratedPaints)
+	}
+}
+
+func TestStaleHandlerDuringDestroyDoesNotRaceRendererTeardown(t *testing.T) {
+	f := &fakeRenderQueue{closeStarted: make(chan struct{}), continueClose: make(chan struct{})}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{})
+
+	destroyDone := make(chan error, 1)
+	go func() { destroyDone <- v.Destroy() }()
+	<-f.closeStarted
+
+	paintDone := make(chan struct{})
+	go func() {
+		h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+		close(paintDone)
+	}()
+
+	select {
+	case <-paintDone:
+		t.Fatal("accelerated paint completed while renderer teardown was in progress")
+	default:
+	}
+
+	close(f.continueClose)
+	if err := <-destroyDone; err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	<-paintDone
+
+	if f.importCalled {
+		t.Fatal("stale handler called accelerated renderer during Destroy")
+	}
+	if f.queued {
+		t.Fatal("stale handler queued render during Destroy")
 	}
 }
 

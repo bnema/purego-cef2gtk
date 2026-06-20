@@ -20,6 +20,7 @@ type Diagnostics struct {
 	Backend                 string
 	AcceleratedPaints       int
 	AcceleratedPaintErrors  int
+	StaleAcceleratedPaints  int
 	UnsupportedPaints       int
 	ImportFailures          int
 	RenderFailures          int
@@ -72,6 +73,16 @@ func (r *diagnosticsRecorder) RecordAcceleratedPaint() {
 	defer r.mu.Unlock()
 	r.d.AcceleratedPaints++
 	r.appendEventLocked(DiagnosticEvent{Time: time.Now(), Kind: "accelerated-paint"})
+}
+
+func (r *diagnosticsRecorder) RecordStaleAcceleratedPaint() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.d.StaleAcceleratedPaints++
+	r.appendEventLocked(DiagnosticEvent{Time: time.Now(), Kind: "stale-accelerated-paint"})
 }
 
 func (r *diagnosticsRecorder) RecordImportFailure(err error) {

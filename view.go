@@ -53,6 +53,8 @@ type View struct {
 	input                       *gtkgl.InputBridge
 	inputWidget                 *gtk.Widget
 	diag                        *diagnosticsRecorder
+	destroyed                   atomic.Bool
+	renderLifecycleMu           sync.RWMutex
 	hooks                       Hooks
 	handler                     *renderHandler
 	renderFunc                  func(gtk.GLArea, uintptr) bool
@@ -886,6 +888,9 @@ func (v *View) Destroy() error {
 	if v == nil {
 		return ErrNilView
 	}
+	v.renderLifecycleMu.Lock()
+	defer v.renderLifecycleMu.Unlock()
+	v.destroyed.Store(true)
 	if v.input != nil {
 		v.input.Detach()
 		v.input = nil

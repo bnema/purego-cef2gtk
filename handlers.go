@@ -109,6 +109,19 @@ func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType
 		h.diag.RecordAcceleratedPaint()
 	}
 	if h.view != nil {
+		// Serialize accelerated-paint imports with View.Destroy's renderer teardown.
+		// The destroyed flag alone is only a preflight check: without this read lock,
+		// a callback could pass the flag check just before Destroy starts closing the
+		// cached renderer. Holding the read lock through import and render queueing
+		// keeps teardown from racing in-flight callbacks.
+		h.view.renderLifecycleMu.RLock()
+		defer h.view.renderLifecycleMu.RUnlock()
+		if h.view.destroyed.Load() {
+			if h.diag != nil {
+				h.diag.RecordStaleAcceleratedPaint()
+			}
+			return
+		}
 		h.view.recordProfileFrameReceived()
 	}
 	if h.renderer == nil {
