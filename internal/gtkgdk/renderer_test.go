@@ -73,7 +73,7 @@ func validFrame(fd int) dmabuf.BorrowedFrame {
 			FD:     fd,
 			Stride: 2560,
 			Offset: 128,
-			Size:   640 * 480 * 4,
+			Size:   640*480*4 + 128, // offset(128) + stride(2560)*codedHeight(480)
 		}},
 	}
 }

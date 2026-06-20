@@ -15,7 +15,7 @@ const (
 	wantFD          int    = 17
 	wantStride      uint32 = 4096
 	wantOffset      uint64 = 128
-	wantPlaneSize   uint64 = 262144
+	wantPlaneSize   uint64 = math.MaxUint64
 	wantModifier    uint64 = 0x0102030405060708
 )
 
@@ -127,6 +127,9 @@ func TestDMABUFImageAttributesRejectsUnsupportedFormat(t *testing.T) {
 func TestDMABUFImageAttributesRejectsOffsetTooLargeForEGLInt(t *testing.T) {
 	frame := validFrame()
 	frame.Planes[0].Offset = uint64(math.MaxInt32) + 1
+	// Set Size=0 (unspecified) so dmabuf extent validation does not mask
+	// the EGL-specific offset check.
+	frame.Planes[0].Size = 0
 
 	_, err := DMABUFImageAttributes(frame, Extensions{ExtensionDMABUFImport: {}})
 	if !errors.Is(err, ErrInvalidOffset) {
@@ -137,6 +140,9 @@ func TestDMABUFImageAttributesRejectsOffsetTooLargeForEGLInt(t *testing.T) {
 func TestDMABUFImageAttributesRejectsStrideTooLargeForEGLInt(t *testing.T) {
 	frame := validFrame()
 	frame.Planes[0].Stride = uint32(math.MaxInt32) + 1
+	// Set Size=0 (unspecified) so dmabuf extent validation does not mask
+	// the EGL-specific stride check.
+	frame.Planes[0].Size = 0
 
 	_, err := DMABUFImageAttributes(frame, Extensions{ExtensionDMABUFImport: {}})
 	if !errors.Is(err, ErrInvalidStrideAttribute) {

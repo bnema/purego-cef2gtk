@@ -27,7 +27,7 @@ const (
 	testPlaneFD           int32  = 23
 	testPlaneStride       uint32 = 4096
 	testPlaneOffset       uint64 = 128
-	testPlaneSize         uint64 = 1 << 20
+	testPlaneSize         uint64 = 2 << 20 // 2,097,152 > offset(128) + stride(4096)*height(481) = 1,970,304
 	testSecondPlaneFD     int32  = 24
 	testSecondPlaneStride uint32 = 2048
 	testBadColorType      int32  = 99
