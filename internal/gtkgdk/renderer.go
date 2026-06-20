@@ -168,6 +168,25 @@ var (
 // resolveDestroyNotify is overridable in tests to simulate native close failure.
 var resolveDestroyNotify = nativeCloseDestroyNotify
 
+type presenterPicture interface {
+	SetCanShrink(bool)
+	SetContentFit(gtk.ContentFit)
+	SetHexpand(bool)
+	SetVexpand(bool)
+	SetSizeRequest(int, int)
+}
+
+func configurePresenterPicture(picture presenterPicture) {
+	if picture == nil {
+		return
+	}
+	picture.SetCanShrink(true)
+	picture.SetContentFit(gtk.ContentFitFillValue)
+	picture.SetHexpand(true)
+	picture.SetVexpand(true)
+	picture.SetSizeRequest(1, 1)
+}
+
 // NewRenderer creates a GtkPicture-backed GDK DMABUF renderer. When useOffload
 // is true and GtkGraphicsOffload can be constructed, Widget returns the offload
 // wrapper; otherwise it returns the picture widget directly.
@@ -176,11 +195,7 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	if picture == nil {
 		return nil, ErrMissingPicture
 	}
-	picture.SetCanShrink(true)
-	picture.SetContentFit(gtk.ContentFitContainValue)
-	picture.SetHexpand(true)
-	picture.SetVexpand(true)
-	picture.SetSizeRequest(1, 1)
+	configurePresenterPicture(picture)
 
 	widget := &picture.Widget
 	var offload *gtk.GraphicsOffload
