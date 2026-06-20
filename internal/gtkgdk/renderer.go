@@ -333,7 +333,7 @@ func (r *Renderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (qu
 	if err != nil {
 		return gtkgl.QueuedFrame{}, err
 	}
-	gtkgl.RunOnGTKThreadSync(func() {
+	if err := gtkgl.RunOnGTKThreadSync(func() {
 		if r == nil {
 			retErr = ErrNilRenderer
 			return
@@ -341,7 +341,9 @@ func (r *Renderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (qu
 		r.recordGTKWait(time.Since(start))
 		defer func(begin time.Time) { r.recordImportCopyCPU(time.Since(begin)) }(time.Now())
 		retErr = r.importAndSwapOwnedFrame(owned)
-	})
+	}); err != nil {
+		retErr = err
+	}
 	if retErr != nil {
 		r.releaseOwnedFrame(owned)
 	}

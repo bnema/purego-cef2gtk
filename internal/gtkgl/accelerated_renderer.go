@@ -149,7 +149,7 @@ func defaultAcceleratedRendererInit(area *gtk.GLArea) (eglImporter, glImporter, 
 // resources only for the duration of the callback.
 func (r *AcceleratedRenderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (queued QueuedFrame, retErr error) {
 	start := time.Now()
-	RunOnGTKThreadSync(func() {
+	if err := RunOnGTKThreadSync(func() {
 		if r == nil {
 			retErr = ErrNilAcceleratedRenderer
 			return
@@ -172,7 +172,10 @@ func (r *AcceleratedRenderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPai
 			return
 		}
 		queued, retErr = r.ImportCopyAndQueue(info)
-	})
+	}); err != nil {
+		retErr = err
+		return
+	}
 	return queued, retErr
 }
 
