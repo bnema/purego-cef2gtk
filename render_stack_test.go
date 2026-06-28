@@ -41,6 +41,9 @@ func TestResolveRenderStackEGL(t *testing.T) {
 	if plan.OSRBackingScale != "off" {
 		t.Fatalf("OSRBackingScale = %q, want off", plan.OSRBackingScale)
 	}
+	if plan.GraphicsOffload {
+		t.Fatal("GraphicsOffload = true, want false for EGL/GLArea stack")
+	}
 }
 
 func TestResolveRenderStackRejectsUnknownStack(t *testing.T) {
@@ -102,5 +105,8 @@ func assertVulkanRenderStackPlan(t *testing.T, plan RenderStackPlan) {
 	}
 	if plan.OSRBackingScale != "auto" {
 		t.Fatalf("OSRBackingScale = %q, want auto", plan.OSRBackingScale)
+	}
+	if !plan.GraphicsOffload {
+		t.Fatal("GraphicsOffload = false, want true for Vulkan/GDK DMABUF stack")
 	}
 }

@@ -23,6 +23,8 @@ type RenderStackPlan struct {
 	ANGLEBackend    string
 	GSKRenderer     string
 	OSRBackingScale string
+	// GraphicsOffload enables GtkGraphicsOffload for GDK DMABUF presentation.
+	GraphicsOffload bool
 }
 
 // ResolveRenderStack resolves a public render-stack choice to the low-level
@@ -36,6 +38,7 @@ func ResolveRenderStack(stack RenderStack) (RenderStackPlan, error) {
 			ANGLEBackend:    "vulkan",
 			GSKRenderer:     "vulkan",
 			OSRBackingScale: "auto",
+			GraphicsOffload: true,
 		}, nil
 	case RenderStackEGL:
 		return RenderStackPlan{

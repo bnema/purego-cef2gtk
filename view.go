@@ -123,7 +123,7 @@ func NewViewWithOptions(opts ViewOptions) *View {
 	backend := opts.Backend
 	scaleMultiplier := normalizeDeviceScale(opts.ScaleMultiplier)
 	if backend == BackendAuto {
-		if v := newGDKDMABUFView(opts.Profile, scaleMultiplier); v != nil {
+		if v := newGDKDMABUFView(opts.Profile, scaleMultiplier, opts.GraphicsOffload); v != nil {
 			return v
 		}
 		backend = BackendGLArea
@@ -132,7 +132,7 @@ func NewViewWithOptions(opts ViewOptions) *View {
 	case BackendGLArea:
 		return newGLAreaView(opts.Profile, scaleMultiplier)
 	case BackendGDKDMABUF:
-		return newGDKDMABUFView(opts.Profile, scaleMultiplier)
+		return newGDKDMABUFView(opts.Profile, scaleMultiplier, opts.GraphicsOffload)
 	default:
 		return nil
 	}
@@ -156,8 +156,8 @@ func newGLAreaView(profile ProfileOptions, scaleMultiplier float64) *View {
 	return v
 }
 
-func newGDKDMABUFView(profile ProfileOptions, scaleMultiplier float64) *View {
-	renderer, err := gtkgdk.NewRenderer(false)
+func newGDKDMABUFView(profile ProfileOptions, scaleMultiplier float64, graphicsOffload bool) *View {
+	renderer, err := gtkgdk.NewRenderer(graphicsOffload)
 	if err != nil || renderer == nil || renderer.Widget() == nil {
 		return nil
 	}

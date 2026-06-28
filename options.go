@@ -42,6 +42,9 @@ type ViewOptions struct {
 	// GTK/GDK surface scale for CEF OSR screen, backing, and input coordinates.
 	// Values <= 0, NaN, or Inf are treated as 1.
 	ScaleMultiplier float64
+	// GraphicsOffload wraps the GDK DMABUF presenter in GtkGraphicsOffload when
+	// the selected backend supports it. Unsupported platforms fall back in GTK.
+	GraphicsOffload bool
 }
 
 // Validate verifies that the requested backend/render stack is supported by the option schema.
@@ -53,6 +56,7 @@ func (o ViewOptions) Validate() error {
 func (o ViewOptions) normalized() (ViewOptions, error) {
 	if o.RenderStackPlan.Backend != "" {
 		o.Backend = o.RenderStackPlan.Backend
+		o.GraphicsOffload = o.RenderStackPlan.GraphicsOffload
 	}
 	backend, err := normalizeBackend(o.Backend)
 	if err != nil {

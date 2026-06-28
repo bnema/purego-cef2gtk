@@ -29,3 +29,18 @@ func TestResolveViewOptionsDoesNotSplitTypedRenderStackWithBackendEnv(t *testing
 		t.Fatalf("Backend = %q, want typed EGL backend %q", got.Backend, BackendGLArea)
 	}
 }
+
+func TestResolveViewOptionsUsesRenderStackGraphicsOffload(t *testing.T) {
+	plan, err := ResolveRenderStack(RenderStackVulkan)
+	if err != nil {
+		t.Fatalf("ResolveRenderStack(vulkan) error = %v", err)
+	}
+
+	got, err := resolveViewOptions(ViewOptions{RenderStackPlan: plan})
+	if err != nil {
+		t.Fatalf("resolveViewOptions() error = %v", err)
+	}
+	if !got.GraphicsOffload {
+		t.Fatal("GraphicsOffload = false, want true from Vulkan render stack plan")
+	}
+}
