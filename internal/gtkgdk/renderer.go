@@ -140,6 +140,7 @@ type Renderer struct {
 	pendingScheduledAt time.Time
 	pendingSourceID    uint
 	pendingGeneration  uint64
+	dupInProgress      bool
 
 	dupFD       func(int) (int, error)
 	closeFD     func(int) error
@@ -338,6 +339,10 @@ func (r *Renderer) ImportAndQueueAsync(info *cef.AcceleratedPaintInfo, onError f
 	if err != nil {
 		return err
 	}
+	if !r.tryBeginDup(time.Now()) {
+		return nil
+	}
+	defer r.finishDup()
 	owned, err := r.duplicateFrame(frame)
 	if err != nil {
 		return err
@@ -345,6 +350,31 @@ func (r *Renderer) ImportAndQueueAsync(info *cef.AcceleratedPaintInfo, onError f
 	owned.onError = onError
 	r.enqueueOwnedFrame(owned)
 	return nil
+}
+
+func (r *Renderer) tryBeginDup(now time.Time) bool {
+	if r == nil {
+		return false
+	}
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if r.dupInProgress {
+		return false
+	}
+	if r.pendingScheduled && r.pendingFrame != nil && !r.pendingScheduledAt.IsZero() && now.Sub(r.pendingScheduledAt) <= stalePendingFrameWait {
+		return false
+	}
+	r.dupInProgress = true
+	return true
+}
+
+func (r *Renderer) finishDup() {
+	if r == nil {
+		return
+	}
+	r.pendingMu.Lock()
+	r.dupInProgress = false
+	r.pendingMu.Unlock()
 }
 
 // ImportAndQueueOnGTKThread is kept for the GLArea backend contract and tests.

@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/glib"
@@ -77,6 +78,26 @@ func validFrame(fd int) dmabuf.BorrowedFrame {
 			Size:   640*480*4 + 128, // offset(128) + stride(2560)*codedHeight(480)
 		}},
 	}
+}
+
+func validAcceleratedPaintInfo(fd int) cef.AcceleratedPaintInfo {
+	info := cef.NewAcceleratedPaintInfo()
+	info.PlaneCount = 1
+	info.Format = int32(cef.ColorTypeBgra8888)
+	info.Modifier = 0x0102030405060708
+	info.Planes[0].Fd = int32(fd)
+	info.Planes[0].Stride = 2560
+	info.Planes[0].Offset = 128
+	info.Planes[0].Size = 640*480*4 + 128
+	info.Extra.CodedSize.Width = 640
+	info.Extra.CodedSize.Height = 480
+	info.Extra.VisibleRect.Width = 640
+	info.Extra.VisibleRect.Height = 480
+	info.Extra.ContentRect.Width = 640
+	info.Extra.ContentRect.Height = 480
+	info.Extra.SourceSize.Width = 640
+	info.Extra.SourceSize.Height = 480
+	return info
 }
 
 func fakeTexture() *gdk.Texture {
@@ -256,6 +277,102 @@ func TestBuildTextureFailsWhenNativeCloseUnavailable(t *testing.T) {
 	assertFDClosed(t, duplicateFD)
 	// The original CEF FD must remain open.
 	assertFDOpen(t, int(file.Fd()))
+}
+
+func TestImportAndQueueAsyncDropsFrameBeforeDupWhenFreshPendingImportExists(t *testing.T) {
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestFile(t, file)
+
+	dupCalled := false
+	r := &Renderer{
+		closeFD: unix.Close,
+		dupFD: func(int) (int, error) {
+			dupCalled = true
+			return -1, errors.New("dup should not be called for dropped frame")
+		},
+	}
+	defer r.InvalidateOnGTKThread()
+	r.pendingMu.Lock()
+	r.pendingFrame = &ownedFrame{Planes: []ownedPlane{{FD: -1}}}
+	r.pendingScheduled = true
+	r.pendingScheduledAt = time.Now()
+	r.pendingGeneration = 1
+	r.pendingMu.Unlock()
+
+	info := validAcceleratedPaintInfo(int(file.Fd()))
+	if err := r.ImportAndQueueAsync(&info, nil); err != nil {
+		t.Fatalf("ImportAndQueueAsync() error = %v, want nil dropped frame", err)
+	}
+	if dupCalled {
+		t.Fatal("dup called for frame that should have been dropped before import")
+	}
+}
+
+func TestImportAndQueueAsyncDropsFrameBeforeDupWhenAnotherDupIsInProgress(t *testing.T) {
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestFile(t, file)
+
+	dupCalled := false
+	r := &Renderer{
+		closeFD: unix.Close,
+		dupFD: func(int) (int, error) {
+			dupCalled = true
+			return -1, errors.New("dup should not be called while another dup is in progress")
+		},
+	}
+	r.pendingMu.Lock()
+	r.dupInProgress = true
+	r.pendingMu.Unlock()
+
+	info := validAcceleratedPaintInfo(int(file.Fd()))
+	if err := r.ImportAndQueueAsync(&info, nil); err != nil {
+		t.Fatalf("ImportAndQueueAsync() error = %v, want nil dropped frame", err)
+	}
+	if dupCalled {
+		t.Fatal("dup called despite dupInProgress reservation")
+	}
+}
+
+func TestImportAndQueueAsyncDoesNotDropWhenPendingImportIsStale(t *testing.T) {
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestFile(t, file)
+
+	dupCalled := false
+	r := &Renderer{
+		closeFD: unix.Close,
+		dupFD: func(fd int) (int, error) {
+			dupCalled = true
+			return dupFDClOExec(fd)
+		},
+		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint { return 1 },
+	}
+	defer r.InvalidateOnGTKThread()
+	r.pendingMu.Lock()
+	r.pendingFrame = &ownedFrame{Planes: []ownedPlane{{FD: -1}}}
+	r.pendingScheduled = true
+	r.pendingScheduledAt = time.Now().Add(-stalePendingFrameWait - time.Second)
+	r.pendingGeneration = 1
+	r.pendingMu.Unlock()
+
+	info := validAcceleratedPaintInfo(int(file.Fd()))
+	if err := r.ImportAndQueueAsync(&info, nil); err != nil {
+		t.Fatalf("ImportAndQueueAsync() error = %v, want nil", err)
+	}
+	if !dupCalled {
+		t.Fatal("dup was not called for stale pending import")
+	}
+	if got := r.Diagnostics(); got.PendingReschedules != 1 {
+		t.Fatalf("PendingReschedules = %d, want 1 after replacing stale pending frame", got.PendingReschedules)
+	}
 }
 
 func TestEnqueueOwnedFrameDoesNotDuplicateFreshPendingIdle(t *testing.T) {
