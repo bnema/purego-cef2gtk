@@ -2,6 +2,8 @@ package cef2gtk
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -408,6 +410,94 @@ func TestStaleHandlerDuringDestroyDoesNotRaceRendererTeardown(t *testing.T) {
 	}
 	if f.queued {
 		t.Fatal("stale handler queued render during Destroy")
+	}
+}
+
+func TestRenderHandlerSynchronizesHookReplacementWithCallbacksAndDestroy(t *testing.T) {
+	v := &View{diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{})
+
+	start := make(chan struct{})
+	var callbacks atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 1_000 {
+			v.RenderHandler(Hooks{OnUnsupportedPaint: func() { callbacks.Add(1) }})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 1_000 {
+			h.OnPaint(nil, cef.PaintElementTypePetView, nil, nil, 0, 0)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		if err := v.Destroy(); err != nil {
+			t.Errorf("Destroy: %v", err)
+		}
+	}()
+	close(start)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("hook replacement, callback delivery, and Destroy deadlocked")
+	}
+	if callbacks.Load() == 0 {
+		t.Fatal("no replacement hook was delivered")
+	}
+}
+
+func TestFirstPresentationUsesReplacementHookOnceAndAllowsDestroy(t *testing.T) {
+	var afterPaint func()
+	var oldCalls, newCalls atomic.Int64
+	v := &View{
+		diag: newDiagnosticsRecorder(),
+		frameClockAfterPaintConnect: func(fn func()) func() {
+			afterPaint = fn
+			return func() {}
+		},
+	}
+	v.RenderHandler(Hooks{OnFirstPresentation: func() { oldCalls.Add(1) }})
+	v.recordFirstDMABUFTextureSwap()
+	if afterPaint == nil {
+		t.Fatal("texture swap did not arm after-paint")
+	}
+
+	v.RenderHandler(Hooks{OnFirstPresentation: func() {
+		newCalls.Add(1)
+		if err := v.Destroy(); err != nil {
+			t.Errorf("Destroy: %v", err)
+		}
+	}})
+
+	done := make(chan struct{})
+	go func() {
+		afterPaint()
+		afterPaint()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("first-presentation hook deadlocked while destroying its view")
+	}
+	if got := oldCalls.Load(); got != 0 {
+		t.Fatalf("stale first-presentation hook calls = %d, want 0", got)
+	}
+	if got := newCalls.Load(); got != 1 {
+		t.Fatalf("replacement first-presentation hook calls = %d, want 1", got)
 	}
 }
 

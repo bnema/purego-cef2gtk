@@ -31,7 +31,13 @@ func (v *View) RenderHandler(hooks Hooks) cef.RenderHandler {
 	if v == nil {
 		return &renderHandler{staticHooks: hooks}
 	}
-	v.hooks = hooks
+
+	// Serialize handler replacement with Destroy, which clears both handler and
+	// renderer. Hook readers use firstPresentationMu and always copy before
+	// invoking user code.
+	v.renderLifecycleMu.Lock()
+	defer v.renderLifecycleMu.Unlock()
+	v.setHooks(hooks)
 	v.configureFirstPresentationHooks()
 	if v.handler != nil {
 		return v.handler
@@ -188,7 +194,7 @@ func isTransientGLAreaLifecycleError(err error) bool {
 }
 func (h *renderHandler) hooks() Hooks {
 	if h != nil && h.view != nil {
-		return h.view.hooks
+		return h.view.snapshotHooks()
 	}
 	if h != nil {
 		return h.staticHooks
