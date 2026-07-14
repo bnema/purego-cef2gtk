@@ -3,6 +3,7 @@ package cef2gtk
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
@@ -92,6 +93,31 @@ func TestOnAcceleratedPaintErrorHook(t *testing.T) {
 	}
 	if f.queued {
 		t.Fatalf("queued render after failed import/copy")
+	}
+}
+
+func TestFirstAcceleratedPaintHookCanDestroyView(t *testing.T) {
+	f := &fakeRenderQueue{}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{OnFirstAcceleratedPaint: func() {
+		if err := v.Destroy(); err != nil {
+			t.Errorf("Destroy: %v", err)
+		}
+	}})
+
+	done := make(chan struct{})
+	go func() {
+		h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("accelerated paint deadlocked when its first-paint hook destroyed the view")
+	}
+	if f.importCalled || f.queued {
+		t.Fatal("accelerated paint imported or queued after its hook destroyed the view")
 	}
 }
 

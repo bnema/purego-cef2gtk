@@ -711,19 +711,23 @@ func (v *View) configureFirstPresentationHooks() {
 	v.firstPresentationMu.Unlock()
 }
 
-func (v *View) recordFirstAcceleratedPaint() {
+// claimFirstAcceleratedPaint atomically records the one-shot transition and
+// snapshots its hooks. Call while renderLifecycleMu excludes Destroy; invoke
+// the returned hooks only after that lock has been released.
+func (v *View) claimFirstAcceleratedPaint() (Hooks, bool, bool) {
 	if v == nil {
-		return
+		return Hooks{}, false, false
 	}
 	v.firstPresentationMu.Lock()
+	defer v.firstPresentationMu.Unlock()
 	if v.destroyed.Load() || v.firstAcceleratedPaint {
-		v.firstPresentationMu.Unlock()
-		return
+		return Hooks{}, false, false
 	}
 	v.firstAcceleratedPaint = true
-	unsupported := v.dmabufCompletionConfigured && !v.dmabufCompletionSupported
-	hooks := v.hooks
-	v.firstPresentationMu.Unlock()
+	return v.hooks, v.dmabufCompletionConfigured && !v.dmabufCompletionSupported, true
+}
+
+func invokeFirstAcceleratedPaintHooks(hooks Hooks, unsupported bool) {
 	if hooks.OnFirstAcceleratedPaint != nil {
 		hooks.OnFirstAcceleratedPaint()
 	}
