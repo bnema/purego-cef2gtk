@@ -30,6 +30,16 @@ const (
 	compositorCleanupLimit = 3 * time.Second
 )
 
+// TestMain lets CEF handle its GPU and renderer subprocesses before the Go
+// test flag parser sees their --type command-line switch. It remains inert
+// outside the opt-in smoke.
+func TestMain(m *testing.M) {
+	if os.Getenv(cefWaylandSmokeEnv) != "" {
+		cef.MaybeExitSubprocess()
+	}
+	os.Exit(m.Run())
+}
+
 // TestCEFWestonHeadlessSmoke is intentionally opt-in because it requires a
 // local Weston and CEF runtime. Once opted in, every prerequisite and lifecycle
 // failure is fatal rather than a skip.
