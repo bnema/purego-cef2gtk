@@ -78,6 +78,15 @@ func (w *lifecycleWaiter) fail(err error) {
 	}
 }
 
+func (w *lifecycleWaiter) status(target lifecycleMilestone) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failure != nil {
+		return false, w.failure
+	}
+	return w.next > target, nil
+}
+
 func (w *lifecycleWaiter) wait(ctx context.Context, target lifecycleMilestone) error {
 	for {
 		w.mu.Lock()
@@ -158,5 +167,27 @@ func TestLifecycleWaiterRejectsRenderError(t *testing.T) {
 	defer cancel()
 	if err := waiter.wait(ctx, milestoneClose); !errors.Is(err, want) {
 		t.Fatalf("wait error = %v, want %v", err, want)
+	}
+}
+
+func TestLifecycleWaiterConcurrentDuplicateIsTerminal(t *testing.T) {
+	waiter := newLifecycleWaiter()
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			waiter.observe(milestoneAcceleratedPaint)
+		}()
+	}
+	close(start)
+	group.Wait()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waiter.wait(ctx, milestoneClose)
+	if err == nil || !strings.Contains(err.Error(), "out of order") {
+		t.Fatalf("concurrent duplicate error = %v, want terminal out-of-order failure", err)
 	}
 }
