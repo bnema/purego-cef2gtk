@@ -110,6 +110,26 @@ func (f fakeCopier) DrawTextureToCurrentFramebuffer(src gl.Texture, size dmabuf.
 }
 func (f fakeCopier) Close() { *f.calls = append(*f.calls, "copier.Close") }
 
+func TestGLAreaDoesNotReportDMABUFTextureSwapCompletion(t *testing.T) {
+	calls := []string{}
+	r := &AcceleratedRenderer{
+		egl:    fakeEGLImporter{calls: &calls, image: 11},
+		gl:     fakeGLImporter{calls: &calls, texture: 22},
+		copier: fakeCopier{calls: &calls, texture: 33},
+	}
+	called := 0
+	if r.SetFirstDMABUFTextureSwapHook(func() { called++ }) {
+		t.Fatal("GLArea renderer reported unsupported DMABUF swap completion")
+	}
+	info := validPaintInfoForRenderer()
+	if _, err := r.ImportCopyAndQueue(&info); err != nil {
+		t.Fatalf("ImportCopyAndQueue: %v", err)
+	}
+	if called != 0 {
+		t.Fatalf("DMABUF texture swap callback called by GL fallback: %d", called)
+	}
+}
+
 func TestAcceleratedRendererInvalidateDropsContextResourcesWithoutGLDeletes(t *testing.T) {
 	calls := []string{}
 	r := &AcceleratedRenderer{
