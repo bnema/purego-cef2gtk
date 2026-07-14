@@ -53,6 +53,138 @@ func TestViewSizeScaleAndObservers(t *testing.T) {
 	}
 }
 
+func TestFirstPresentationWaitsForSubsequentAfterPaintAndRunsOnce(t *testing.T) {
+	var afterPaint func()
+	connects := 0
+	disconnects := 0
+	events := []string{}
+	v := &View{
+		hooks: Hooks{
+			OnFirstDMABUFTextureSwap: func() { events = append(events, "swap") },
+			OnFirstPresentation:      func() { events = append(events, "present") },
+		},
+		frameClockAfterPaintConnect: func(fn func()) func() {
+			connects++
+			afterPaint = fn
+			return func() { disconnects++ }
+		},
+	}
+
+	v.recordFirstDMABUFTextureSwap()
+	v.recordFirstDMABUFTextureSwap()
+	if got, want := events, []string{"swap"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("events before after-paint = %v, want %v", got, want)
+	}
+	if connects != 1 || afterPaint == nil {
+		t.Fatalf("after-paint connects=%d callback=%v, want one callback", connects, afterPaint != nil)
+	}
+
+	afterPaint()
+	afterPaint()
+	if got, want := events, []string{"swap", "present"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("events after after-paint = %v, want %v", got, want)
+	}
+	if disconnects != 1 {
+		t.Fatalf("after-paint disconnects=%d, want 1", disconnects)
+	}
+}
+
+func TestFirstPresentationWaitsForTextureSwapDespiteObservationSignals(t *testing.T) {
+	var afterPaint func()
+	connects := 0
+	presented := 0
+	v := &View{
+		hooks: Hooks{OnFirstPresentation: func() { presented++ }},
+		frameClockAfterPaintConnect: func(fn func()) func() {
+			connects++
+			afterPaint = fn
+			return func() {}
+		},
+	}
+
+	// Map, show, realize, and size paths all reach handleObservationSignal.
+	for range 4 {
+		v.handleObservationSignal()
+	}
+	if connects != 0 {
+		t.Fatalf("observation signals connected after-paint %d times before texture swap, want 0", connects)
+	}
+	if afterPaint != nil {
+		afterPaint()
+	}
+	if presented != 0 {
+		t.Fatalf("presentation callbacks before texture swap = %d, want 0", presented)
+	}
+
+	v.recordFirstDMABUFTextureSwap()
+	if connects != 1 || afterPaint == nil {
+		t.Fatalf("texture swap after-paint connects=%d callback=%v, want one callback", connects, afterPaint != nil)
+	}
+	afterPaint()
+	if presented != 1 {
+		t.Fatalf("presentation callbacks after texture swap = %d, want 1", presented)
+	}
+}
+
+func TestFirstPresentationRetriesAfterPostSwapFrameClockBecomesAvailable(t *testing.T) {
+	var afterPaint func()
+	connects := 0
+	presented := 0
+	v := &View{
+		hooks: Hooks{OnFirstPresentation: func() { presented++ }},
+		frameClockAfterPaintConnect: func(fn func()) func() {
+			connects++
+			if connects == 1 {
+				return nil
+			}
+			afterPaint = fn
+			return func() {}
+		},
+	}
+
+	v.recordFirstDMABUFTextureSwap()
+	if connects != 1 || afterPaint != nil {
+		t.Fatalf("initial post-swap frame-clock connect=(%d, %v), want (1, false)", connects, afterPaint != nil)
+	}
+
+	v.handleObservationSignal()
+	if connects != 2 || afterPaint == nil {
+		t.Fatalf("post-swap observation retry connects=%d callback=%v, want one retry callback", connects, afterPaint != nil)
+	}
+	afterPaint()
+	if presented != 1 {
+		t.Fatalf("presentation callbacks after delayed frame clock = %d, want 1", presented)
+	}
+}
+
+func TestDestroyDisconnectsPendingFirstPresentationAfterPaint(t *testing.T) {
+	var afterPaint func()
+	disconnects := 0
+	presented := 0
+	v := &View{
+		hooks: Hooks{OnFirstPresentation: func() { presented++ }},
+		frameClockAfterPaintConnect: func(fn func()) func() {
+			afterPaint = fn
+			return func() { disconnects++ }
+		},
+	}
+	v.recordFirstDMABUFTextureSwap()
+	if afterPaint == nil {
+		t.Fatal("first texture swap did not arm after-paint")
+	}
+
+	if err := v.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	afterPaint()
+	if disconnects != 1 {
+		t.Fatalf("after-paint disconnects=%d, want 1", disconnects)
+	}
+	if presented != 0 {
+		t.Fatalf("presentation callback ran after teardown: %d", presented)
+	}
+}
+
 func TestDeviceScaleFactorAppliesViewScaleMultiplier(t *testing.T) {
 	v := &View{}
 	v.setScaleMultiplier(1.2)

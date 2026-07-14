@@ -173,6 +173,78 @@ func TestBuildTextureDuplicatesFDAndTransfersDuplicateToGDKDestroyNotify(t *test
 	assertFDOpen(t, int(file.Fd()))
 }
 
+func TestFirstDMABUFTextureSwapFiresOnceAfterSetPaintable(t *testing.T) {
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestFile(t, file)
+
+	events := []string{}
+	builder := &fakeBuilder{texture: fakeTexture()}
+	r := &Renderer{
+		display:             &gdk.Display{},
+		formats:             &fakeFormats{allowed: true},
+		builder:             builder,
+		picture:             &gtk.Picture{},
+		dupFD:               dupFDClOExec,
+		closeFD:             unix.Close,
+		pictureSetPaintable: func(*gdk.Texture) { events = append(events, "set-paintable") },
+	}
+	if !r.SetFirstDMABUFTextureSwapHook(func() { events = append(events, "swap") }) {
+		t.Fatal("GDK renderer did not report DMABUF swap support")
+	}
+	for range 2 {
+		owned, err := r.duplicateFrame(validFrame(int(file.Fd())))
+		if err != nil {
+			t.Fatalf("duplicateFrame: %v", err)
+		}
+		if err := r.importAndSwapOwnedFrame(owned); err != nil {
+			t.Fatalf("importAndSwapOwnedFrame: %v", err)
+		}
+	}
+	if got, want := events, []string{"set-paintable", "swap", "set-paintable"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	// Unit fakes do not own a native GObject; avoid unrefing their sentinel pointer.
+	r.current.texture = nil
+	for _, texture := range r.retired {
+		texture.texture = nil
+	}
+}
+
+func TestFirstDMABUFTextureSwapDoesNotFireWhenBuildFails(t *testing.T) {
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestFile(t, file)
+
+	called := 0
+	r := &Renderer{
+		display: &gdk.Display{},
+		formats: &fakeFormats{allowed: true},
+		builder: &fakeBuilder{buildErr: errors.New("build failed")},
+		picture: &gtk.Picture{},
+		dupFD:   dupFDClOExec,
+		closeFD: unix.Close,
+		pictureSetPaintable: func(*gdk.Texture) {
+			t.Fatal("SetPaintable called after texture build failure")
+		},
+	}
+	r.SetFirstDMABUFTextureSwapHook(func() { called++ })
+	owned, err := r.duplicateFrame(validFrame(int(file.Fd())))
+	if err != nil {
+		t.Fatalf("duplicateFrame: %v", err)
+	}
+	if err := r.importAndSwapOwnedFrame(owned); !errors.Is(err, ErrTextureBuildFailed) {
+		t.Fatalf("importAndSwapOwnedFrame error = %v, want texture build failure", err)
+	}
+	if called != 0 {
+		t.Fatalf("swap callback called after build failure: %d", called)
+	}
+}
+
 func TestRetireOwnedTextureLimitsRetiredTextures(t *testing.T) {
 	r := &Renderer{}
 

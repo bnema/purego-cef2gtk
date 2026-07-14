@@ -3,6 +3,7 @@ package cef2gtk
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
@@ -19,6 +20,7 @@ type fakeRenderQueue struct {
 	closeStarted   chan struct{}
 	continueClose  chan struct{}
 	closeStartedOK bool
+	events         *[]string
 }
 
 type fakeAsyncRenderQueue struct {
@@ -28,6 +30,9 @@ type fakeAsyncRenderQueue struct {
 
 func (f *fakeRenderQueue) ImportAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
 	f.importCalled = true
+	if f.events != nil {
+		*f.events = append(*f.events, "import")
+	}
 	if f.err != nil {
 		return gtkgl.QueuedFrame{}, f.err
 	}
@@ -88,6 +93,66 @@ func TestOnAcceleratedPaintErrorHook(t *testing.T) {
 	}
 	if f.queued {
 		t.Fatalf("queued render after failed import/copy")
+	}
+}
+
+func TestFirstAcceleratedPaintHookCanDestroyView(t *testing.T) {
+	f := &fakeRenderQueue{}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{OnFirstAcceleratedPaint: func() {
+		if err := v.Destroy(); err != nil {
+			t.Errorf("Destroy: %v", err)
+		}
+	}})
+
+	done := make(chan struct{})
+	go func() {
+		h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("accelerated paint deadlocked when its first-paint hook destroyed the view")
+	}
+	if f.importCalled || f.queued {
+		t.Fatal("accelerated paint imported or queued after its hook destroyed the view")
+	}
+}
+
+func TestFirstAcceleratedPaintHookPrecedesImportAndRunsOnce(t *testing.T) {
+	events := []string{}
+	f := &fakeRenderQueue{events: &events}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{OnFirstAcceleratedPaint: func() { events = append(events, "accelerated") }})
+
+	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+
+	if got, want := events, []string{"accelerated", "import", "import"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	if !f.importCalled || !f.queued {
+		t.Fatal("accelerated paint was not imported and queued")
+	}
+}
+
+func TestGLAreaReportsUnsupportedDMABUFCompletionWithoutFalseSwap(t *testing.T) {
+	f := &fakeRenderQueue{}
+	v := &View{backend: BackendGLArea, renderer: f, diag: newDiagnosticsRecorder()}
+	events := []string{}
+	h := v.RenderHandler(Hooks{
+		OnFirstAcceleratedPaint:  func() { events = append(events, "accelerated") },
+		OnDMABUFUnsupported:      func() { events = append(events, "unsupported") },
+		OnFirstDMABUFTextureSwap: func() { events = append(events, "swap") },
+		OnFirstPresentation:      func() { events = append(events, "present") },
+	})
+
+	h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+
+	if got, want := len(events), 2; got != want || events[0] != "accelerated" || events[1] != "unsupported" {
+		t.Fatalf("events = %v, want [accelerated unsupported]", events)
 	}
 }
 
