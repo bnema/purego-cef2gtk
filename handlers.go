@@ -32,6 +32,7 @@ func (v *View) RenderHandler(hooks Hooks) cef.RenderHandler {
 		return &renderHandler{staticHooks: hooks}
 	}
 	v.hooks = hooks
+	v.configureFirstPresentationHooks()
 	if v.handler != nil {
 		return v.handler
 	}
@@ -122,6 +123,7 @@ func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType
 			}
 			return
 		}
+		h.view.recordFirstAcceleratedPaint()
 		h.view.recordProfileFrameReceived()
 	}
 	if h.renderer == nil {
