@@ -755,7 +755,7 @@ func (v *View) armFirstPresentationAfterPaint() {
 		return
 	}
 	v.firstPresentationMu.Lock()
-	if v.destroyed.Load() || v.firstPresentation || v.firstPresentationArmed {
+	if v.destroyed.Load() || !v.firstDMABUFTextureSwap || v.firstPresentation || v.firstPresentationArmed {
 		v.firstPresentationMu.Unlock()
 		return
 	}
