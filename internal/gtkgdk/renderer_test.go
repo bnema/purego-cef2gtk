@@ -208,8 +208,8 @@ func TestFirstDMABUFTextureSwapFiresOnceAfterSetPaintable(t *testing.T) {
 	}
 	// Unit fakes do not own a native GObject; avoid unrefing their sentinel pointer.
 	r.current.texture = nil
-	for _, texture := range r.retired {
-		texture.texture = nil
+	for i := 0; i < r.retiredCount; i++ {
+		r.retiredAt(i).texture = nil
 	}
 }
 
@@ -252,19 +252,19 @@ func TestRetireOwnedTextureLimitsRetiredTextures(t *testing.T) {
 	for i := 0; i < retiredTextureLimit; i++ {
 		r.retireOwnedTexture(&ownedTexture{})
 	}
-	if got := len(r.retired); got != retiredTextureLimit {
-		t.Fatalf("retired length after filling = %d, want %d", got, retiredTextureLimit)
+	if got := r.retiredCount; got != retiredTextureLimit {
+		t.Fatalf("retired count after filling = %d, want %d", got, retiredTextureLimit)
 	}
 
 	// Adding one more should release the oldest but stay at the limit.
 	r.retireOwnedTexture(&ownedTexture{})
-	if got := len(r.retired); got != retiredTextureLimit {
-		t.Fatalf("retired length after overflow = %d, want %d", got, retiredTextureLimit)
+	if got := r.retiredCount; got != retiredTextureLimit {
+		t.Fatalf("retired count after overflow = %d, want %d", got, retiredTextureLimit)
 	}
 
 	r.releaseRetiredTextures()
-	if got := len(r.retired); got != 0 {
-		t.Fatalf("retired length after release = %d, want 0", got)
+	if got := r.retiredCount; got != 0 {
+		t.Fatalf("retired count after release = %d, want 0", got)
 	}
 }
 
@@ -341,8 +341,8 @@ func TestEnqueueOwnedFrameDoesNotDuplicateFreshPendingIdle(t *testing.T) {
 	}
 	defer r.InvalidateOnGTKThread()
 
-	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
-	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+	r.enqueueOwnedFrame(&ownedFrame{Plane: ownedPlane{FD: -1}})
+	r.enqueueOwnedFrame(&ownedFrame{Plane: ownedPlane{FD: -1}})
 
 	if calls != 1 {
 		t.Fatalf("idle schedules = %d, want 1", calls)
@@ -363,11 +363,11 @@ func TestEnqueueOwnedFrameReschedulesStalePendingIdle(t *testing.T) {
 	}
 	defer r.InvalidateOnGTKThread()
 
-	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+	r.enqueueOwnedFrame(&ownedFrame{Plane: ownedPlane{FD: -1}})
 	r.pendingMu.Lock()
 	r.pendingScheduledAt = time.Now().Add(-stalePendingFrameWait - time.Second)
 	r.pendingMu.Unlock()
-	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+	r.enqueueOwnedFrame(&ownedFrame{Plane: ownedPlane{FD: -1}})
 
 	if calls != 2 {
 		t.Fatalf("idle schedules = %d, want 2", calls)
@@ -386,7 +386,7 @@ func TestEnqueueOwnedFrameClearsPendingScheduledWhenIdleScheduleFails(t *testing
 	}
 	defer r.InvalidateOnGTKThread()
 
-	r.enqueueOwnedFrame(&ownedFrame{Planes: []ownedPlane{{FD: -1}}})
+	r.enqueueOwnedFrame(&ownedFrame{Plane: ownedPlane{FD: -1}})
 
 	if got := r.Diagnostics(); got.PendingScheduleFailures != 1 || got.PendingScheduled || !got.PendingFrame || got.PendingSourceID != 0 {
 		t.Fatalf("unexpected diagnostics after schedule failure: %+v", got)
