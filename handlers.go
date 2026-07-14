@@ -2,6 +2,7 @@ package cef2gtk
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/bnema/purego-cef/cef"
@@ -15,6 +16,48 @@ type renderQueue interface {
 
 type asyncRenderQueue interface {
 	ImportAndQueueAsync(*cef.AcceleratedPaintInfo, func(error)) error
+}
+
+// deferredAcceleratedError prevents an async renderer that reports an error
+// synchronously from invoking a user hook while OnAcceleratedPaint holds the
+// lifecycle read lock. Errors reported after release are already outside it.
+type deferredAcceleratedError struct {
+	h        *renderHandler
+	mu       sync.Mutex
+	released bool
+	pending  []error
+}
+
+func (d *deferredAcceleratedError) report(err error) {
+	if d == nil || err == nil {
+		return
+	}
+	d.mu.Lock()
+	if !d.released {
+		d.pending = append(d.pending, err)
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Unlock()
+	d.h.handleAcceleratedError(err)
+}
+
+func (d *deferredAcceleratedError) release() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	if d.released {
+		d.mu.Unlock()
+		return
+	}
+	d.released = true
+	pending := d.pending
+	d.pending = nil
+	d.mu.Unlock()
+	for _, err := range pending {
+		d.h.handleAcceleratedError(err)
+	}
 }
 
 type renderHandler struct {
@@ -134,42 +177,64 @@ func (h *renderHandler) OnAcceleratedPaint(_ cef.Browser, _ cef.PaintElementType
 		if first {
 			invokeFirstAcceleratedPaintHooks(hooks, unsupported)
 		}
+	}
 
-		// Serialize accelerated-paint imports and render queueing with Destroy's
-		// renderer teardown. The hook above may have destroyed the view.
+	errorDelivery := &deferredAcceleratedError{h: h}
+	queued := false
+	if h.view != nil {
+		// Keep imports and queueing serialized with renderer teardown. An async
+		// renderer may call its error function synchronously, so defer its hook
+		// delivery until after this lock has been released.
 		h.view.renderLifecycleMu.RLock()
-		defer h.view.renderLifecycleMu.RUnlock()
 		if h.view.destroyed.Load() {
+			h.view.renderLifecycleMu.RUnlock()
 			if h.diag != nil {
 				h.diag.RecordStaleAcceleratedPaint()
 			}
 			return
 		}
+		queued = h.importAndQueueAcceleratedFrame(info, errorDelivery.report)
+		h.view.renderLifecycleMu.RUnlock()
+	} else {
+		errorDelivery.release()
+		queued = h.importAndQueueAcceleratedFrame(info, errorDelivery.report)
 	}
+
+	// No user callback (including ProfileOptions.OnSnapshot) may run while the
+	// lifecycle lock above protects renderer teardown.
+	errorDelivery.release()
+	if queued && h.view != nil {
+		h.view.emitProfileIfDue(time.Now())
+	}
+}
+
+// importAndQueueAcceleratedFrame performs renderer work while its caller holds
+// the lifecycle lock, if any. onError must not invoke user code synchronously.
+func (h *renderHandler) importAndQueueAcceleratedFrame(info *cef.AcceleratedPaintInfo, onError func(error)) bool {
 	if h.renderer == nil {
-		h.handleAcceleratedError(gtkgl.ErrNilAcceleratedRenderer)
-		return
+		onError(gtkgl.ErrNilAcceleratedRenderer)
+		return false
 	}
 	if async, ok := h.renderer.(asyncRenderQueue); ok {
-		if err := async.ImportAndQueueAsync(info, h.handleAcceleratedError); err != nil {
-			h.handleAcceleratedError(err)
-			return
+		if err := async.ImportAndQueueAsync(info, onError); err != nil {
+			onError(err)
+			return false
 		}
 		h.recordAcceleratedFrameQueued()
-		return
+		return true
 	}
 	if _, err := h.renderer.ImportAndQueueOnGTKThread(info); err != nil {
-		h.handleAcceleratedError(err)
-		return
+		onError(err)
+		return false
 	}
 	h.recordAcceleratedFrameQueued()
+	return true
 }
 
 func (h *renderHandler) recordAcceleratedFrameQueued() {
 	h.renderer.QueueRender()
 	if h.view != nil {
 		h.view.recordProfileFrameQueued()
-		h.view.emitProfileIfDue(time.Now())
 	}
 }
 func (h *renderHandler) handleAcceleratedError(err error) {

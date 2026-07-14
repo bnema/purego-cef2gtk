@@ -28,6 +28,7 @@ type fakeRenderQueue struct {
 type fakeAsyncRenderQueue struct {
 	fakeRenderQueue
 	asyncCalled bool
+	callbackErr error
 }
 
 func (f *fakeRenderQueue) ImportAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (gtkgl.QueuedFrame, error) {
@@ -41,8 +42,11 @@ func (f *fakeRenderQueue) ImportAndQueueOnGTKThread(*cef.AcceleratedPaintInfo) (
 	return gtkgl.QueuedFrame{}, nil
 }
 
-func (f *fakeAsyncRenderQueue) ImportAndQueueAsync(*cef.AcceleratedPaintInfo, func(error)) error {
+func (f *fakeAsyncRenderQueue) ImportAndQueueAsync(_ *cef.AcceleratedPaintInfo, onError func(error)) error {
 	f.asyncCalled = true
+	if f.callbackErr != nil {
+		onError(f.callbackErr)
+	}
 	return f.err
 }
 func (f *fakeRenderQueue) QueueRender()                 { f.queued = true }
@@ -95,6 +99,66 @@ func TestOnAcceleratedPaintErrorHook(t *testing.T) {
 	}
 	if f.queued {
 		t.Fatalf("queued render after failed import/copy")
+	}
+}
+
+func TestOnAcceleratedPaintErrorHookCanDestroyView(t *testing.T) {
+	want := errors.New("import failed")
+	f := &fakeRenderQueue{err: want}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{OnError: func(err error) {
+		if !errors.Is(err, want) {
+			t.Errorf("OnError got %v, want %v", err, want)
+		}
+		if err := v.Destroy(); err != nil {
+			t.Errorf("Destroy: %v", err)
+		}
+	}})
+
+	done := make(chan struct{})
+	go func() {
+		h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("accelerated-paint error hook deadlocked while destroying its view")
+	}
+	if !f.importCalled {
+		t.Fatal("accelerated renderer was not called")
+	}
+	if !v.destroyed.Load() {
+		t.Fatal("error hook did not destroy view")
+	}
+}
+
+func TestSynchronousAsyncErrorHookCanDestroyView(t *testing.T) {
+	want := errors.New("async import failed")
+	f := &fakeAsyncRenderQueue{callbackErr: want}
+	v := &View{renderer: f, diag: newDiagnosticsRecorder()}
+	h := v.RenderHandler(Hooks{OnError: func(err error) {
+		if !errors.Is(err, want) {
+			t.Errorf("OnError got %v, want %v", err, want)
+		}
+		if err := v.Destroy(); err != nil {
+			t.Errorf("Destroy: %v", err)
+		}
+	}})
+
+	done := make(chan struct{})
+	go func() {
+		h.OnAcceleratedPaint(nil, cef.PaintElementTypePetView, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("synchronous async error hook deadlocked while destroying its view")
+	}
+	if !f.asyncCalled || !v.destroyed.Load() {
+		t.Fatalf("asyncCalled=%v destroyed=%v, want both true", f.asyncCalled, v.destroyed.Load())
 	}
 }
 
