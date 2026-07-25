@@ -59,6 +59,8 @@ type View struct {
 	renderer                    renderer
 	signalObject                *gobject.Object
 	input                       *gtkgl.InputBridge
+	dragMu                      sync.RWMutex
+	drag                        *gtkgl.DragBridge
 	inputWidget                 *gtk.Widget
 	diag                        *diagnosticsRecorder
 	destroyed                   atomic.Bool
@@ -1117,6 +1119,12 @@ func (v *View) Destroy() error {
 	defer v.renderLifecycleMu.Unlock()
 	v.destroyed.Store(true)
 	v.disconnectFirstPresentationAfterPaint()
+	v.dragMu.Lock()
+	if v.drag != nil {
+		v.drag.Detach()
+		v.drag = nil
+	}
+	v.dragMu.Unlock()
 	if v.input != nil {
 		v.input.Detach()
 		v.input = nil

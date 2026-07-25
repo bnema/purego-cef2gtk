@@ -153,6 +153,12 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	if v.widget == nil {
 		return ErrViewNotInitialized
 	}
+	v.dragMu.Lock()
+	if v.drag != nil {
+		v.drag.Detach()
+		v.drag = nil
+	}
+	v.dragMu.Unlock()
 	if v.input != nil {
 		v.input.Detach()
 	}
@@ -172,6 +178,15 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(targetWidget)
+	drag := gtkgl.NewDragBridge(targetWidget, v.input, host)
+	if !drag.Attach() {
+		v.input.Detach()
+		v.input = nil
+		return errors.New("failed to attach GTK drag target")
+	}
+	v.dragMu.Lock()
+	v.drag = drag
+	v.dragMu.Unlock()
 	v.inputWidget = targetWidget
 	return nil
 }
@@ -253,6 +268,12 @@ func (v *View) DetachInput() error {
 	if v == nil {
 		return ErrNilView
 	}
+	v.dragMu.Lock()
+	if v.drag != nil {
+		v.drag.Detach()
+		v.drag = nil
+	}
+	v.dragMu.Unlock()
 	if v.input != nil {
 		v.input.Detach()
 		v.input = nil
@@ -273,5 +294,11 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 		return ErrInputNotAttached
 	}
 	v.input.SetHost(host)
+	v.dragMu.RLock()
+	drag := v.drag
+	v.dragMu.RUnlock()
+	if drag != nil {
+		drag.SetHost(host)
+	}
 	return nil
 }

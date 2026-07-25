@@ -1040,6 +1040,28 @@ func jsString(s string) string {
 	return strings.ReplaceAll(q, "</", "<\\/")
 }
 
+// DragMouseEvent applies the same scale and modifier translation as normal
+// pointer delivery. The GDK device state includes the button mask while the
+// native drag owns the pointer grab.
+func (ib *InputBridge) DragMouseEvent(x, y float64, gdkMods uint) cef.MouseEvent {
+	if ib == nil {
+		return BuildMouseEvent(x, y, gdkMods, 1)
+	}
+	ib.mu.Lock()
+	scale := ib.scale
+	ib.mu.Unlock()
+	return BuildMouseEvent(x, y, gdkMods, scale)
+}
+
+func (ib *InputBridge) Scale() float64 {
+	if ib == nil {
+		return 1
+	}
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	return ib.scale
+}
+
 func BuildMouseEvent(x, y float64, gdkMods uint, scale float64) cef.MouseEvent {
 	scale = normalizeScale(scale)
 	return cef.MouseEvent{

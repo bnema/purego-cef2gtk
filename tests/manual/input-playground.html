@@ -46,7 +46,7 @@
 
   <section>
     <h2>HTML drag payload</h2>
-    <p>Drag a card and inspect the event log. Each card writes <code>text/plain</code> and sets <code>effectAllowed = "move"</code>.</p>
+    <p>Drag a card into the drop zone and inspect formats, negotiated Copy/Move action, and received text in the event log.</p>
     <div id="payload-cards" class="cards">
       <div class="card" draggable="true" data-payload="card:alpha">Payload card Alpha</div>
       <div class="card" draggable="true" data-payload="card:beta">Payload card Beta</div>
@@ -128,9 +128,9 @@
 
     document.querySelectorAll('#payload-cards [draggable="true"]').forEach((card) => {
       card.addEventListener('dragstart', (event) => {
-        event.dataTransfer.setData('text/plain', card.dataset.payload);
-        event.dataTransfer.effectAllowed = 'move';
-        log('card-dragstart', `formats=${Array.from(event.dataTransfer.types).join(',')} effectAllowed=${event.dataTransfer.effectAllowed} payload=${card.dataset.payload}`);
+        event.dataTransfer.setData('text/plain', card.textContent);
+        event.dataTransfer.effectAllowed = 'copyMove';
+        log('card-dragstart', `formats=${Array.from(event.dataTransfer.types).join(',')} effectAllowed=${event.dataTransfer.effectAllowed} payload=${JSON.stringify(card.textContent)}`);
       });
       card.addEventListener('dragend', (event) => log('card-dragend', `dropEffect=${event.dataTransfer.dropEffect}`));
     });
@@ -152,8 +152,9 @@
       dropZone.classList.remove('active');
       const formats = Array.from(event.dataTransfer.types).join(',');
       const files = Array.from(event.dataTransfer.files).map((file) => `${file.name}(${file.size}B)`).join(',');
-      dropZone.textContent = files ? `Dropped: ${files}` : 'Drop contained no files';
-      log('drop', `formats=${formats} effectAllowed=${event.dataTransfer.effectAllowed} dropEffect=${event.dataTransfer.dropEffect} files=${files || 'none'}`);
+      const text = event.dataTransfer.getData('text/plain');
+      dropZone.textContent = files ? `Dropped: ${files}` : text ? `Dropped text: ${text}` : 'Drop contained no supported content';
+      log('drop', `formats=${formats} effectAllowed=${event.dataTransfer.effectAllowed} dropEffect=${event.dataTransfer.dropEffect} files=${files || 'none'} text=${JSON.stringify(text)}`);
     });
 
     const sortableStatus = document.querySelector('#sortable-status');
