@@ -9,6 +9,8 @@ coverage.out
 *.a
 *.dylib
 
+.worktrees/
+
 .idea/
 .vscode/
 .DS_Store
