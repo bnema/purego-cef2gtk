@@ -2,6 +2,7 @@ package gtkgl
 
 import (
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,10 +38,16 @@ type InputBridge struct {
 	host  cef.BrowserHost
 	scale float64
 
-	lastX, lastY float64
-	clipboard    *gdk.Clipboard
-	imContext    *gtk.IMContextSimple
-	detached     bool
+	lastX, lastY        float64
+	clipboard           *gdk.Clipboard
+	imContext           *gtk.IMContextSimple
+	detached            bool
+	focused             bool
+	focusKnown          bool
+	focusDelivered      bool
+	visible             bool
+	visibilityKnown     bool
+	visibilityDelivered bool
 
 	widget                 *gtk.Widget
 	controllers            []controllerBinding
@@ -55,6 +62,7 @@ type InputBridge struct {
 	selectionText       func() string
 	onClipboardShortcut func(action, text string)
 	profiler            atomic.Pointer[internalprofile.Recorder]
+	pointerTracker      *PointerTracker
 }
 
 // ScrollPhase identifies the stage of a GTK scroll operation.
@@ -127,7 +135,35 @@ type navigationSwipeState struct {
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
 func NewInputBridge(host cef.BrowserHost, scale float64) *InputBridge {
-	return &InputBridge{host: host, scale: normalizeScale(scale)}
+	return &InputBridge{
+		host:           host,
+		scale:          normalizeScale(scale),
+		pointerTracker: NewPointerTracker(defaultDragThreshold, nil, nil),
+	}
+}
+
+// ArmDnd suspends pointer-cancel recovery while native drag-and-drop owns the pointer.
+func (ib *InputBridge) ArmDnd() {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	if ib.pointerTracker != nil {
+		ib.pointerTracker.ArmDnd()
+	}
+}
+
+// DisarmDnd restores pointer-cancel handling after native drag-and-drop completes.
+func (ib *InputBridge) DisarmDnd() {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	if ib.pointerTracker != nil {
+		ib.pointerTracker.DisarmDnd()
+	}
 }
 
 // SetScale updates the device scale used for pointer coordinate translation.
@@ -200,14 +236,88 @@ func (ib *InputBridge) SetClipboardShortcutHandler(selectionText func() string, 
 	ib.mu.Unlock()
 }
 
-// SetHost updates the CEF browser host used for subsequent input dispatch.
+// SetVisible records view visibility and notifies CEF once per transition.
+func (ib *InputBridge) SetVisible(visible bool) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	if !ib.visibilityKnown || ib.visible != visible {
+		ib.visible = visible
+		ib.visibilityKnown = true
+		ib.visibilityDelivered = false
+	}
+	host := ib.host
+	if host == nil || ib.visibilityDelivered {
+		ib.mu.Unlock()
+		return
+	}
+	ib.visibilityDelivered = true
+	ib.mu.Unlock()
+	wasHidden(host, visible)
+}
+
+// SetHost updates the CEF browser host used for subsequent input dispatch and
+// synchronizes state that GTK observed before the asynchronous host attachment.
 func (ib *InputBridge) SetHost(host cef.BrowserHost) {
 	if ib == nil {
 		return
 	}
 	ib.mu.Lock()
-	ib.host = host
+	if !sameBrowserHost(ib.host, host) {
+		ib.host = host
+		ib.visibilityDelivered = false
+		ib.focusDelivered = false
+	}
+	if host == nil {
+		ib.mu.Unlock()
+		return
+	}
+
+	deliverVisibility := ib.visibilityKnown && !ib.visibilityDelivered
+	visible := ib.visible
+	deliverFocus := ib.focusKnown && !ib.focusDelivered
+	focused := ib.focused
+	if deliverFocus && focused && deliverVisibility && visible {
+		// Focus synchronization includes WasHidden(0), so it also delivers the
+		// known visible state without issuing the same GTK observation twice.
+		deliverVisibility = false
+		ib.visibilityDelivered = true
+	}
+	if deliverVisibility {
+		ib.visibilityDelivered = true
+	}
+	if deliverFocus {
+		ib.focusDelivered = true
+	}
 	ib.mu.Unlock()
+
+	if deliverVisibility {
+		wasHidden(host, visible)
+	}
+	if deliverFocus {
+		if focused {
+			syncWindowlessBrowserFocus(host)
+		} else {
+			host.SetFocus(0)
+		}
+	}
+}
+
+func sameBrowserHost(a, b cef.BrowserHost) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	aType, bType := reflect.TypeOf(a), reflect.TypeOf(b)
+	return aType == bType && aType.Comparable() && a == b
+}
+
+func wasHidden(host cef.BrowserHost, visible bool) {
+	if visible {
+		host.WasHidden(0)
+		return
+	}
+	host.WasHidden(1)
 }
 
 // Attach creates GTK event controllers and attaches them to the GLArea.
@@ -231,6 +341,14 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	}
 	ib.mu.Unlock()
 
+	click := gtk.NewGestureClick()
+	click.SetButton(0)
+	ib.mu.Lock()
+	ib.pointerTracker = NewPointerTracker(defaultDragThreshold, func() {
+		click.SetState(gtk.EventSequenceClaimedValue)
+	}, nil)
+	ib.mu.Unlock()
+
 	motion := gtk.NewEventControllerMotion()
 	motionCb := func(g gtk.EventControllerMotion, x, y float64) {
 		ib.onMouseMove(x, y, uint(g.GetCurrentEventState()), false)
@@ -242,8 +360,6 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	leaveHandlerID := motion.ConnectLeave(&leaveCb)
 	ib.addController(widget, &motion.EventController, []uint{motionHandlerID, leaveHandlerID}, &motionCb, &leaveCb)
 
-	click := gtk.NewGestureClick()
-	click.SetButton(0)
 	pressedCb := func(g gtk.GestureClick, nPress int, x, y float64) {
 		widget.GrabFocus()
 		ib.onMousePress(x, y, g.GetCurrentButton(), uint(g.GetCurrentEventState()), nPress)
@@ -253,7 +369,11 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 		ib.onMouseRelease(x, y, g.GetCurrentButton(), uint(g.GetCurrentEventState()), nPress)
 	}
 	releasedHandlerID := click.ConnectReleased(&releasedCb)
-	ib.addController(widget, &click.EventController, []uint{pressedHandlerID, releasedHandlerID}, &pressedCb, &releasedCb)
+	cancelCb := func(_ gtk.Gesture, _ uintptr) {
+		ib.onMouseCancel()
+	}
+	cancelHandlerID := click.ConnectCancel(&cancelCb)
+	ib.addController(widget, &click.EventController, []uint{pressedHandlerID, releasedHandlerID, cancelHandlerID}, &pressedCb, &releasedCb, &cancelCb)
 
 	scroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollBothAxesValue | gtk.EventControllerScrollKineticValue)
 	scrollBeginCb := func(g gtk.EventControllerScroll) {
@@ -359,6 +479,9 @@ func (ib *InputBridge) Detach() {
 	ib.imContextCommitHandler = 0
 	ib.widget = nil
 	ib.clipboard = nil
+	if ib.pointerTracker != nil {
+		ib.pointerTracker.detach()
+	}
 	ib.mu.Unlock()
 	if imContext != nil && imContextCommitHandler != 0 {
 		gobject.SignalHandlerDisconnect(&imContext.Object, imContextCommitHandler)
@@ -415,10 +538,31 @@ func (ib *InputBridge) consumeMiddleClickRelease() bool {
 func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 	ib.mu.Lock()
 	host, scale := ib.host, ib.scale
-	if !leave {
+	tracker := ib.pointerTracker
+	var claimGesture func()
+	if leave {
+		if tracker != nil && tracker.Phase() != PointerIdle {
+			ib.mu.Unlock()
+			if profiler := ib.profiler.Load(); profiler != nil {
+				profiler.RecordSuppressedLeaveDuringDrag()
+			}
+			return
+		}
+		if tracker == nil || !tracker.coordsValid || tracker.lastX == 0 && tracker.lastY == 0 {
+			ib.mu.Unlock()
+			return
+		}
+		x, y = tracker.lastX, tracker.lastY
+	} else {
 		ib.lastX, ib.lastY = x, y
+		if tracker != nil {
+			claimGesture = tracker.Motion(x, y, mods)
+		}
 	}
 	ib.mu.Unlock()
+	if claimGesture != nil {
+		claimGesture()
+	}
 	if host == nil {
 		return
 	}
@@ -431,12 +575,14 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 }
 
 func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount int) {
-	host, scale, consumeMiddle := ib.currentHostAndMiddleClickHandler()
+	ib.mu.Lock()
+	if ib.pointerTracker != nil {
+		ib.pointerTracker.Press(x, y, button, mods)
+	}
+	host, scale, consumeMiddle := ib.host, ib.scale, ib.onMiddleClick
+	ib.mu.Unlock()
 	if host == nil {
 		return
-	}
-	if button == 1 {
-		syncWindowlessBrowserFocus(host)
 	}
 	if button == 2 && consumeMiddle != nil && consumeMiddle(x, y) {
 		ib.setMiddleClickConsumed(true)
@@ -451,6 +597,9 @@ func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount 
 
 func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCount int) {
 	ib.mu.Lock()
+	if ib.pointerTracker != nil {
+		ib.pointerTracker.Release(x, y, button, mods)
+	}
 	host, scale := ib.host, ib.scale
 	ib.mu.Unlock()
 	if host == nil {
@@ -459,8 +608,47 @@ func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCoun
 	if button == 2 && ib.consumeMiddleClickRelease() {
 		return
 	}
-	evt := BuildMouseEvent(x, y, mods, scale)
+	state := mods &^ gdkButtonMask(button)
+	evt := BuildMouseEvent(x, y, state, scale)
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 1, int32(clickCount))
+}
+
+func (ib *InputBridge) onMouseCancel() {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	tracker := ib.pointerTracker
+	if tracker == nil {
+		ib.mu.Unlock()
+		return
+	}
+	abort, _, canceled := tracker.cancel()
+	host, scale := ib.host, ib.scale
+	ib.mu.Unlock()
+	if !canceled || host == nil {
+		return
+	}
+	if profiler := ib.profiler.Load(); profiler != nil {
+		profiler.RecordPressWithoutMatchedRelease()
+	}
+	state := abort.State &^ gdkButtonMask(abort.Button)
+	evt := BuildMouseEvent(abort.X, abort.Y, state, scale)
+	host.SendMouseClickEvent(&evt, TranslateMouseButton(abort.Button), 1, 1)
+	host.SendCaptureLostEvent()
+}
+
+func gdkButtonMask(button uint) uint {
+	switch button {
+	case 1:
+		return uint(gdk.Button1MaskValue)
+	case 2:
+		return uint(gdk.Button2MaskValue)
+	case 3:
+		return uint(gdk.Button3MaskValue)
+	default:
+		return 0
+	}
 }
 
 func (ib *InputBridge) currentScrollState() (cef.BrowserHost, float64, float64, float64, ScrollOptions, func(ScrollEvent) ScrollDecision) {
@@ -650,11 +838,41 @@ func normalizedNavigationSwipeRatio(value float64) float64 {
 	return value
 }
 
-func (ib *InputBridge) onFocusIn() { syncWindowlessBrowserFocus(ib.currentHost()) }
-func (ib *InputBridge) onFocusOut() {
-	if h := ib.currentHost(); h != nil {
-		h.SetFocus(0)
+func (ib *InputBridge) onFocusIn() {
+	ib.mu.Lock()
+	if !ib.focusKnown || !ib.focused {
+		ib.focused = true
+		ib.focusKnown = true
+		ib.focusDelivered = false
 	}
+	host := ib.host
+	if host == nil || ib.focusDelivered {
+		ib.mu.Unlock()
+		return
+	}
+	ib.focusDelivered = true
+	if ib.visibilityKnown && ib.visible {
+		ib.visibilityDelivered = true
+	}
+	ib.mu.Unlock()
+	syncWindowlessBrowserFocus(host)
+}
+
+func (ib *InputBridge) onFocusOut() {
+	ib.mu.Lock()
+	if !ib.focusKnown || ib.focused {
+		ib.focused = false
+		ib.focusKnown = true
+		ib.focusDelivered = false
+	}
+	host := ib.host
+	if host == nil || ib.focusDelivered {
+		ib.mu.Unlock()
+		return
+	}
+	ib.focusDelivered = true
+	ib.mu.Unlock()
+	host.SetFocus(0)
 }
 
 func (ib *InputBridge) mirrorClipboardShortcut(keyval, mods uint) {

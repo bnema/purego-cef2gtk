@@ -80,7 +80,9 @@ type View struct {
 	renderFunc                  func(gtk.GLArea, uintptr) bool
 	resizeFunc                  func(gtk.GLArea, int, int)
 	mapFunc                     func(gtk.Widget)
+	unmapFunc                   func(gtk.Widget)
 	showFunc                    func(gtk.Widget)
+	hideFunc                    func(gtk.Widget)
 	realizeFunc                 func(gtk.Widget)
 	unrealizeFunc               func(gtk.Widget)
 	surfaceLayoutFunc           func(gdk.Surface, int, int)
@@ -91,7 +93,9 @@ type View struct {
 	renderHandlerID             uint
 	resizeHandlerID             uint
 	mapHandlerID                uint
+	unmapHandlerID              uint
 	showHandlerID               uint
+	hideHandlerID               uint
 	realizeHandlerID            uint
 	unrealizeHandlerID          uint
 	surfaceLayoutHandlerID      uint
@@ -210,8 +214,16 @@ func (v *View) connectRenderSignal() {
 	strategy := sizeObservationStrategy(v.area != nil)
 	v.scaleNotify = func(gobject.Object, *gobject.ParamSpec) { v.handleObservationSignal() }
 	v.scaleHandlerID = v.signalObject.ConnectNotifyWithDetail(strategy.widgetNotifyDetails[0], &v.scaleNotify)
-	v.mapFunc = func(gtk.Widget) { v.handleObservationSignal() }
-	v.showFunc = func(gtk.Widget) { v.handleObservationSignal() }
+	v.mapFunc = func(gtk.Widget) {
+		v.handleVisibilitySignal(true)
+		v.handleObservationSignal()
+	}
+	v.unmapFunc = func(gtk.Widget) { v.handleVisibilitySignal(false) }
+	v.showFunc = func(gtk.Widget) {
+		v.handleVisibilitySignal(true)
+		v.handleObservationSignal()
+	}
+	v.hideFunc = func(gtk.Widget) { v.handleVisibilitySignal(false) }
 	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
 	v.unrealizeFunc = func(gtk.Widget) {
 		// Keep surface signal connections across transient unrealize/realize churn.
@@ -223,7 +235,9 @@ func (v *View) connectRenderSignal() {
 		}
 	}
 	v.mapHandlerID = v.widget.ConnectMap(&v.mapFunc)
+	v.unmapHandlerID = v.widget.ConnectUnmap(&v.unmapFunc)
 	v.showHandlerID = v.widget.ConnectShow(&v.showFunc)
+	v.hideHandlerID = v.widget.ConnectHide(&v.hideFunc)
 	v.realizeHandlerID = v.widget.ConnectRealize(&v.realizeFunc)
 	v.unrealizeHandlerID = v.widget.ConnectUnrealize(&v.unrealizeFunc)
 	v.armSizeTickObservation()
@@ -237,6 +251,13 @@ func (v *View) connectRenderSignal() {
 		return v.renderOnGTKThread()
 	}
 	v.renderHandlerID = v.area.ConnectRender(&v.renderFunc)
+}
+
+func (v *View) handleVisibilitySignal(visible bool) {
+	if v == nil || v.input == nil {
+		return
+	}
+	v.input.SetVisible(visible)
 }
 
 func (v *View) handleObservationSignal() {
@@ -1119,9 +1140,17 @@ func (v *View) Destroy() error {
 			gobject.SignalHandlerDisconnect(v.signalObject, v.mapHandlerID)
 			v.mapHandlerID = 0
 		}
+		if v.unmapHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(v.signalObject, v.unmapHandlerID)
+			v.unmapHandlerID = 0
+		}
 		if v.showHandlerID != 0 {
 			gobject.SignalHandlerDisconnect(v.signalObject, v.showHandlerID)
 			v.showHandlerID = 0
+		}
+		if v.hideHandlerID != 0 {
+			gobject.SignalHandlerDisconnect(v.signalObject, v.hideHandlerID)
+			v.hideHandlerID = 0
 		}
 		if v.realizeHandlerID != 0 {
 			gobject.SignalHandlerDisconnect(v.signalObject, v.realizeHandlerID)

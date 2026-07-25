@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CEF OSR input playground</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111827; color: #e5e7eb; }
+    body { max-width: 880px; margin: 0 auto; padding: 24px; }
+    section { margin: 18px 0; padding: 18px; border: 1px solid #374151; border-radius: 12px; background: #1f2937; }
+    h1, h2 { margin-top: 0; }
+    .row { display: flex; align-items: center; gap: 16px; margin: 12px 0; }
+    input[type="range"] { width: 320px; }
+    .custom-slider { position: relative; width: 320px; height: 12px; border-radius: 999px; background: #4b5563; touch-action: none; }
+    .custom-slider .fill { height: 100%; border-radius: inherit; background: #38bdf8; }
+    .custom-slider .thumb { position: absolute; top: 50%; width: 24px; height: 24px; border-radius: 50%; background: white; transform: translate(-50%, -50%); box-shadow: 0 1px 5px #000; }
+    .cards { display: grid; gap: 8px; }
+    .card { padding: 12px; border: 1px solid #64748b; border-radius: 8px; background: #334155; cursor: grab; user-select: none; }
+    .card:active { cursor: grabbing; }
+    .drop-zone { min-height: 110px; display: grid; place-items: center; padding: 16px; border: 2px dashed #64748b; border-radius: 10px; text-align: center; }
+    .drop-zone.active { border-color: #38bdf8; background: #0c4a6e; }
+    .notice { padding: 10px; border-left: 4px solid #f59e0b; background: #422006; }
+    output, pre { font-family: ui-monospace, monospace; }
+    pre { min-height: 120px; max-height: 260px; overflow: auto; padding: 12px; background: #030712; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>CEF OSR input playground</h1>
+  <p>Manual checks for pointer capture, native controls, HTML drag data, file drops, and sortable drag-and-drop.</p>
+
+  <section>
+    <h2>Sliders</h2>
+    <div class="row">
+      <label for="native-slider">Native range</label>
+      <input id="native-slider" type="range" min="0" max="100" value="35">
+      <output id="native-value">35</output>
+    </div>
+    <div class="row">
+      <span id="custom-label">Custom pointer slider</span>
+      <div id="custom-slider" class="custom-slider" role="slider" tabindex="0" aria-labelledby="custom-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+        <div class="fill"></div><div class="thumb"></div>
+      </div>
+      <output id="custom-value">50</output>
+    </div>
+  </section>
+
+  <section>
+    <h2>HTML drag payload</h2>
+    <p>Drag a card and inspect the event log. Each card writes <code>text/plain</code> and sets <code>effectAllowed = "move"</code>.</p>
+    <div id="payload-cards" class="cards">
+      <div class="card" draggable="true" data-payload="card:alpha">Payload card Alpha</div>
+      <div class="card" draggable="true" data-payload="card:beta">Payload card Beta</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>File drop zone</h2>
+    <div id="file-drop-zone" class="drop-zone">Drop one or more files here</div>
+  </section>
+
+  <section>
+    <h2>SortableJS list</h2>
+    <p class="notice"><strong>Network dependency:</strong> SortableJS is loaded from cdn.jsdelivr.net. This check requires network access; the status below reports whether loading succeeded.</p>
+    <p id="sortable-status">Loading SortableJS…</p>
+    <div id="sortable-list" class="cards">
+      <div class="card">Sortable item One</div>
+      <div class="card">Sortable item Two</div>
+      <div class="card">Sortable item Three</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Event log</h2>
+    <button id="clear-log" type="button">Clear log</button>
+    <pre id="event-log" aria-live="polite"></pre>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+  <script>
+    const eventLog = document.querySelector('#event-log');
+    const log = (action, details = '') => {
+      const line = `${new Date().toISOString()} action=${action}${details ? ` ${details}` : ''}`;
+      eventLog.textContent = `${line}\n${eventLog.textContent}`;
+    };
+    document.querySelector('#clear-log').addEventListener('click', () => { eventLog.textContent = ''; });
+
+    const nativeSlider = document.querySelector('#native-slider');
+    const nativeValue = document.querySelector('#native-value');
+    nativeSlider.addEventListener('input', () => {
+      nativeValue.value = nativeSlider.value;
+      log('native-slider-input', `value=${nativeSlider.value}`);
+    });
+
+    const customSlider = document.querySelector('#custom-slider');
+    const customValue = document.querySelector('#custom-value');
+    const setCustomValue = (value) => {
+      value = Math.max(0, Math.min(100, Math.round(value)));
+      customSlider.setAttribute('aria-valuenow', value);
+      customSlider.querySelector('.fill').style.width = `${value}%`;
+      customSlider.querySelector('.thumb').style.left = `${value}%`;
+      customValue.value = value;
+    };
+    const updateCustomFromPointer = (event) => {
+      const bounds = customSlider.getBoundingClientRect();
+      setCustomValue(100 * (event.clientX - bounds.left) / bounds.width);
+    };
+    customSlider.addEventListener('pointerdown', (event) => {
+      customSlider.setPointerCapture(event.pointerId);
+      updateCustomFromPointer(event);
+      log('custom-slider-pointerdown', `pointerId=${event.pointerId}`);
+    });
+    customSlider.addEventListener('pointermove', (event) => {
+      if (customSlider.hasPointerCapture(event.pointerId)) updateCustomFromPointer(event);
+    });
+    customSlider.addEventListener('pointerup', (event) => {
+      updateCustomFromPointer(event);
+      customSlider.releasePointerCapture(event.pointerId);
+      log('custom-slider-pointerup', `value=${customSlider.getAttribute('aria-valuenow')}`);
+    });
+    customSlider.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      const delta = event.key === 'ArrowRight' ? 1 : -1;
+      setCustomValue(Number(customSlider.getAttribute('aria-valuenow')) + delta);
+      log('custom-slider-keydown', `key=${event.key}`);
+    });
+    setCustomValue(50);
+
+    document.querySelectorAll('#payload-cards [draggable="true"]').forEach((card) => {
+      card.addEventListener('dragstart', (event) => {
+        event.dataTransfer.setData('text/plain', card.dataset.payload);
+        event.dataTransfer.effectAllowed = 'move';
+        log('card-dragstart', `formats=${Array.from(event.dataTransfer.types).join(',')} effectAllowed=${event.dataTransfer.effectAllowed} payload=${card.dataset.payload}`);
+      });
+      card.addEventListener('dragend', (event) => log('card-dragend', `dropEffect=${event.dataTransfer.dropEffect}`));
+    });
+
+    const dropZone = document.querySelector('#file-drop-zone');
+    ['dragenter', 'dragover'].forEach((action) => dropZone.addEventListener(action, (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      dropZone.classList.add('active');
+      log(action, `formats=${Array.from(event.dataTransfer.types).join(',')} effectAllowed=${event.dataTransfer.effectAllowed} dropEffect=${event.dataTransfer.dropEffect}`);
+    }));
+    dropZone.addEventListener('dragleave', (event) => {
+      dropZone.classList.remove('active');
+      log('dragleave', `relatedTarget=${event.relatedTarget ? event.relatedTarget.nodeName : 'none'}`);
+    });
+    dropZone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      dropZone.classList.remove('active');
+      const formats = Array.from(event.dataTransfer.types).join(',');
+      const files = Array.from(event.dataTransfer.files).map((file) => `${file.name}(${file.size}B)`).join(',');
+      dropZone.textContent = files ? `Dropped: ${files}` : 'Drop contained no files';
+      log('drop', `formats=${formats} effectAllowed=${event.dataTransfer.effectAllowed} dropEffect=${event.dataTransfer.dropEffect} files=${files || 'none'}`);
+    });
+
+    const sortableStatus = document.querySelector('#sortable-status');
+    if (window.Sortable) {
+      Sortable.create(document.querySelector('#sortable-list'), {
+        animation: 150,
+        onStart: (event) => log('sortable-start', `oldIndex=${event.oldIndex}`),
+        onEnd: (event) => log('sortable-end', `oldIndex=${event.oldIndex} newIndex=${event.newIndex}`)
+      });
+      sortableStatus.textContent = 'SortableJS loaded: drag items to reorder them.';
+      log('sortable-ready');
+    } else {
+      sortableStatus.textContent = 'SortableJS failed to load. Connect to the network and reload this page.';
+      log('sortable-load-failed', 'network-required=true');
+    }
+  </script>
+</body>
+</html>

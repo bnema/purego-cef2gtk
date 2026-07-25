@@ -76,6 +76,87 @@ func TestRecorderSnapshotIncludesInputAndBeginFrameCounters(t *testing.T) {
 	}
 }
 
+func TestRecorderSnapshotDrainsSuppressedLeavesDuringDrag(t *testing.T) {
+	r := NewRecorder()
+	start := time.Unix(100, 0)
+	r.Start(start)
+	r.RecordSuppressedLeaveDuringDrag()
+	r.RecordSuppressedLeaveDuringDrag()
+
+	snap, ok := r.MaybeSnapshot(start.Add(time.Second), time.Second)
+	if !ok {
+		t.Fatal("snapshot not emitted")
+	}
+	if snap.SuppressedLeavesDuringDrag != 2 {
+		t.Fatalf("SuppressedLeavesDuringDrag = %d, want 2", snap.SuppressedLeavesDuringDrag)
+	}
+
+	snap, ok = r.MaybeSnapshot(start.Add(2*time.Second), time.Second)
+	if !ok {
+		t.Fatal("second snapshot not emitted")
+	}
+	if snap.SuppressedLeavesDuringDrag != 0 {
+		t.Fatalf("SuppressedLeavesDuringDrag = %d after drain, want 0", snap.SuppressedLeavesDuringDrag)
+	}
+}
+
+func TestRecorderSnapshotDrainsPressesWithoutMatchedRelease(t *testing.T) {
+	r := NewRecorder()
+	start := time.Unix(100, 0)
+	r.Start(start)
+	r.RecordPressWithoutMatchedRelease()
+	r.RecordPressWithoutMatchedRelease()
+
+	snap, ok := r.MaybeSnapshot(start.Add(time.Second), time.Second)
+	if !ok {
+		t.Fatal("snapshot not emitted")
+	}
+	if snap.PressesWithoutMatchedRelease != 2 {
+		t.Fatalf("PressesWithoutMatchedRelease = %d, want 2", snap.PressesWithoutMatchedRelease)
+	}
+
+	snap, ok = r.MaybeSnapshot(start.Add(2*time.Second), time.Second)
+	if !ok {
+		t.Fatal("second snapshot not emitted")
+	}
+	if snap.PressesWithoutMatchedRelease != 0 {
+		t.Fatalf("PressesWithoutMatchedRelease = %d after drain, want 0", snap.PressesWithoutMatchedRelease)
+	}
+}
+
+func TestRecorderDiagnosticCountersConcurrentConsistency(t *testing.T) {
+	r := NewRecorder()
+	start := time.Unix(100, 0)
+	r.Start(start)
+
+	const workers = 8
+	const eventsPerWorker = 1000
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for range eventsPerWorker {
+				r.RecordSuppressedLeaveDuringDrag()
+				r.RecordPressWithoutMatchedRelease()
+			}
+		}()
+	}
+	wg.Wait()
+
+	snap, ok := r.MaybeSnapshot(start.Add(time.Second), time.Second)
+	if !ok {
+		t.Fatal("snapshot not emitted")
+	}
+	want := uint64(workers * eventsPerWorker)
+	if snap.SuppressedLeavesDuringDrag != want {
+		t.Fatalf("SuppressedLeavesDuringDrag = %d, want %d", snap.SuppressedLeavesDuringDrag, want)
+	}
+	if snap.PressesWithoutMatchedRelease != want {
+		t.Fatalf("PressesWithoutMatchedRelease = %d, want %d", snap.PressesWithoutMatchedRelease, want)
+	}
+}
+
 func TestRecorderScrollSnapshotConcurrentConsistency(t *testing.T) {
 	r := NewRecorder()
 	start := time.Unix(100, 0)
@@ -108,6 +189,26 @@ func TestRecorderScrollSnapshotConcurrentConsistency(t *testing.T) {
 	}
 	if snap.ScrollAbsDXSum != float64(want) || snap.ScrollAbsDYSum != float64(want) {
 		t.Fatalf("scroll abs sums = (%v,%v), want (%v,%v)", snap.ScrollAbsDXSum, snap.ScrollAbsDYSum, float64(want), float64(want))
+	}
+}
+
+func TestSnapshotJSONIncludesDiagnosticCounterNames(t *testing.T) {
+	b, err := json.Marshal(Snapshot{
+		SuppressedLeavesDuringDrag:   2,
+		PressesWithoutMatchedRelease: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["suppressed_leaves_during_drag"] != float64(2) {
+		t.Fatalf("suppressed_leaves_during_drag = %v, want 2", got["suppressed_leaves_during_drag"])
+	}
+	if got["presses_without_matched_release"] != float64(3) {
+		t.Fatalf("presses_without_matched_release = %v, want 3", got["presses_without_matched_release"])
 	}
 }
 

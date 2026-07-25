@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/bnema/purego-cef/cef"
@@ -142,22 +143,36 @@ func urlArg() (string, error) {
 	if len(os.Args) > 1 {
 		raw = os.Args[1]
 	}
+	return resolveURL(raw)
+}
+
+func resolveURL(raw string) (string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
 	if parsed.Scheme == "" {
+		if filepath.Ext(raw) == ".html" {
+			abs, err := filepath.Abs(raw)
+			if err != nil {
+				return "", err
+			}
+			return (&url.URL{Scheme: "file", Path: abs}).String(), nil
+		}
 		raw = "https://" + raw
 		parsed, err = url.Parse(raw)
 		if err != nil {
 			return "", err
 		}
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+	switch parsed.Scheme {
+	case "http", "https":
+		if parsed.Host == "" {
+			return "", fmt.Errorf("missing host")
+		}
+	case "file":
+	default:
 		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("missing host")
 	}
 	return parsed.String(), nil
 }
