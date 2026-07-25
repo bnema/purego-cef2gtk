@@ -160,11 +160,12 @@
     if (window.Sortable) {
       Sortable.create(document.querySelector('#sortable-list'), {
         animation: 150,
-        onStart: (event) => log('sortable-start', `oldIndex=${event.oldIndex}`),
-        onEnd: (event) => log('sortable-end', `oldIndex=${event.oldIndex} newIndex=${event.newIndex}`)
+        forceFallback: true,
+        onStart: (event) => log('sortable-start', `mode=pointer-fallback oldIndex=${event.oldIndex}`),
+        onEnd: (event) => log('sortable-end', `mode=pointer-fallback oldIndex=${event.oldIndex} newIndex=${event.newIndex}`)
       });
-      sortableStatus.textContent = 'SortableJS loaded: drag items to reorder them.';
-      log('sortable-ready');
+      sortableStatus.textContent = 'SortableJS loaded in pointer fallback mode: drag items to reorder them.';
+      log('sortable-ready', 'mode=pointer-fallback forceFallback=true');
     } else {
       sortableStatus.textContent = 'SortableJS failed to load. Connect to the network and reload this page.';
       log('sortable-load-failed', 'network-required=true');
