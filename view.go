@@ -31,6 +31,9 @@ type Hooks struct {
 	OnUnsupportedPaint     func()
 	OnError                func(error)
 	OnTextSelectionChanged func(selectedText string, selectedRange *cef.Range)
+	// OnFileDrop is called with validated local paths before an external file
+	// drop reaches CEF. Return false to veto the drop; nil safely allows it.
+	OnFileDrop func(paths []string) bool
 	// OnFirstAcceleratedPaint is invoked once when CEF first supplies an accelerated frame.
 	OnFirstAcceleratedPaint func()
 	// OnFirstDMABUFTextureSwap is invoked once after GtkPicture.SetPaintable succeeds.
@@ -59,6 +62,10 @@ type View struct {
 	renderer                    renderer
 	signalObject                *gobject.Object
 	input                       *gtkgl.InputBridge
+	attachInputToWidget         func(*gtkgl.InputBridge, *gtk.Widget)
+	dragMu                      sync.RWMutex
+	drag                        *gtkgl.DragBridge
+	attachDrag                  func(*gtkgl.DragBridge) bool
 	inputWidget                 *gtk.Widget
 	diag                        *diagnosticsRecorder
 	destroyed                   atomic.Bool
@@ -1117,6 +1124,12 @@ func (v *View) Destroy() error {
 	defer v.renderLifecycleMu.Unlock()
 	v.destroyed.Store(true)
 	v.disconnectFirstPresentationAfterPaint()
+	v.dragMu.Lock()
+	if v.drag != nil {
+		v.drag.Detach()
+		v.drag = nil
+	}
+	v.dragMu.Unlock()
 	if v.input != nil {
 		v.input.Detach()
 		v.input = nil

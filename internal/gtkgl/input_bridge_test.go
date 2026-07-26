@@ -515,6 +515,40 @@ func TestInputBridgeIdleCancelDoesNotSynthesizeEvents(t *testing.T) {
 	}
 }
 
+func TestInputBridgeNativeDndCompletionWithoutCancelAllowsFreshInteraction(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.onMousePress(10, 20, 1, uint(gdk.Button1MaskValue), 1)
+	ib.onMouseMove(19, 20, uint(gdk.Button1MaskValue), false)
+	ib.ArmDnd()
+	host.clicks = nil
+
+	ib.DisarmDnd()
+
+	if ib.pointerTracker.Phase() != PointerIdle {
+		t.Fatalf("phase after native DnD completion = %v, want idle", ib.pointerTracker.Phase())
+	}
+	if len(host.clicks) != 0 || host.captureLosts != 0 {
+		t.Fatalf("DnD completion clicks/capture lost = %d/%d, want 0/0", len(host.clicks), host.captureLosts)
+	}
+
+	ib.onMousePress(30, 40, 1, uint(gdk.Button1MaskValue), 1)
+	if ib.pointerTracker.Phase() != PointerPressed {
+		t.Fatalf("phase after fresh slider press = %v, want pressed", ib.pointerTracker.Phase())
+	}
+	ib.onMouseRelease(35, 40, 1, uint(gdk.Button1MaskValue), 1)
+
+	if ib.pointerTracker.Phase() != PointerIdle {
+		t.Fatalf("phase after fresh slider release = %v, want idle", ib.pointerTracker.Phase())
+	}
+	if len(host.clicks) != 2 || host.clicks[0].mouseUp != 0 || host.clicks[1].mouseUp != 1 {
+		t.Fatalf("fresh slider clicks = %+v, want press and release", host.clicks)
+	}
+	if host.captureLosts != 0 {
+		t.Fatalf("capture lost calls = %d, want 0", host.captureLosts)
+	}
+}
+
 func TestInputBridgeDndSuspendsCancelAndRestoresRecoveryAfterDisarm(t *testing.T) {
 	host := &recordingBrowserHost{}
 	ib := NewInputBridge(host, 1)

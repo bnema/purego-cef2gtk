@@ -153,6 +153,12 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	if v.widget == nil {
 		return ErrViewNotInitialized
 	}
+	v.dragMu.Lock()
+	if v.drag != nil {
+		v.drag.Detach()
+		v.drag = nil
+	}
+	v.dragMu.Unlock()
 	if v.input != nil {
 		v.input.Detach()
 	}
@@ -171,9 +177,35 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
 	v.input.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
-	v.input.AttachToWidget(targetWidget)
+	if v.attachInputToWidget != nil {
+		v.attachInputToWidget(v.input, targetWidget)
+	} else {
+		v.input.AttachToWidget(targetWidget)
+	}
+	drag := gtkgl.NewDragBridge(targetWidget, v.input, host)
+	drag.SetFileDropHandler(viewFileDropPolicy(v))
+	attached := false
+	if v.attachDrag != nil {
+		attached = v.attachDrag(drag)
+	} else {
+		attached = drag.Attach()
+	}
+	if !attached {
+		v.cleanupInputAttachment()
+		return errors.New("failed to attach GTK drag target")
+	}
+	v.dragMu.Lock()
+	v.drag = drag
+	v.dragMu.Unlock()
 	v.inputWidget = targetWidget
 	return nil
+}
+
+func viewFileDropPolicy(v *View) func([]string) bool {
+	return func(paths []string) bool {
+		hook := v.snapshotHooks().OnFileDrop
+		return hook == nil || hook(paths)
+	}
 }
 
 func toGTKGLScrollOptions(opts ScrollOptions) gtkgl.ScrollOptions {
@@ -248,17 +280,27 @@ func toGTKGLNavigationSwipeHandler(fn func(NavigationSwipeAction)) func(gtkgl.Na
 	}
 }
 
-// DetachInput removes input controllers attached by AttachInput.
-func (v *View) DetachInput() error {
-	if v == nil {
-		return ErrNilView
-	}
+func (v *View) cleanupInputAttachment() {
 	if v.input != nil {
 		v.input.Detach()
 		v.input = nil
 	}
 	v.inputWidget = nil
 	v.setInputScaleOverride(0)
+}
+
+// DetachInput removes input controllers attached by AttachInput.
+func (v *View) DetachInput() error {
+	if v == nil {
+		return ErrNilView
+	}
+	v.dragMu.Lock()
+	if v.drag != nil {
+		v.drag.Detach()
+		v.drag = nil
+	}
+	v.dragMu.Unlock()
+	v.cleanupInputAttachment()
 	return nil
 }
 
@@ -273,5 +315,10 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 		return ErrInputNotAttached
 	}
 	v.input.SetHost(host)
+	v.dragMu.RLock()
+	defer v.dragMu.RUnlock()
+	if v.drag != nil {
+		v.drag.SetHost(host)
+	}
 	return nil
 }

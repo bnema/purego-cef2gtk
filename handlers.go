@@ -269,10 +269,27 @@ func (h *renderHandler) hooks() Hooks {
 
 func (h *renderHandler) GetTouchHandleSize(cef.Browser, cef.HorizontalAlignment, *cef.Size) {}
 func (h *renderHandler) OnTouchHandleStateChanged(cef.Browser, *cef.TouchHandleState)       {}
-func (h *renderHandler) StartDragging(cef.Browser, cef.DragData, cef.DragOperationsMask, int32, int32) int32 {
-	return 0
+func (h *renderHandler) StartDragging(browser cef.Browser, data cef.DragData, allowed cef.DragOperationsMask, x, y int32) int32 {
+	if h == nil || h.view == nil {
+		return 0
+	}
+	h.view.dragMu.RLock()
+	defer h.view.dragMu.RUnlock()
+	if h.view.drag == nil {
+		return 0
+	}
+	return h.view.drag.Start(browser, data, allowed, x, y)
 }
-func (h *renderHandler) UpdateDragCursor(cef.Browser, cef.DragOperationsMask)             {}
+func (h *renderHandler) UpdateDragCursor(_ cef.Browser, operation cef.DragOperationsMask) {
+	if h == nil || h.view == nil {
+		return
+	}
+	h.view.dragMu.RLock()
+	defer h.view.dragMu.RUnlock()
+	if h.view.drag != nil {
+		h.view.drag.UpdateCursor(operation)
+	}
+}
 func (h *renderHandler) OnScrollOffsetChanged(cef.Browser, float64, float64)              {}
 func (h *renderHandler) OnImeCompositionRangeChanged(cef.Browser, *cef.Range, []cef.Rect) {}
 func (h *renderHandler) OnTextSelectionChanged(_ cef.Browser, selectedText string, selectedRange *cef.Range) {
