@@ -18,6 +18,7 @@ type dragPayload struct {
 }
 type nativeDragStart func(dragPayload, cef.DragOperationsMask, int32, int32) (*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes, error)
 type dragScheduler func(func()) uint
+type dragStatus func(*gdk.Drop, gdk.DragAction, gdk.DragAction)
 
 type DragBridge struct {
 	mu             sync.Mutex
@@ -29,6 +30,9 @@ type DragBridge struct {
 	target         *gtk.DropTargetAsync
 	targetHandlers []uint
 	schedule       dragScheduler
+	status         dragStatus
+	retainDrop     func(*gdk.Drop)
+	releaseDrop    func(*gdk.Drop)
 	startNative    nativeDragStart
 	cleanupNative  func(*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes)
 	sourceHost     cef.BrowserHost
@@ -41,6 +45,10 @@ type DragBridge struct {
 	selectedKnown  bool
 	activeDrop     *gdk.Drop
 	activeAllowed  cef.DragOperationsMask
+	statusPending  bool
+	statusTicket   uint64
+	statusRevision uint64
+	dropGeneration uint64
 }
 
 func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost) *DragBridge {
@@ -49,6 +57,11 @@ func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost)
 		cb := glib.SourceOnceFunc(func(uintptr) { fn() })
 		return glib.IdleAddOnce(&cb, 0)
 	}
+	b.status = func(drop *gdk.Drop, actions, preferred gdk.DragAction) {
+		drop.Status(actions, preferred)
+	}
+	b.retainDrop = func(drop *gdk.Drop) { drop.Ref() }
+	b.releaseDrop = func(drop *gdk.Drop) { drop.Unref() }
 	b.startNative = b.beginNative
 	b.cleanupNative = b.releaseNative
 	b.protocol = NewDragProtocol(b.sourceEndedAt, b.sourceSystemEnded, b.sourceDisarm)
@@ -106,17 +119,63 @@ func (b *DragBridge) UpdateCursor(operation cef.DragOperationsMask) {
 	}
 	b.mu.Lock()
 	b.selectedAction, b.selectedKnown = operation, true
-	b.mu.Unlock()
-	b.schedule(func() {
-		b.mu.Lock()
-		drop, allowed := b.activeDrop, b.activeAllowed
+	b.statusRevision++
+	if b.statusPending {
 		b.mu.Unlock()
-		if drop == nil {
+		return
+	}
+	b.statusPending = true
+	b.statusTicket++
+	ticket, generation, revision := b.statusTicket, b.dropGeneration, b.statusRevision
+	b.mu.Unlock()
+
+	b.scheduleStatus(ticket, generation, revision, true)
+}
+
+func (b *DragBridge) scheduleStatus(ticket, generation, revision uint64, retryConcurrent bool) {
+	id := b.schedule(func() {
+		b.mu.Lock()
+		if !b.statusPending || b.statusTicket != ticket || b.dropGeneration != generation {
+			b.mu.Unlock()
 			return
 		}
-		preferred := NegotiateDragActions(allowed, operation).Preferred
-		drop.Status(CEFToGDKDragActions(allowed), CEFToGDKDragActions(preferred))
+		b.statusPending = false
+		drop, allowed := b.activeDrop, b.activeAllowed
+		selected, known := b.selectedAction, b.selectedKnown
+		if drop != nil && known {
+			b.retainDrop(drop)
+		}
+		b.mu.Unlock()
+		if drop == nil || !known {
+			return
+		}
+		defer b.releaseDrop(drop)
+		preferred := NegotiateDragActions(allowed, selected).Preferred
+		b.status(drop, CEFToGDKDragActions(allowed), CEFToGDKDragActions(preferred))
 	})
+	if id != 0 {
+		return
+	}
+
+	b.mu.Lock()
+	if !b.statusPending || b.statusTicket != ticket {
+		b.mu.Unlock()
+		return
+	}
+	b.statusPending = false
+	if !retryConcurrent || b.dropGeneration != generation || b.statusRevision == revision {
+		b.mu.Unlock()
+		return
+	}
+	b.statusPending = true
+	b.statusTicket++
+	nextTicket, nextGeneration, nextRevision := b.statusTicket, b.dropGeneration, b.statusRevision
+	b.mu.Unlock()
+
+	// Retry only a write that arrived while the refused attempt was in flight.
+	// A second refusal remains idle until another UpdateCursor call, avoiding a
+	// scheduler-failure busy loop.
+	b.scheduleStatus(nextTicket, nextGeneration, nextRevision, false)
 }
 
 func (b *DragBridge) setActiveDrop(drop *gdk.Drop) {
@@ -124,7 +183,7 @@ func (b *DragBridge) setActiveDrop(drop *gdk.Drop) {
 	if drop == nil {
 		return
 	}
-	drop.Ref()
+	b.retainDrop(drop)
 	b.mu.Lock()
 	b.activeDrop = drop
 	b.mu.Unlock()
@@ -138,9 +197,11 @@ func (b *DragBridge) clearActiveDrop(token uintptr) {
 		return
 	}
 	b.activeDrop, b.activeAllowed = nil, 0
+	b.dropGeneration++
+	b.statusPending = false
 	b.mu.Unlock()
 	if drop != nil {
-		drop.Unref()
+		b.releaseDrop(drop)
 	}
 }
 
