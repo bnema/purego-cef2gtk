@@ -482,19 +482,23 @@ func TestRenderHandlerSynchronizesHookReplacementWithCallbacksAndDestroy(t *test
 	h := v.RenderHandler(Hooks{})
 
 	start := make(chan struct{})
+	replacementReady := make(chan struct{})
 	var callbacks atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		<-start
-		for range 1_000 {
+		v.RenderHandler(Hooks{OnUnsupportedPaint: func() { callbacks.Add(1) }})
+		close(replacementReady)
+		for range 999 {
 			v.RenderHandler(Hooks{OnUnsupportedPaint: func() { callbacks.Add(1) }})
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		<-start
+		<-replacementReady
 		for range 1_000 {
 			h.OnPaint(nil, cef.PaintElementTypePetView, nil, nil, 0, 0)
 		}

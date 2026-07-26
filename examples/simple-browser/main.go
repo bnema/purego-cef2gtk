@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/bnema/purego-cef/cef"
 	cef2gtk "github.com/bnema/purego-cef2gtk"
@@ -147,12 +148,15 @@ func urlArg() (string, error) {
 }
 
 func resolveURL(raw string) (string, error) {
+	if isDriveLetterPath(raw) && filepath.Ext(raw) == ".html" {
+		raw = "https://" + raw
+	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
 	if parsed.Scheme == "" {
-		if filepath.Ext(raw) == ".html" {
+		if filepath.Ext(raw) == ".html" && !isHostLikePath(raw) {
 			abs, err := filepath.Abs(raw)
 			if err != nil {
 				return "", err
@@ -171,8 +175,29 @@ func resolveURL(raw string) (string, error) {
 			return "", fmt.Errorf("missing host")
 		}
 	case "file":
+		if parsed.Opaque != "" {
+			return "", fmt.Errorf("file URL must not be opaque")
+		}
+		if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+			return "", fmt.Errorf("file URL host must be empty or localhost")
+		}
+		if parsed.Path == "" {
+			return "", fmt.Errorf("file URL must include a path")
+		}
 	default:
 		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
 	}
 	return parsed.String(), nil
+}
+
+func isDriveLetterPath(raw string) bool {
+	return len(raw) >= 3 && ((raw[0] >= 'a' && raw[0] <= 'z') || (raw[0] >= 'A' && raw[0] <= 'Z')) && raw[1] == ':' && raw[2] == '/'
+}
+
+func isHostLikePath(raw string) bool {
+	if filepath.IsAbs(raw) || len(raw) < 2 || raw[:2] == "./" || raw[:2] == ".." {
+		return false
+	}
+	first, _, found := strings.Cut(raw, "/")
+	return found && strings.Contains(first, ".")
 }

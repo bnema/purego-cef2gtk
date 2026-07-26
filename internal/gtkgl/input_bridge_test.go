@@ -450,6 +450,27 @@ func TestInputBridgeCancelSynthesizesTrackedMouseUpWithLastState(t *testing.T) {
 	}
 }
 
+func TestInputBridgeCancelDoesNotReleaseConsumedMiddleClickAndClearsConsumption(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.SetMiddleClickHandler(func(float64, float64) bool { return true })
+	ib.onMousePress(10, 20, 2, uint(gdk.Button2MaskValue), 1)
+
+	ib.onMouseCancel()
+
+	if len(host.clicks) != 0 {
+		t.Fatalf("consumed middle cancel clicks = %+v, want none", host.clicks)
+	}
+	if host.captureLosts != 1 {
+		t.Fatalf("capture lost calls = %d, want 1", host.captureLosts)
+	}
+
+	ib.onMouseRelease(10, 20, 2, uint(gdk.Button2MaskValue), 1)
+	if len(host.clicks) != 1 || host.clicks[0].button != cef.MouseButtonTypeMbtMiddle || host.clicks[0].mouseUp != 1 {
+		t.Fatalf("release after consumed cancel = %+v, want one forwarded middle release", host.clicks)
+	}
+}
+
 func TestInputBridgeCancelRecordsOnlySynthesizedUnmatchedRelease(t *testing.T) {
 	host := &recordingBrowserHost{}
 	recorder := internalprofile.NewRecorder()

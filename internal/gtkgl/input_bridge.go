@@ -632,17 +632,23 @@ func (ib *InputBridge) onMouseCancel() {
 		return
 	}
 	abort, _, canceled := tracker.cancel()
+	consumedMiddleClick := canceled && abort.Button == 2 && ib.middleClickConsumed
+	if consumedMiddleClick {
+		ib.middleClickConsumed = false
+	}
 	host, scale := ib.host, ib.scale
 	ib.mu.Unlock()
 	if !canceled || host == nil {
 		return
 	}
-	if profiler := ib.profiler.Load(); profiler != nil {
-		profiler.RecordPressWithoutMatchedRelease()
+	if !consumedMiddleClick {
+		if profiler := ib.profiler.Load(); profiler != nil {
+			profiler.RecordPressWithoutMatchedRelease()
+		}
+		state := abort.State &^ gdkButtonMask(abort.Button)
+		evt := BuildMouseEvent(abort.X, abort.Y, state, scale)
+		host.SendMouseClickEvent(&evt, TranslateMouseButton(abort.Button), 1, 1)
 	}
-	state := abort.State &^ gdkButtonMask(abort.Button)
-	evt := BuildMouseEvent(abort.X, abort.Y, state, scale)
-	host.SendMouseClickEvent(&evt, TranslateMouseButton(abort.Button), 1, 1)
 	host.SendCaptureLostEvent()
 }
 
