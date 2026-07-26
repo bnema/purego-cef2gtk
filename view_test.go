@@ -4,11 +4,35 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
+
+type visibilityRecordingHost struct {
+	cef.BrowserHost
+	hiddenStates []int32
+}
+
+func (h *visibilityRecordingHost) WasHidden(hidden int32) {
+	h.hiddenStates = append(h.hiddenStates, hidden)
+}
+
+func TestViewMapShowAndUnmapHideVisibilitySignalsAreIdempotent(t *testing.T) {
+	host := &visibilityRecordingHost{}
+	v := &View{input: gtkgl.NewInputBridge(host, 1)}
+
+	v.handleVisibilitySignal(true)  // map
+	v.handleVisibilitySignal(true)  // show
+	v.handleVisibilitySignal(false) // unmap
+	v.handleVisibilitySignal(false) // hide
+
+	if len(host.hiddenStates) != 2 || host.hiddenStates[0] != 0 || host.hiddenStates[1] != 1 {
+		t.Fatalf("visibility notifications = %v, want [0 1]", host.hiddenStates)
+	}
+}
 
 func TestNewViewWithOptionsRejectsInvalidBackendBeforeGTK(t *testing.T) {
 	t.Setenv(backendEnvVar, "invalid")
