@@ -30,6 +30,8 @@ func OutboundFormats(payload OutboundPayload) []OutboundFormat {
 		if payload.LinkTitle != "" && strings.IndexByte(payload.LinkTitle, 0) < 0 {
 			formats = append(formats, OutboundFormat{MIME: "text/x-moz-url", Value: encodeMozURL(link + "\n" + payload.LinkTitle)})
 		}
+	} else if link := outboundLocalFileURL(payload.LinkURL); link != "" {
+		formats = append(formats, OutboundFormat{MIME: "text/uri-list", Value: []byte(link + "\r\n")})
 	}
 	if strings.HasPrefix(payload.ImageMIME, "image/") && len(payload.ImageBytes) != 0 {
 		formats = append(formats, OutboundFormat{MIME: payload.ImageMIME, Value: append([]byte(nil), payload.ImageBytes...)})
@@ -59,6 +61,30 @@ func outboundHTTPURL(value string) string {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return ""
 	}
+	return u.String()
+}
+
+func outboundLocalFileURL(value string) string {
+	if strings.IndexByte(value, 0) >= 0 {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || !strings.EqualFold(u.Scheme, "file") || u.User != nil {
+		return ""
+	}
+	if len(value) < len(u.Scheme)+3 || !strings.HasPrefix(value[len(u.Scheme)+1:], "//") {
+		return ""
+	}
+	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
+		return ""
+	}
+	if !filepath.IsAbs(u.Path) || strings.HasPrefix(u.Path, "//") || strings.IndexByte(u.Path, 0) >= 0 {
+		return ""
+	}
+	if u.RawQuery != "" || u.ForceQuery || strings.Contains(value, "#") {
+		return ""
+	}
+	u.Scheme = "file"
 	return u.String()
 }
 

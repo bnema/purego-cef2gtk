@@ -46,6 +46,64 @@ func TestOutboundFormatsOmitsInvalidFilePaths(t *testing.T) {
 	}
 }
 
+func TestOutboundFormatsSerializesLocalFileLinkWithoutMozURL(t *testing.T) {
+	const link = "file:///tmp/outbound%20fixture/outbound-drag-image.svg"
+	got := OutboundFormats(OutboundPayload{LinkURL: link, LinkTitle: "Outbound image"})
+	want := []OutboundFormat{{MIME: "text/uri-list", Value: []byte(link + "\r\n")}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formats = %#v, want %#v", got, want)
+	}
+}
+
+func TestOutboundFormatsSerializesLocalhostFileLink(t *testing.T) {
+	const link = "file://localhost/tmp/outbound%20fixture.svg"
+	got := OutboundFormats(OutboundPayload{LinkURL: link})
+	want := []OutboundFormat{{MIME: "text/uri-list", Value: []byte(link + "\r\n")}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formats = %#v, want %#v", got, want)
+	}
+}
+
+func TestOutboundFormatsRejectsUnsafeFileLinks(t *testing.T) {
+	tests := []struct {
+		name string
+		link string
+	}{
+		{name: "remote host", link: "file://files.example.test/tmp/image.svg"},
+		{name: "malformed percent escape", link: "file:///tmp/bad%2Gname.svg"},
+		{name: "non-authority form", link: "file:/tmp/image.svg"},
+		{name: "relative path", link: "file://localhost"},
+		{name: "userinfo", link: "file://user@localhost/tmp/image.svg"},
+		{name: "query", link: "file:///tmp/image.svg?download=1"},
+		{name: "fragment", link: "file:///tmp/image.svg#preview"},
+		{name: "port", link: "file://localhost:80/tmp/image.svg"},
+		{name: "escaped NUL", link: "file:///tmp/bad%00name.svg"},
+		{name: "authority-like path", link: "file:////host/share"},
+		{name: "escaped authority-like path", link: "file:///%2F%2Fhost/share"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := OutboundFormats(OutboundPayload{LinkURL: tt.link, LinkTitle: "ignored"}); got != nil {
+				t.Fatalf("formats = %#v, want nil", got)
+			}
+		})
+	}
+}
+
+func TestOutboundFormatsPrefersExplicitFilesToLocalFileLink(t *testing.T) {
+	got := OutboundFormats(OutboundPayload{
+		Files:   []string{"/tmp/explicit file.txt"},
+		LinkURL: "file:///tmp/link-target.svg",
+	})
+	want := []OutboundFormat{{
+		MIME:  "text/uri-list",
+		Value: []byte("file:///tmp/explicit%20file.txt\r\n"),
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formats = %#v, want %#v", got, want)
+	}
+}
+
 func TestOutboundFormatsSerializesTitledHTTPLinkWithoutFiles(t *testing.T) {
 	const (
 		link  = "https://example.test/article"
