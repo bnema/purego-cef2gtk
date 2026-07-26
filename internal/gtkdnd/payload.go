@@ -150,7 +150,7 @@ func parseURIList(value string) (InboundPayload, error) {
 				}
 				return InboundPayload{}, fmt.Errorf("%w: invalid local file URI", ErrMalformedPayload)
 			}
-			if !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
+			if !filepath.IsAbs(u.Path) || strings.HasPrefix(u.Path, "//") || strings.IndexByte(u.Path, 0) >= 0 || u.RawQuery != "" || u.Fragment != "" {
 				return InboundPayload{}, fmt.Errorf("%w: invalid local file path", ErrMalformedPayload)
 			}
 			payload.Files = append(payload.Files, DroppedFile{Path: filepath.Clean(u.Path), DisplayName: filepath.Base(u.Path)})

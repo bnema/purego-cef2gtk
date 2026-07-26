@@ -1,6 +1,7 @@
 package gtkgl
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"sync"
@@ -32,6 +33,7 @@ type dragTestData struct {
 	image                   cef.Image
 	files                   bool
 	fileList                cef.StringList
+	releases                int
 }
 
 func (d *dragTestData) GetFragmentText() string { return d.text }
@@ -62,6 +64,7 @@ func (d *dragTestData) GetFileContents(writer cef.StreamWriter) int {
 	return written * size
 }
 func (d *dragTestData) GetImage() cef.Image { return d.image }
+func (d *dragTestData) Release()            { d.releases++ }
 func (d *dragTestData) GetImageHotspot() uintptr {
 	y := int32(-9)
 	return uintptr(uint64(uint32(17)) | uint64(uint32(y))<<32)
@@ -112,6 +115,11 @@ func (h *dragTestHost) DragTargetDragEnter(cef.DragData, *cef.MouseEvent, cef.Dr
 	h.target = append(h.target, "enter")
 	h.mu.Unlock()
 }
+func (h *dragTestHost) DragTargetDragLeave() {
+	h.mu.Lock()
+	h.target = append(h.target, "leave")
+	h.mu.Unlock()
+}
 func (h *dragTestHost) DragTargetDragOver(*cef.MouseEvent, cef.DragOperationsMask) {
 	h.mu.Lock()
 	h.target = append(h.target, "over")
@@ -154,7 +162,20 @@ func (s *bridgeFakeSource) OpenAsync(_ string, callback func(gtkdnd.AsyncStream,
 func (s *bridgeFakeSource) Cancel()  { s.cancels++ }
 func (s *bridgeFakeSource) Release() { s.releases++ }
 
-type bridgeFakeDragData struct{ cef.DragData }
+type bridgeFakeDragData struct {
+	cef.DragData
+	releases  int
+	onRelease func()
+}
+
+func (*bridgeFakeDragData) SetFragmentText(string) {}
+func (*bridgeFakeDragData) SetLinkURL(string)      {}
+func (d *bridgeFakeDragData) Release() {
+	d.releases++
+	if d.onRelease != nil {
+		d.onRelease()
+	}
+}
 
 func TestDecodeImageHotspotUsesPackedCEFPointABI(t *testing.T) {
 	negativeY := int32(-41)
@@ -218,6 +239,45 @@ func TestDragBridgeStartSnapshotsAllCEFContentBeforeScheduling(t *testing.T) {
 	}, IconPNG: []byte{0x89, 'P', 'N', 'G'}, Hotspot: imageHotspot{X: 17, Y: -9, Valid: unsafe.Sizeof(uintptr(0)) == 8}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("scheduled payload=%+v, want %+v", got, want)
+	}
+}
+
+func TestDragBridgeRetainsOnlyOwnDropTextAndLinkUntilCleanup(t *testing.T) {
+	large := bytes.Repeat([]byte("payload"), 1<<12)
+	data := &dragTestData{
+		text:         "own text",
+		html:         string(large),
+		link:         "https://example.test/own",
+		title:        string(large),
+		fileName:     "photo.jpg",
+		fileContents: append([]byte{0xff, 0xd8, 0xff}, large...),
+		image:        &dragTestImage{png: &dragTestBinary{data: large}},
+		files:        true,
+	}
+	b := NewDragBridge(nil, nil, &dragTestHost{})
+	b.newWriteHandler = func(handler cef.WriteHandler) cef.WriteHandler { return &dragTestStreamWriter{WriteHandler: handler} }
+	b.newStreamWriter = func(handler cef.WriteHandler) cef.StreamWriter { return &dragTestStreamWriter{WriteHandler: handler} }
+	b.newStringList = func(...string) cef.StringList { return 1 }
+	b.stringListToSlice = func(cef.StringList) []string { return []string{string(large)} }
+	b.freeStringList = func(cef.StringList) {}
+	b.schedule = func(func()) uint { return 1 }
+
+	if got := b.Start(&dragTestBrowser{host: &dragTestHost{}}, data, cef.DragOperationsMaskDragOperationCopy, 0, 0); got != 1 {
+		t.Fatalf("Start=%d", got)
+	}
+	if b.sourceText != "own text" || b.sourceLinkURL != "https://example.test/own" {
+		t.Fatalf("own-drop snapshot text=%q link=%q", b.sourceText, b.sourceLinkURL)
+	}
+	bridgeType, payloadType := reflect.TypeOf((*DragBridge)(nil)).Elem(), reflect.TypeOf(dragPayload{})
+	for i := 0; i < bridgeType.NumField(); i++ {
+		if bridgeType.Field(i).Type == payloadType {
+			t.Fatalf("bridge retains full payload in field %q", bridgeType.Field(i).Name)
+		}
+	}
+
+	b.cleanupSource()
+	if b.sourceText != "" || b.sourceLinkURL != "" {
+		t.Fatalf("cleanup retained own-drop snapshot text=%q link=%q", b.sourceText, b.sourceLinkURL)
 	}
 }
 
@@ -515,9 +575,14 @@ func TestDragBridgeImageIconUsesHotspotAndDecodeFailureDoesNotAbort(t *testing.T
 func TestDragBridgeExternalDropReadsToEOFFinishesAndReentersOnce(t *testing.T) {
 	h := &dragTestHost{}
 	b := NewDragBridge(nil, nil, h)
-	b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return &bridgeFakeDragData{} }
+	placeholder := &bridgeFakeDragData{}
+	inbound := &bridgeFakeDragData{}
+	b.newMetadataData = func(gtkdnd.DragMetadata) cef.DragData { return placeholder }
+	b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return inbound }
 	token := uintptr(50)
 	b.targetProtocol.Enter(token)
+	data := b.targetEnterData([]string{"text/plain"}, false, "", "")
+	b.dispatchTargetEnter(data, &cef.MouseEvent{X: 7, Y: 9}, cef.DragOperationsMaskDragOperationCopy)
 	plan, ok := b.targetProtocol.BeginDrop(token)
 	if !ok {
 		t.Fatal("begin drop rejected")
@@ -535,14 +600,90 @@ func TestDragBridgeExternalDropReadsToEOFFinishesAndReentersOnce(t *testing.T) {
 	}
 	source.stream.complete(nil, nil)
 
-	if got := h.target; len(got) != 3 || got[0] != "enter" || got[1] != "over" || got[2] != "drop" {
-		t.Fatalf("target order=%v", got)
+	if got, want := h.target, []string{"enter", "leave", "enter", "over", "drop"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("target order=%v, want %v", got, want)
+	}
+	if placeholder.releases != 1 || inbound.releases != 1 {
+		t.Fatalf("DragData releases placeholder=%d inbound=%d", placeholder.releases, inbound.releases)
 	}
 	if len(finishes) != 1 || finishes[0] != gdk.ActionCopyValue {
 		t.Fatalf("finishes=%v", finishes)
 	}
 	if source.cancels != 0 || source.releases != 1 {
 		t.Fatalf("source cancels=%d releases=%d", source.cancels, source.releases)
+	}
+}
+
+func TestDragBridgeCreatedDragDataOwnershipAcrossReplacementNilHostAndStaleDrop(t *testing.T) {
+	t.Run("own drag releases metadata before replacement and real data after enter", func(t *testing.T) {
+		h := &dragTestHost{}
+		b := NewDragBridge(nil, nil, h)
+		var events []string
+		metadata := &bridgeFakeDragData{onRelease: func() { events = append(events, "release metadata") }}
+		real := &bridgeFakeDragData{onRelease: func() { events = append(events, "release real") }}
+		b.newMetadataData = func(gtkdnd.DragMetadata) cef.DragData { return metadata }
+		b.newDragData = func() cef.DragData {
+			events = append(events, "create real")
+			return real
+		}
+		data := b.targetEnterData([]string{"text/plain"}, true, "own text", "")
+		b.dispatchTargetEnter(data, &cef.MouseEvent{}, cef.DragOperationsMaskDragOperationCopy)
+		if metadata.releases != 1 || real.releases != 1 {
+			t.Fatalf("releases metadata=%d real=%d", metadata.releases, real.releases)
+		}
+		if want := []string{"release metadata", "create real", "release real"}; !reflect.DeepEqual(events, want) {
+			t.Fatalf("ownership order=%v, want %v", events, want)
+		}
+	})
+
+	t.Run("nil host still releases inbound data", func(t *testing.T) {
+		b := NewDragBridge(nil, nil, nil)
+		inbound := &bridgeFakeDragData{}
+		b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return inbound }
+		token := uintptr(70)
+		b.targetProtocol.Enter(token)
+		plan, _ := b.targetProtocol.BeginDrop(token)
+		source := &bridgeFakeSource{stream: &bridgeFakeStream{}}
+		b.beginExternalDrop(plan, []string{"text/plain"}, source, cef.MouseEvent{}, cef.DragOperationsMaskDragOperationCopy, func(gdk.DragAction) {})
+		source.open(source.stream, "text/plain", nil)
+		source.stream.complete([]byte("content"), nil)
+		source.stream.complete(nil, nil)
+		if inbound.releases != 1 {
+			t.Fatalf("inbound releases=%d", inbound.releases)
+		}
+	})
+
+	t.Run("stale async result creates no drag data", func(t *testing.T) {
+		b := NewDragBridge(nil, nil, &dragTestHost{})
+		created := 0
+		b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData {
+			created++
+			return &bridgeFakeDragData{}
+		}
+		token := uintptr(71)
+		b.targetProtocol.Enter(token)
+		plan, _ := b.targetProtocol.BeginDrop(token)
+		source := &bridgeFakeSource{stream: &bridgeFakeStream{}}
+		b.beginExternalDrop(plan, []string{"text/plain"}, source, cef.MouseEvent{}, cef.DragOperationsMaskDragOperationCopy, func(gdk.DragAction) {})
+		b.targetProtocol.Detach()
+		source.open(source.stream, "text/plain", nil)
+		source.stream.complete([]byte("stale"), nil)
+		source.stream.complete(nil, nil)
+		if created != 0 {
+			t.Fatalf("stale callback created %d DragData values", created)
+		}
+	})
+}
+
+func TestDragBridgeStartDoesNotReleaseCallerOwnedDragData(t *testing.T) {
+	data := &dragTestData{text: "caller owned"}
+	b := NewDragBridge(nil, nil, &dragTestHost{})
+	b.schedule = func(func()) uint { return 0 }
+	if got := b.Start(&dragTestBrowser{host: &dragTestHost{}}, data, cef.DragOperationsMaskDragOperationCopy, 0, 0); got != 0 {
+		t.Fatalf("Start=%d", got)
+	}
+	if data.releases != 0 {
+		t.Fatalf("caller-owned DragData releases=%d", data.releases)
 	}
 }
 

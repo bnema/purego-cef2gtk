@@ -84,6 +84,9 @@ func TestMalformedPayloadsAndRemoteFileURIsAreRejected(t *testing.T) {
 	}{
 		{name: "remote file host", mime: "text/uri-list", data: []byte("file://remote.test/tmp/x"), want: ErrRemoteFileURI},
 		{name: "invalid percent escape", mime: "text/uri-list", data: []byte("file:///tmp/%ZZ"), want: ErrMalformedPayload},
+		{name: "decoded NUL in file path", mime: "text/uri-list", data: []byte("file:///tmp/a%00b"), want: ErrMalformedPayload},
+		{name: "literal authority-like path", mime: "text/uri-list", data: []byte("file:////host/share"), want: ErrMalformedPayload},
+		{name: "decoded authority-like path", mime: "text/uri-list", data: []byte("file:///%2F%2Fhost/share"), want: ErrMalformedPayload},
 		{name: "relative file URI", mime: "text/uri-list", data: []byte("file:/tmp/x"), want: ErrMalformedPayload},
 		{name: "unsupported URI scheme", mime: "text/uri-list", data: []byte("ftp://example.test/x"), want: ErrMalformedPayload},
 		{name: "invalid UTF-8", mime: "text/plain", data: []byte{0xff}, want: ErrMalformedPayload},
