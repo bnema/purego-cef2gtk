@@ -31,8 +31,8 @@ func OutboundFormats(payload OutboundPayload) []OutboundFormat {
 			formats = append(formats, OutboundFormat{MIME: "text/x-moz-url", Value: encodeMozURL(link + "\n" + payload.LinkTitle)})
 		}
 	}
-	if len(payload.ImagePNG) != 0 {
-		formats = append(formats, OutboundFormat{MIME: "image/png", Value: append([]byte(nil), payload.ImagePNG...)})
+	if strings.HasPrefix(payload.ImageMIME, "image/") && len(payload.ImageBytes) != 0 {
+		formats = append(formats, OutboundFormat{MIME: payload.ImageMIME, Value: append([]byte(nil), payload.ImageBytes...)})
 	}
 	return formats
 }

@@ -77,10 +77,20 @@ func TestOutboundFormatsSerializesTitledHTTPLinkWithoutFiles(t *testing.T) {
 	}
 }
 
-func TestOutboundFormatsIncludesPNGImageBytes(t *testing.T) {
-	image := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a}
-	got := OutboundFormats(OutboundPayload{ImagePNG: image})
-	if len(got) != 1 || got[0].MIME != "image/png" || !bytes.Equal(got[0].Value, image) {
+func TestOutboundFormatsIncludesExactImageContentUnderDeclaredMIME(t *testing.T) {
+	image := []byte{0xff, 0xd8, 0xff, 0xe0, 's', 'o', 'u', 'r', 'c', 'e'}
+	got := OutboundFormats(OutboundPayload{ImageMIME: "image/jpeg", ImageBytes: image})
+	if len(got) != 1 || got[0].MIME != "image/jpeg" || !bytes.Equal(got[0].Value, image) {
+		t.Fatalf("formats = %#v", got)
+	}
+	image[0] = 0
+	if got[0].Value[0] != 0xff {
+		t.Fatal("format aliases caller-owned image bytes")
+	}
+}
+
+func TestOutboundFormatsNeverOffersUndeclaredImageBytes(t *testing.T) {
+	if got := OutboundFormats(OutboundPayload{ImageBytes: []byte("preview")}); got != nil {
 		t.Fatalf("formats = %#v", got)
 	}
 }

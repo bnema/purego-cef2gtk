@@ -24,6 +24,11 @@ func (b *dragTestBrowser) GetHost() cef.BrowserHost { return b.host }
 type dragTestData struct {
 	cef.DragData
 	text, html, link, title string
+	fileName                string
+	fileContents            []byte
+	fileWriteSize           int
+	fileWriteItems          int
+	fileResult              int
 	image                   cef.Image
 	files                   bool
 	fileList                cef.StringList
@@ -37,6 +42,24 @@ func (d *dragTestData) IsFile() bool            { return d.files }
 func (d *dragTestData) GetFilePaths(list cef.StringList) int32 {
 	d.fileList = list
 	return 1
+}
+func (d *dragTestData) GetFileName() string { return d.fileName }
+func (d *dragTestData) GetFileContents(writer cef.StreamWriter) int {
+	if writer == nil {
+		return 0
+	}
+	size, items := d.fileWriteSize, d.fileWriteItems
+	if size == 0 {
+		size = 1
+	}
+	if items == 0 {
+		items = len(d.fileContents)
+	}
+	written := writer.Write(unsafe.Pointer(unsafe.SliceData(d.fileContents)), size, items)
+	if d.fileResult != 0 {
+		return d.fileResult
+	}
+	return written * size
 }
 func (d *dragTestData) GetImage() cef.Image { return d.image }
 func (d *dragTestData) GetImageHotspot() uintptr {
@@ -61,6 +84,13 @@ type dragTestImage struct {
 	png      *dragTestBinary
 	releases int
 }
+
+type dragTestStreamWriter struct {
+	cef.WriteHandler
+	releases int
+}
+
+func (w *dragTestStreamWriter) Release() { w.releases++ }
 
 func (i *dragTestImage) GetAsPng(float32, int32, *int32, *int32) cef.BinaryValue { return i.png }
 func (i *dragTestImage) Release()                                                { i.releases++ }
@@ -141,12 +171,23 @@ func TestDecodeImageHotspotUsesPackedCEFPointABI(t *testing.T) {
 
 func TestDragBridgeStartSnapshotsAllCEFContentBeforeScheduling(t *testing.T) {
 	h := &dragTestHost{}
-	binary := &dragTestBinary{data: []byte{0x89, 'P', 'N', 'G'}}
+	preview := []byte{0x89, 'P', 'N', 'G'}
+	source := []byte{0xff, 0xd8, 0xff, 0xe0, 's', 'o', 'u', 'r', 'c', 'e'}
+	binary := &dragTestBinary{data: preview}
 	image := &dragTestImage{png: binary}
-	data := &dragTestData{text: "plain", html: "<b>rich</b>", link: "https://example.test", title: "Example", image: image, files: true}
+	data := &dragTestData{text: "plain", html: "<b>rich</b>", link: "https://example.test", title: "Example", fileName: "photo.jpg", fileContents: source, image: image, files: true}
 	var idle func()
 	var got dragPayload
 	b := NewDragBridge(nil, nil, h)
+	var callback, writer *dragTestStreamWriter
+	b.newWriteHandler = func(handler cef.WriteHandler) cef.WriteHandler {
+		callback = &dragTestStreamWriter{WriteHandler: handler}
+		return callback
+	}
+	b.newStreamWriter = func(handler cef.WriteHandler) cef.StreamWriter {
+		writer = &dragTestStreamWriter{WriteHandler: handler}
+		return writer
+	}
 	b.newStringList = func(...string) cef.StringList { return 77 }
 	b.stringListToSlice = func(list cef.StringList) []string {
 		if list != 77 {
@@ -165,18 +206,148 @@ func TestDragBridgeStartSnapshotsAllCEFContentBeforeScheduling(t *testing.T) {
 	if b.Start(&dragTestBrowser{host: h}, data, cef.DragOperationsMaskDragOperationCopy, 1, 2) != 1 {
 		t.Fatal("start rejected")
 	}
-	if data.fileList != 77 || freed != 77 || image.releases != 1 || binary.releases != 1 {
-		t.Fatalf("CEF ownership list=%d freed=%d image releases=%d binary releases=%d", data.fileList, freed, image.releases, binary.releases)
+	if data.fileList != 77 || freed != 77 || image.releases != 1 || binary.releases != 1 || callback == nil || callback.releases != 1 || writer == nil || writer.releases != 1 {
+		t.Fatalf("CEF ownership list=%d freed=%d image releases=%d binary releases=%d callback=%+v writer=%+v", data.fileList, freed, image.releases, binary.releases, callback, writer)
 	}
 	data.text, data.html, data.link, data.title = "mutated", "mutated", "mutated", "mutated"
-	binary.data[0] = 0
+	binary.data[0], source[0] = 0, 0
 	idle()
 
 	want := dragPayload{OutboundPayload: gtkdnd.OutboundPayload{
-		Text: "plain", HTML: "<b>rich</b>", Files: []string{"/tmp/a.txt"}, LinkURL: "https://example.test", LinkTitle: "Example", ImagePNG: []byte{0x89, 'P', 'N', 'G'},
-	}, Hotspot: imageHotspot{X: 17, Y: -9, Valid: unsafe.Sizeof(uintptr(0)) == 8}}
+		Text: "plain", HTML: "<b>rich</b>", Files: []string{"/tmp/a.txt"}, LinkURL: "https://example.test", LinkTitle: "Example", ImageMIME: "image/jpeg", ImageBytes: []byte{0xff, 0xd8, 0xff, 0xe0, 's', 'o', 'u', 'r', 'c', 'e'},
+	}, IconPNG: []byte{0x89, 'P', 'N', 'G'}, Hotspot: imageHotspot{X: 17, Y: -9, Valid: unsafe.Sizeof(uintptr(0)) == 8}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("scheduled payload=%+v, want %+v", got, want)
+	}
+}
+
+func TestDragBridgeRichAndLinkPreviewsCreateIconsWithoutImageProviders(t *testing.T) {
+	preview := []byte{0x89, 'P', 'N', 'G'}
+	cases := []dragTestData{
+		{text: "rich", html: "<b>rich</b>"},
+		{link: "https://example.test/image-free", title: "Titled link"},
+	}
+	for i := range cases {
+		cases[i].image = &dragTestImage{png: &dragTestBinary{data: preview}}
+		b := NewDragBridge(nil, nil, nil)
+		var mimes []string
+		var next uintptr = 100
+		b.newContentBytes = func([]byte, uint) *glib.Bytes {
+			next++
+			return glib.BytesNewFromInternalPtr(next)
+		}
+		b.newContentProvider = func(mime string, _ *glib.Bytes) *gdk.ContentProvider {
+			mimes = append(mimes, mime)
+			next++
+			return gdk.ContentProviderNewFromInternalPtr(next)
+		}
+		b.newContentUnion = func([]uintptr) *gdk.ContentProvider { return gdk.ContentProviderNewFromInternalPtr(999) }
+		b.newTextureFromBytes = func(*glib.Bytes) (*gdk.Texture, error) { return gdk.TextureNewFromInternalPtr(500), nil }
+		b.unrefProvider = func(*gdk.ContentProvider) {}
+		b.unrefBytes = func(*glib.Bytes) {}
+		b.unrefTexture = func(*gdk.Texture) {}
+
+		payload := b.snapshotDragData(&cases[i])
+		resources, err := b.createNativeContent(payload)
+		if err != nil || resources.Texture == nil || !reflect.DeepEqual(payload.IconPNG, preview) {
+			t.Fatalf("case %d resources=%+v icon=%x err=%v", i, resources, payload.IconPNG, err)
+		}
+		for _, mime := range mimes {
+			if len(mime) >= 6 && mime[:6] == "image/" {
+				t.Fatalf("case %d preview leaked as %q provider: %v", i, mime, mimes)
+			}
+		}
+		b.releaseNative(resources)
+	}
+}
+
+func TestBoundedDragFileWriterRejectsOversizeAndMalformedWrites(t *testing.T) {
+	writer := newBoundedDragFileWriter(8)
+	if writer.Flush() != 0 || writer.MayBlock() != 0 {
+		t.Fatalf("in-memory handler contract flush=%d mayBlock=%d", writer.Flush(), writer.MayBlock())
+	}
+	if got := writer.Write(unsafe.Pointer(unsafe.SliceData([]byte("12345678"))), 1, 8); got != 8 || writer.err != nil {
+		t.Fatalf("exact-limit write=%d err=%v", got, writer.err)
+	}
+	if got := writer.Write(unsafe.Pointer(unsafe.SliceData([]byte("x"))), 1, 1); got != 0 || !errors.Is(writer.err, errDragFileTooLarge) {
+		t.Fatalf("oversize write=%d err=%v", got, writer.err)
+	}
+
+	for _, tc := range []struct{ size, items int }{{0, 1}, {1, -1}, {int(^uint(0) >> 1), 2}} {
+		writer := newBoundedDragFileWriter(8)
+		if got := writer.Write(unsafe.Pointer(unsafe.SliceData([]byte("x"))), tc.size, tc.items); got != 0 || writer.err == nil {
+			t.Fatalf("Write(size=%d,n=%d)=%d err=%v", tc.size, tc.items, got, writer.err)
+		}
+	}
+	writer = newBoundedDragFileWriter(8)
+	if got := writer.Write(nil, 1, 1); got != 0 || writer.err == nil {
+		t.Fatalf("nil write=%d err=%v", got, writer.err)
+	}
+}
+
+func TestDraggedImageMIMERequiresSafeMatchingNameAndContent(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"pixel.png", []byte("\x89PNG\r\n\x1a\nsource"), "image/png"},
+		{"photo.jpeg", []byte{0xff, 0xd8, 0xff, 0xe0}, "image/jpeg"},
+		{"shape.svg", []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`), "image/svg+xml"},
+		{"shape.svg", []byte(`<!DOCTYPE svg><svg/>`), ""},
+		{"folder\\pixel.png", []byte("\x89PNG\r\n\x1a\n"), ""},
+	}
+	for _, tc := range cases {
+		if got := draggedImageMIME(tc.name, tc.data); got != tc.want {
+			t.Errorf("draggedImageMIME(%q)=%q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDragBridgeRejectsShortCaptureUnsafeNameAndMismatchedImage(t *testing.T) {
+	cases := []dragTestData{
+		{files: true, fileName: "photo.png", fileContents: []byte("short"), fileResult: 99},
+		{files: true, fileName: "../photo.png", fileContents: []byte("\x89PNG\r\n\x1a\nbytes")},
+		{files: true, fileName: "photo.png", fileContents: []byte("<svg></svg>")},
+	}
+	for i := range cases {
+		var callback, stream *dragTestStreamWriter
+		b := &DragBridge{
+			newWriteHandler: func(handler cef.WriteHandler) cef.WriteHandler {
+				callback = &dragTestStreamWriter{WriteHandler: handler}
+				return callback
+			},
+			newStreamWriter: func(handler cef.WriteHandler) cef.StreamWriter {
+				stream = &dragTestStreamWriter{WriteHandler: handler}
+				return stream
+			},
+		}
+		payload := b.snapshotDragData(&cases[i])
+		if payload.ImageMIME != "" || payload.ImageBytes != nil || callback.releases != 1 || stream.releases != 1 {
+			t.Fatalf("case %d image=%q %x callback releases=%d stream releases=%d", i, payload.ImageMIME, payload.ImageBytes, callback.releases, stream.releases)
+		}
+	}
+
+	oversized := &dragTestData{files: true, fileName: "huge.png", fileContents: make([]byte, maxOutboundFileBytes+1)}
+	var callback, stream *dragTestStreamWriter
+	b := &DragBridge{
+		newWriteHandler: func(handler cef.WriteHandler) cef.WriteHandler {
+			callback = &dragTestStreamWriter{WriteHandler: handler}
+			return callback
+		},
+		newStreamWriter: func(handler cef.WriteHandler) cef.StreamWriter {
+			stream = &dragTestStreamWriter{WriteHandler: handler}
+			return stream
+		},
+	}
+	if payload := b.snapshotDragData(oversized); payload.ImageBytes != nil || callback.releases != 1 || stream.releases != 1 {
+		t.Fatalf("oversized image bytes=%d callback releases=%d stream releases=%d", len(payload.ImageBytes), callback.releases, stream.releases)
+	}
+
+	callback = nil
+	b.newStreamWriter = func(cef.WriteHandler) cef.StreamWriter { return nil }
+	if payload := b.snapshotDragData(&dragTestData{files: true, fileName: "pixel.png", fileContents: []byte("\x89PNG\r\n\x1a\n")}); payload.ImageBytes != nil || callback.releases != 1 {
+		t.Fatalf("nil writer captured image=%x callback releases=%d", payload.ImageBytes, callback.releases)
 	}
 }
 
@@ -210,8 +381,8 @@ func TestDragBridgeBuildsDeterministicProviderUnionAndCleansRootOwnership(t *tes
 	b.unrefTexture = func(*gdk.Texture) { textureReleases++ }
 
 	resources, err := b.createNativeContent(dragPayload{OutboundPayload: gtkdnd.OutboundPayload{
-		Text: "plain", HTML: "<b>rich</b>", LinkURL: "https://example.test/page", LinkTitle: "Page", ImagePNG: []byte("png"),
-	}})
+		Text: "plain", HTML: "<b>rich</b>", LinkURL: "https://example.test/page", LinkTitle: "Page", ImageMIME: "image/png", ImageBytes: []byte("source"),
+	}, IconPNG: []byte("preview")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +397,7 @@ func TestDragBridgeBuildsDeterministicProviderUnionAndCleansRootOwnership(t *tes
 	if providerReleases[999] != 1 || len(providerReleases) != 1 {
 		t.Fatalf("provider releases=%v; children are transfer-full", providerReleases)
 	}
-	if len(byteReleases) != 5 {
+	if len(byteReleases) != 6 {
 		t.Fatalf("GBytes releases=%v", byteReleases)
 	}
 	for ptr, count := range byteReleases {
@@ -306,7 +477,7 @@ func TestDragBridgeImageIconUsesHotspotAndDecodeFailureDoesNotAbort(t *testing.T
 	b.newTextureFromBytes = func(*glib.Bytes) (*gdk.Texture, error) {
 		return gdk.TextureNewFromInternalPtr(450), decodeErr
 	}
-	resources, err := b.createNativeContent(dragPayload{OutboundPayload: gtkdnd.OutboundPayload{ImagePNG: []byte("bad")}})
+	resources, err := b.createNativeContent(dragPayload{OutboundPayload: gtkdnd.OutboundPayload{Text: "image"}, IconPNG: []byte("bad")})
 	if err != nil || resources == nil || resources.Provider == nil || resources.Texture != nil {
 		t.Fatalf("decode fallback resources=%+v err=%v", resources, err)
 	}

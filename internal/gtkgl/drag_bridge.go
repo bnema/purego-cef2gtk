@@ -1,9 +1,14 @@
 package gtkgl
 
 import (
+	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -23,6 +28,7 @@ type imageHotspot struct {
 
 type dragPayload struct {
 	gtkdnd.OutboundPayload
+	IconPNG []byte
 	Hotspot imageHotspot
 }
 
@@ -240,6 +246,8 @@ type DragBridge struct {
 	newContentProvider  func(string, *glib.Bytes) *gdk.ContentProvider
 	newContentUnion     func([]uintptr) *gdk.ContentProvider
 	newTextureFromBytes func(*glib.Bytes) (*gdk.Texture, error)
+	newWriteHandler     func(cef.WriteHandler) cef.WriteHandler
+	newStreamWriter     func(cef.WriteHandler) cef.StreamWriter
 	setDragIcon         func(*gdk.Drag, gdk.Paintable, int, int)
 	unrefProvider       func(*gdk.ContentProvider)
 	unrefBytes          func(*glib.Bytes)
@@ -298,6 +306,8 @@ func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost)
 		return gdk.NewContentProviderUnion(uintptr(unsafe.Pointer(&providers[0])), uint(len(providers)))
 	}
 	b.newTextureFromBytes = gdk.NewTextureFromBytes
+	b.newWriteHandler = cef.NewWriteHandler
+	b.newStreamWriter = cef.StreamWriterCreateForHandler
 	b.setDragIcon = gtk.DragIconSetFromPaintable
 	b.unrefProvider = func(value *gdk.ContentProvider) { value.Unref() }
 	b.unrefBytes = func(value *glib.Bytes) { value.Unref() }
@@ -495,6 +505,135 @@ func releaseCEFHandle(value any) {
 	}
 }
 
+const maxOutboundFileBytes = 32 << 20
+
+var (
+	errDragFileWrite    = errors.New("invalid drag file write")
+	errDragFileTooLarge = errors.New("drag file exceeds capture limit")
+)
+
+type boundedDragFileWriter struct {
+	data  []byte
+	pos   int
+	limit int
+	err   error
+}
+
+func newBoundedDragFileWriter(limit int) *boundedDragFileWriter {
+	return &boundedDragFileWriter{limit: limit}
+}
+
+func (w *boundedDragFileWriter) Write(ptr unsafe.Pointer, size, n int) int {
+	if w == nil || w.err != nil {
+		return 0
+	}
+	if ptr == nil || size <= 0 || n < 0 || (n != 0 && size > int(^uint(0)>>1)/n) {
+		w.err = errDragFileWrite
+		return 0
+	}
+	total := size * n
+	if total > w.limit-w.pos {
+		w.err = errDragFileTooLarge
+		return 0
+	}
+	end := w.pos + total
+	if end > len(w.data) {
+		w.data = append(w.data, make([]byte, end-len(w.data))...)
+	}
+	copy(w.data[w.pos:end], unsafe.Slice((*byte)(ptr), total))
+	w.pos = end
+	return n
+}
+
+func (w *boundedDragFileWriter) SeekOffset(offset int64, whence int32) int32 {
+	if w == nil || w.err != nil {
+		return -1
+	}
+	var base int64
+	switch whence {
+	case io.SeekStart:
+	case io.SeekCurrent:
+		base = int64(w.pos)
+	case io.SeekEnd:
+		base = int64(len(w.data))
+	default:
+		w.err = errDragFileWrite
+		return -1
+	}
+	next := base + offset
+	if next < 0 || next > int64(w.limit) {
+		w.err = errDragFileWrite
+		return -1
+	}
+	w.pos = int(next)
+	return 0
+}
+
+func (w *boundedDragFileWriter) Tell() int64   { return int64(w.pos) }
+func (*boundedDragFileWriter) Flush() int32    { return 0 }
+func (*boundedDragFileWriter) MayBlock() int32 { return 0 }
+
+func draggedImageMIME(name string, content []byte) string {
+	if name == "" || name == "." || name == ".." || strings.IndexByte(name, 0) >= 0 || strings.ContainsAny(name, `/\\`) || filepath.Base(name) != name {
+		return ""
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".png":
+		if len(content) >= 8 && bytes.Equal(content[:8], []byte("\x89PNG\r\n\x1a\n")) {
+			return "image/png"
+		}
+	case ".jpg", ".jpeg":
+		if len(content) >= 3 && bytes.Equal(content[:3], []byte{0xff, 0xd8, 0xff}) {
+			return "image/jpeg"
+		}
+	case ".svg":
+		decoder := xml.NewDecoder(bytes.NewReader(content))
+		for {
+			token, err := decoder.Token()
+			if err != nil {
+				return ""
+			}
+			switch value := token.(type) {
+			case xml.Directive:
+				return ""
+			case xml.StartElement:
+				if strings.EqualFold(value.Name.Local, "svg") {
+					return "image/svg+xml"
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+func (b *DragBridge) snapshotFileContent(data cef.DragData) (string, []byte) {
+	if b.newWriteHandler == nil || b.newStreamWriter == nil {
+		return "", nil
+	}
+	handler := newBoundedDragFileWriter(maxOutboundFileBytes)
+	callback := b.newWriteHandler(handler)
+	if callback == nil {
+		return "", nil
+	}
+	defer releaseCEFHandle(callback)
+	writer := b.newStreamWriter(callback)
+	if writer == nil {
+		return "", nil
+	}
+	defer releaseCEFHandle(writer)
+	written := data.GetFileContents(writer)
+	if handler.err != nil || written <= 0 || written != len(handler.data) {
+		return "", nil
+	}
+	mime := draggedImageMIME(data.GetFileName(), handler.data)
+	if mime == "" {
+		return "", nil
+	}
+	return mime, append([]byte(nil), handler.data...)
+}
+
 func (b *DragBridge) snapshotDragData(data cef.DragData) dragPayload {
 	payload := dragPayload{OutboundPayload: gtkdnd.OutboundPayload{
 		Text:      data.GetFragmentText(),
@@ -506,11 +645,14 @@ func (b *DragBridge) snapshotDragData(data cef.DragData) dragPayload {
 		payload.Text = payload.LinkURL
 	}
 	if data.IsFile() {
-		if list := b.newStringList(); list != 0 {
-			data.GetFilePaths(list)
-			payload.Files = append([]string(nil), b.stringListToSlice(list)...)
-			b.freeStringList(list)
+		if b.newStringList != nil {
+			if list := b.newStringList(); list != 0 {
+				data.GetFilePaths(list)
+				payload.Files = append([]string(nil), b.stringListToSlice(list)...)
+				b.freeStringList(list)
+			}
 		}
+		payload.ImageMIME, payload.ImageBytes = b.snapshotFileContent(data)
 	}
 	image := data.GetImage()
 	if image == nil {
@@ -524,10 +666,10 @@ func (b *DragBridge) snapshotDragData(data cef.DragData) dragPayload {
 		return payload
 	}
 	defer releaseCEFHandle(png)
-	if size := png.GetSize(); size > 0 {
+	if size := png.GetSize(); size > 0 && size <= maxOutboundFileBytes {
 		content := make([]byte, size)
-		if copied := png.GetData(unsafe.Pointer(&content[0]), size, 0); copied > 0 {
-			payload.ImagePNG = append([]byte(nil), content[:copied]...)
+		if copied := png.GetData(unsafe.Pointer(&content[0]), size, 0); copied == size {
+			payload.IconPNG = content
 		}
 	}
 	return payload
@@ -616,10 +758,12 @@ func (b *DragBridge) createNativeContent(payload dragPayload) (*nativeDragResour
 			return nil, errors.New("content provider")
 		}
 		children = append(children, provider)
-		if format.MIME == "image/png" {
-			// An invalid image only suppresses the icon. The PNG provider remains
-			// available and the drag can still start.
-			texture, err := b.newTextureFromBytes(value)
+	}
+	if len(payload.IconPNG) != 0 {
+		iconBytes := b.newContentBytes(payload.IconPNG, uint(len(payload.IconPNG)))
+		if iconBytes != nil {
+			resources.Bytes = append(resources.Bytes, iconBytes)
+			texture, err := b.newTextureFromBytes(iconBytes)
 			if err == nil {
 				resources.Texture = texture
 			} else if texture != nil {

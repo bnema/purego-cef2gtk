@@ -58,7 +58,7 @@
 
   <section>
     <h2>Outbound native drag formats</h2>
-    <p>Drag each case outside the CEF view into a native GTK application and verify the titled link, plain/HTML alternatives, and PNG image icon.</p>
+    <p>Drag each case outside the CEF view into a native GTK application. The link and rich text must not create image files; the image must retain its SVG source bytes and 96×96 dimensions. All cases may still use a PNG drag icon.</p>
     <div id="outbound-cases" class="outbound-cases">
       <a id="outbound-titled-link" class="outbound-case" draggable="true" href="https://example.com/drag-fixture" title="CEF outbound titled link">CEF outbound titled link</a>
       <div id="outbound-rich-text" class="outbound-case" draggable="true"><strong>Rich outbound text</strong><br><em>Plain and HTML formats</em></div>
