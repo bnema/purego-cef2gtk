@@ -55,6 +55,13 @@ type nativeDropSource struct {
 
 type nativeDropStream struct{ source *nativeDropSource }
 
+func resolvedDropMIME(requested, actual string, stream *gio.InputStream, err error) string {
+	if actual == "" && stream != nil && err == nil {
+		return requested
+	}
+	return actual
+}
+
 func newNativeDropSource(drop *gdk.Drop) releasableAsyncSource {
 	if drop == nil {
 		return nil
@@ -80,6 +87,7 @@ func (s *nativeDropSource) OpenAsync(mime string, done func(gtkdnd.AsyncStream, 
 	callback := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
 		var actual string
 		stream, err := s.drop.ReadFinish(&gio.AsyncResultBase{Ptr: resultPtr}, &actual)
+		actual = resolvedDropMIME(mime, actual, stream, err)
 		traceDND("read-open requested_mime=%q actual_mime=%q stream=%t error=%v", mime, actual, stream != nil, err)
 		s.mu.Lock()
 		if stream != nil {

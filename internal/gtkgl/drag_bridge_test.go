@@ -147,6 +147,34 @@ func TestDragBridgeExternalDropDetachCancelsAndLateCallbacksCannotFinishTwice(t 
 	}
 }
 
+func TestResolvedDropMIMEFallsBackOnlyForSuccessfulSingleMIMERead(t *testing.T) {
+	requested := "text/uri-list"
+	stream := &gio.InputStream{}
+	readErr := errors.New("read finish")
+
+	tests := []struct {
+		name   string
+		actual string
+		stream *gio.InputStream
+		err    error
+		want   string
+	}{
+		{name: "empty successful output", stream: stream, want: requested},
+		{name: "non-empty output", actual: "image/jpeg", stream: stream, want: "image/jpeg"},
+		{name: "missing stream", want: ""},
+		{name: "failed read", stream: stream, err: readErr, want: ""},
+		{name: "failed read with actual output", actual: "image/jpeg", stream: stream, err: readErr, want: "image/jpeg"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolvedDropMIME(requested, tt.actual, tt.stream, tt.err); got != tt.want {
+				t.Fatalf("resolved MIME=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNativeDropSourceReleasesEveryAsyncCallbackSlot(t *testing.T) {
 	source := &nativeDropSource{}
 	released := 0
