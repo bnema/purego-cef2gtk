@@ -2,6 +2,8 @@ package gtkgl
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 
@@ -25,6 +27,14 @@ type dragStatus func(*gdk.Drop, gdk.DragAction, gdk.DragAction)
 type releasableAsyncSource interface {
 	gtkdnd.AsyncSource
 	Release()
+}
+
+const dndTraceEnvVar = "PUREGO_CEF2GTK_TRACE_DND"
+
+func traceDND(format string, args ...any) {
+	if os.Getenv(dndTraceEnvVar) == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "purego-cef2gtk dnd: "+format+"\n", args...)
+	}
 }
 
 // nativeDropSource owns one cancellable and any stream returned by ReadFinish.
@@ -70,6 +80,7 @@ func (s *nativeDropSource) OpenAsync(mime string, done func(gtkdnd.AsyncStream, 
 	callback := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
 		var actual string
 		stream, err := s.drop.ReadFinish(&gio.AsyncResultBase{Ptr: resultPtr}, &actual)
+		traceDND("read-open requested_mime=%q actual_mime=%q stream=%t error=%v", mime, actual, stream != nil, err)
 		s.mu.Lock()
 		if stream != nil {
 			if err == nil {
@@ -176,6 +187,7 @@ func (s *nativeDropStream) ReadAsync(maxBytes int, done func([]byte, error)) {
 			}
 			bytes.Unref()
 		}
+		traceDND("read-chunk bytes=%d eof=%t error=%v", len(chunk), len(chunk) == 0 && err == nil, err)
 		source.callbackDone(false)
 		done(chunk, err)
 	})
@@ -609,6 +621,7 @@ func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
 	}
 	b.clearActiveDrop(drop.GoPointer())
 	drag := drop.GetDrag()
+	traceDND("target-drop generation=%d own=%t actions=%d require_content_real=%t", plan.Generation, drag != nil, drop.GetActions(), plan.RequireContentReal)
 	if drag == nil {
 		formats := drop.GetFormats()
 		var names []string
@@ -618,6 +631,7 @@ func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
 		}
 		n := NegotiateDragActions(GDKToCEFDragActions(drop.GetActions()), cef.DragOperationsMaskDragOperationEvery)
 		e := b.dragMouseEvent(drop, x, y)
+		traceDND("external-drop advertised=%q offered=%d allowed=%d deterministic_preferred=%d selected_preferred=%d", names, n.Offered, n.Allowed, n.Preferred, b.preferredAction(n))
 		b.retainDrop(drop)
 		source := b.newDropSource(drop)
 		if source == nil {
@@ -651,6 +665,7 @@ func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
 }
 
 func (b *DragBridge) beginExternalDrop(plan TargetDropPlan, advertised []string, source releasableAsyncSource, event cef.MouseEvent, proposed cef.DragOperationsMask, finish func(gdk.DragAction)) {
+	traceDND("external-read-start generation=%d proposed=%d advertised_count=%d", plan.Generation, proposed, len(advertised))
 	if source == nil {
 		finish(gdk.ActionNoneValue)
 		return
@@ -658,15 +673,18 @@ func (b *DragBridge) beginExternalDrop(plan TargetDropPlan, advertised []string,
 	b.externalReader.Read(advertised, source, func(result gtkdnd.ReadResult) {
 		defer source.Release()
 		finishAction := gdk.ActionNoneValue
+		traceDND("external-read-done generation=%d mime=%q bytes=%d error=%v", result.Generation, result.MIME, len(result.Data), result.Err)
 		if result.Err == nil {
 			payload, err := gtkdnd.ParseInboundPayload(result.MIME, result.Data)
+			traceDND("external-parse files=%d text=%t html=%t link=%t error=%v", len(payload.Files), payload.Text != "", payload.HTML != "", payload.LinkURL != "", err)
 			if err == nil {
 				b.mu.Lock()
 				allow, makeData := b.fileDropAllowed, b.newInboundData
 				b.mu.Unlock()
 				accepted := gtkdnd.ApplyFileDropVeto(payload, proposed, allow)
+				traceDND("external-policy proposed=%d accepted=%d", proposed, accepted)
 				if accepted != cef.DragOperationsMaskDragOperationNone {
-					b.targetProtocol.DispatchDrop(plan.Generation, func(completed TargetDropPlan) {
+					dispatched := b.targetProtocol.DispatchDrop(plan.Generation, func(completed TargetDropPlan) {
 						data := makeData(payload)
 						if data == nil {
 							return
@@ -680,12 +698,14 @@ func (b *DragBridge) beginExternalDrop(plan TargetDropPlan, advertised []string,
 							finishAction = CEFToGDKDragActions(accepted)
 						}
 					})
+					traceDND("external-dispatch generation=%d dispatched=%t finish_action=%d", plan.Generation, dispatched, finishAction)
 				}
 			}
 		}
 		// Errors, refusals, and stale callbacks can only close their own
 		// generation and retained drop.
 		b.targetProtocol.CompleteDrop(plan.Generation)
+		traceDND("external-finish generation=%d action=%d", plan.Generation, finishAction)
 		finish(finishAction)
 	})
 }
