@@ -375,7 +375,9 @@ func (b *DragBridge) targetEnter(drop *gdk.Drop, x, y float64) gdk.DragAction {
 	offered := GDKToCEFDragActions(drop.GetActions())
 	n := NegotiateDragActions(offered, cef.DragOperationsMaskDragOperationCopy|cef.DragOperationsMaskDragOperationMove|cef.DragOperationsMaskDragOperationLink)
 	preferred := b.preferredAction(n)
-	drop.Status(CEFToGDKDragActions(n.Allowed), CEFToGDKDragActions(preferred))
+	// GtkDropTargetAsync applies the returned action with its internal
+	// gtk_drop_status() bookkeeping after this signal handler returns. Calling
+	// GdkDrop.Status here would bypass that bookkeeping and can re-enter motion.
 	if h := b.currentHost(); h != nil && data != nil {
 		e := b.dragMouseEvent(drop, x, y)
 		h.DragTargetDragEnter(data, &e, n.Allowed)
@@ -383,18 +385,26 @@ func (b *DragBridge) targetEnter(drop *gdk.Drop, x, y float64) gdk.DragAction {
 	return CEFToGDKDragActions(preferred)
 }
 func (b *DragBridge) targetMotion(drop *gdk.Drop, x, y float64) gdk.DragAction {
-	if drop == nil || !b.targetProtocol.Motion(drop.GoPointer()) {
+	if drop == nil {
+		return gdk.ActionNoneValue
+	}
+	e := b.dragMouseEvent(drop, x, y)
+	decision := b.targetProtocol.Motion(drop.GoPointer(), e.X, e.Y, e.Modifiers)
+	if decision == TargetMotionRejected {
 		return gdk.ActionNoneValue
 	}
 	offered := GDKToCEFDragActions(drop.GetActions())
 	n := NegotiateDragActions(offered, cef.DragOperationsMaskDragOperationCopy|cef.DragOperationsMaskDragOperationMove|cef.DragOperationsMaskDragOperationLink)
 	preferred := b.preferredAction(n)
-	drop.Status(CEFToGDKDragActions(n.Allowed), CEFToGDKDragActions(preferred))
-	if h := b.currentHost(); h != nil {
-		e := b.dragMouseEvent(drop, x, y)
-		h.SendMouseMoveEvent(&e, 0)
-		h.DragTargetDragOver(&e, n.Allowed)
+	if decision == TargetMotionDispatch {
+		if h := b.currentHost(); h != nil {
+			h.SendMouseMoveEvent(&e, 0)
+			h.DragTargetDragOver(&e, n.Allowed)
+		}
 	}
+	// Returning the preferred action lets GtkDropTargetAsync call its private
+	// gtk_drop_status() exactly once. Status-induced duplicate motions are not
+	// redispatched to CEF, which breaks the Wayland Copy/None feedback cycle.
 	return CEFToGDKDragActions(preferred)
 }
 func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {

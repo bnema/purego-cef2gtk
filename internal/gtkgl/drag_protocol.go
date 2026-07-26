@@ -60,14 +60,27 @@ func DeviceToLogicalCoordinate(value int32, scale float64) float64 {
 }
 
 type targetDragState struct {
-	mu         sync.Mutex
-	generation uint64
-	token      uintptr
-	entered    bool
+	mu              sync.Mutex
+	generation      uint64
+	token           uintptr
+	entered         bool
+	motionValid     bool
+	motionX         int32
+	motionY         int32
+	motionModifiers uint32
 }
 
-// TargetDragProtocol serializes GTK target callbacks and rejects callbacks
-// that do not belong to the currently entered GdkDrop.
+type TargetMotionDecision uint8
+
+const (
+	TargetMotionRejected TargetMotionDecision = iota
+	TargetMotionDuplicate
+	TargetMotionDispatch
+)
+
+// TargetDragProtocol serializes GTK target callbacks, rejects stale callbacks,
+// and suppresses action-induced GDK motion events that do not change the CEF
+// mouse event. Wayland emits such motions when the selected drag action changes.
 type TargetDragProtocol struct{ state targetDragState }
 
 func NewTargetDragProtocol() *TargetDragProtocol { return &TargetDragProtocol{} }
@@ -83,12 +96,29 @@ func (p *TargetDragProtocol) Enter(token uintptr) uint64 {
 	}
 	p.state.generation++
 	p.state.token, p.state.entered = token, true
+	p.state.motionValid = false
 	return p.state.generation
 }
 
-func (p *TargetDragProtocol) Motion(token uintptr) bool { return p.matches(token, false) }
-func (p *TargetDragProtocol) Leave(token uintptr) bool  { return p.matches(token, true) }
-func (p *TargetDragProtocol) Drop(token uintptr) bool   { return p.matches(token, true) }
+func (p *TargetDragProtocol) Motion(token uintptr, x, y int32, modifiers uint32) TargetMotionDecision {
+	if p == nil || token == 0 {
+		return TargetMotionRejected
+	}
+	p.state.mu.Lock()
+	defer p.state.mu.Unlock()
+	if !p.state.entered || token != p.state.token {
+		return TargetMotionRejected
+	}
+	if p.state.motionValid && p.state.motionX == x && p.state.motionY == y && p.state.motionModifiers == modifiers {
+		return TargetMotionDuplicate
+	}
+	p.state.motionValid = true
+	p.state.motionX, p.state.motionY, p.state.motionModifiers = x, y, modifiers
+	return TargetMotionDispatch
+}
+
+func (p *TargetDragProtocol) Leave(token uintptr) bool { return p.matches(token, true) }
+func (p *TargetDragProtocol) Drop(token uintptr) bool  { return p.matches(token, true) }
 
 func (p *TargetDragProtocol) matches(token uintptr, close bool) bool {
 	if p == nil || token == 0 {
@@ -100,7 +130,7 @@ func (p *TargetDragProtocol) matches(token uintptr, close bool) bool {
 		return false
 	}
 	if close {
-		p.state.entered, p.state.token = false, 0
+		p.state.entered, p.state.token, p.state.motionValid = false, 0, false
 	}
 	return true
 }
@@ -111,7 +141,7 @@ func (p *TargetDragProtocol) Detach() {
 	}
 	p.state.mu.Lock()
 	p.state.generation++
-	p.state.entered, p.state.token = false, 0
+	p.state.entered, p.state.token, p.state.motionValid = false, 0, false
 	p.state.mu.Unlock()
 }
 

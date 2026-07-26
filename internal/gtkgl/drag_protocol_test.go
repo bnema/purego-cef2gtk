@@ -92,24 +92,58 @@ func TestDragProtocolOwnDropKeepsCoordinatesAndOnlySystemEndsLater(t *testing.T)
 
 func TestTargetDragProtocolRejectsOutOfOrderAndStaleCallbacks(t *testing.T) {
 	p := NewTargetDragProtocol()
-	if p.Motion(1) || p.Leave(1) || p.Drop(1) {
+	if p.Motion(1, 2, 3, 4) != TargetMotionRejected || p.Leave(1) || p.Drop(1) {
 		t.Fatal("callback accepted before enter")
 	}
 	gen := p.Enter(10)
-	if gen == 0 || !p.Motion(10) {
+	if gen == 0 || p.Motion(10, 2, 3, 4) != TargetMotionDispatch {
 		t.Fatal("entered target rejected motion")
 	}
 	if p.Enter(10) != 0 || p.Enter(11) != 0 {
 		t.Fatal("duplicate enter accepted")
 	}
-	if p.Motion(11) || p.Leave(11) || p.Drop(11) {
+	if p.Motion(11, 2, 3, 4) != TargetMotionRejected || p.Leave(11) || p.Drop(11) {
 		t.Fatal("stale target accepted callback")
 	}
 	if !p.Drop(10) {
 		t.Fatal("entered target rejected drop")
 	}
-	if p.Drop(10) || p.Leave(10) || p.Motion(10) {
+	if p.Drop(10) || p.Leave(10) || p.Motion(10, 2, 3, 4) != TargetMotionRejected {
 		t.Fatal("callback accepted after drop")
+	}
+}
+
+func TestTargetDragProtocolDeduplicatesActionInducedMotion(t *testing.T) {
+	p := NewTargetDragProtocol()
+	p.Enter(20)
+
+	if got := p.Motion(20, 100, 200, 7); got != TargetMotionDispatch {
+		t.Fatalf("first motion = %v, want dispatch", got)
+	}
+	if got := p.Motion(20, 100, 200, 7); got != TargetMotionDuplicate {
+		t.Fatalf("unchanged motion = %v, want duplicate", got)
+	}
+	if got := p.Motion(20, 101, 200, 7); got != TargetMotionDispatch {
+		t.Fatalf("changed x motion = %v, want dispatch", got)
+	}
+	if got := p.Motion(20, 101, 200, 8); got != TargetMotionDispatch {
+		t.Fatalf("changed modifiers motion = %v, want dispatch", got)
+	}
+}
+
+func TestTargetDragProtocolMotionDeduplicationResetsAcrossEntries(t *testing.T) {
+	p := NewTargetDragProtocol()
+	p.Enter(20)
+	if p.Motion(20, 100, 200, 7) != TargetMotionDispatch || !p.Leave(20) {
+		t.Fatal("first target lifecycle failed")
+	}
+	p.Enter(21)
+	if got := p.Motion(21, 100, 200, 7); got != TargetMotionDispatch {
+		t.Fatalf("first motion after re-enter = %v, want dispatch", got)
+	}
+	p.Detach()
+	if got := p.Motion(21, 101, 200, 7); got != TargetMotionRejected {
+		t.Fatalf("motion after detach = %v, want rejected", got)
 	}
 }
 
@@ -119,7 +153,7 @@ func TestTargetDragProtocolLeaveClosesOnlyMatchingEnter(t *testing.T) {
 	if !p.Leave(20) {
 		t.Fatal("matching leave rejected")
 	}
-	if p.Leave(20) || p.Motion(20) {
+	if p.Leave(20) || p.Motion(20, 1, 2, 3) != TargetMotionRejected {
 		t.Fatal("duplicate callback accepted after leave")
 	}
 }
