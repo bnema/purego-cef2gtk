@@ -278,8 +278,9 @@ func (ib *InputBridge) SetHost(host cef.BrowserHost) {
 	visible := ib.visible
 	deliverFocus := ib.focusKnown && !ib.focusDelivered
 	focused := ib.focused
-	if deliverFocus && focused && deliverVisibility && visible {
-		// Focus synchronization includes WasHidden(0), so it also delivers the
+	revealOnFocus := deliverFocus && focused && deliverVisibility && visible
+	if revealOnFocus {
+		// Focus synchronization can include WasHidden(0), so it also delivers the
 		// known visible state without issuing the same GTK observation twice.
 		deliverVisibility = false
 		ib.visibilityDelivered = true
@@ -297,7 +298,7 @@ func (ib *InputBridge) SetHost(host cef.BrowserHost) {
 	}
 	if deliverFocus {
 		if focused {
-			syncWindowlessBrowserFocus(host)
+			syncWindowlessBrowserFocus(host, revealOnFocus)
 		} else {
 			host.SetFocus(0)
 		}
@@ -452,6 +453,11 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 
 	widget.SetFocusable(true)
 	widget.SetCanFocus(true)
+	ib.syncWidgetVisibility(widget.GetMapped(), widget.GetVisible())
+}
+
+func (ib *InputBridge) syncWidgetVisibility(mapped, visible bool) {
+	ib.SetVisible(mapped && visible)
 }
 
 func (ib *InputBridge) addController(widget *gtk.Widget, controller *gtk.EventController, handlers []uint, callbacks ...any) {
@@ -548,7 +554,7 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 			}
 			return
 		}
-		if tracker == nil || !tracker.coordsValid || tracker.lastX == 0 && tracker.lastY == 0 {
+		if tracker == nil || !tracker.coordsValid {
 			ib.mu.Unlock()
 			return
 		}
@@ -576,6 +582,7 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 
 func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount int) {
 	ib.mu.Lock()
+	ib.lastX, ib.lastY = x, y
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.Press(x, y, button, mods)
 	}
@@ -597,6 +604,7 @@ func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount 
 
 func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCount int) {
 	ib.mu.Lock()
+	ib.lastX, ib.lastY = x, y
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.Release(x, y, button, mods)
 	}
@@ -851,11 +859,12 @@ func (ib *InputBridge) onFocusIn() {
 		return
 	}
 	ib.focusDelivered = true
-	if ib.visibilityKnown && ib.visible {
+	reveal := ib.visibilityKnown && ib.visible
+	if reveal {
 		ib.visibilityDelivered = true
 	}
 	ib.mu.Unlock()
-	syncWindowlessBrowserFocus(host)
+	syncWindowlessBrowserFocus(host, reveal)
 }
 
 func (ib *InputBridge) onFocusOut() {
@@ -908,11 +917,13 @@ func clipboardShortcutAction(keyval, mods uint) (string, bool) {
 	}
 }
 
-func syncWindowlessBrowserFocus(host cef.BrowserHost) {
+func syncWindowlessBrowserFocus(host cef.BrowserHost, reveal bool) {
 	if host == nil {
 		return
 	}
-	host.WasHidden(0)
+	if reveal {
+		host.WasHidden(0)
+	}
 	host.SetFocus(1)
 	host.Invalidate(cef.PaintElementTypePetView)
 }
