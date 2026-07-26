@@ -143,16 +143,18 @@ func (t *PointerTracker) ArmDnd() {
 	}
 }
 
-// DisarmDnd ends DnD suspension. An interaction canceled by the DnD grab is
+// DisarmDnd ends DnD suspension. The interaction owned by the DnD grab is
 // cleared silently because the native drag protocol owns its completion.
 func (t *PointerTracker) DisarmDnd() {
 	if t == nil {
 		return
 	}
-	t.dndArmed = false
-	if t.dndCanceled {
-		t.resetInteraction()
+	if !t.dndArmed {
+		t.dndCanceled = false
+		return
 	}
+	t.dndArmed = false
+	t.resetInteraction()
 }
 
 func (t *PointerTracker) abortState() PointerAbort {

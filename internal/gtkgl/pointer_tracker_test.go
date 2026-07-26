@@ -170,6 +170,68 @@ func runTrackerMotion(tracker *PointerTracker, x, y float64, state uint) {
 	}
 }
 
+func TestPointerTrackerDisarmDndRetiresOwnedInteractionSilently(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*PointerTracker)
+	}{
+		{
+			name: "pressed without GTK cancel",
+			setup: func(tracker *PointerTracker) {
+				tracker.Press(10, 20, 1, 0x01)
+				tracker.ArmDnd()
+			},
+		},
+		{
+			name: "dragging without GTK cancel",
+			setup: func(tracker *PointerTracker) {
+				tracker.Press(10, 20, 1, 0x01)
+				runTrackerMotion(tracker, 19, 20, 0x01)
+				tracker.ArmDnd()
+			},
+		},
+		{
+			name: "GTK cancel during native drag",
+			setup: func(tracker *PointerTracker) {
+				tracker.Press(10, 20, 1, 0x01)
+				tracker.ArmDnd()
+				tracker.Cancel()
+			},
+		},
+		{
+			name: "idle",
+			setup: func(tracker *PointerTracker) {
+				tracker.ArmDnd()
+			},
+		},
+		{
+			name: "repeated disarm",
+			setup: func(tracker *PointerTracker) {
+				tracker.Press(10, 20, 1, 0x01)
+				tracker.ArmDnd()
+				tracker.DisarmDnd()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aborts := 0
+			tracker := NewPointerTracker(8, nil, func(PointerAbort) { aborts++ })
+			tt.setup(tracker)
+
+			tracker.DisarmDnd()
+
+			if tracker.Phase() != PointerIdle || tracker.dndArmed || tracker.dndCanceled {
+				t.Fatalf("state after DisarmDnd = phase:%v armed:%v canceled:%v, want idle,false,false", tracker.Phase(), tracker.dndArmed, tracker.dndCanceled)
+			}
+			if aborts != 0 {
+				t.Fatalf("aborts after DisarmDnd = %d, want 0", aborts)
+			}
+		})
+	}
+}
+
 func TestPointerTrackerDndSuspendsCancelRecoveryUntilDisarmed(t *testing.T) {
 	aborts := 0
 	tracker := NewPointerTracker(8, nil, func(PointerAbort) { aborts++ })
