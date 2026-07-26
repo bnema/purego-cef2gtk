@@ -87,7 +87,7 @@ func parseTitledLink(data []byte) (InboundPayload, error) {
 		return InboundPayload{}, ErrMalformedPayload
 	}
 	value = strings.ReplaceAll(value, "\r\n", "\n")
-	parts := strings.SplitN(value, "\n", 2)
+	parts := strings.Split(value, "\n")
 	if len(parts) != 2 {
 		return InboundPayload{}, fmt.Errorf("%w: titled link has no title", ErrMalformedPayload)
 	}
@@ -144,10 +144,11 @@ func parseURIList(value string) (InboundPayload, error) {
 		}
 		switch strings.ToLower(u.Scheme) {
 		case "file":
-			if !strings.HasPrefix(strings.ToLower(line), "file://") || u.User != nil || u.Port() != "" || (u.Hostname() != "" && !strings.EqualFold(u.Hostname(), "localhost")) {
-				if u.Hostname() != "" && !strings.EqualFold(u.Hostname(), "localhost") {
-					return InboundPayload{}, fmt.Errorf("%w: %s", ErrRemoteFileURI, u.Hostname())
-				}
+			hostname := u.Hostname()
+			if hostname != "" && !strings.EqualFold(hostname, "localhost") {
+				return InboundPayload{}, fmt.Errorf("%w: %s", ErrRemoteFileURI, hostname)
+			}
+			if !strings.HasPrefix(strings.ToLower(line), "file://") || u.User != nil || u.Port() != "" {
 				return InboundPayload{}, fmt.Errorf("%w: invalid local file URI", ErrMalformedPayload)
 			}
 			if !filepath.IsAbs(u.Path) || strings.HasPrefix(u.Path, "//") || strings.IndexByte(u.Path, 0) >= 0 || u.RawQuery != "" || u.Fragment != "" {

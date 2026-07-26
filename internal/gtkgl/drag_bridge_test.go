@@ -107,9 +107,15 @@ type dragTestHost struct {
 }
 
 func (h *dragTestHost) DragSourceEndedAt(x, y int32, op cef.DragOperationsMask) {
+	h.mu.Lock()
 	h.ended = append(h.ended, SourceEnd{x, y, op})
+	h.mu.Unlock()
 }
-func (h *dragTestHost) DragSourceSystemDragEnded() { h.systems++ }
+func (h *dragTestHost) DragSourceSystemDragEnded() {
+	h.mu.Lock()
+	h.systems++
+	h.mu.Unlock()
+}
 func (h *dragTestHost) DragTargetDragEnter(cef.DragData, *cef.MouseEvent, cef.DragOperationsMask) {
 	h.mu.Lock()
 	h.target = append(h.target, "enter")
@@ -620,16 +626,16 @@ func TestDragBridgeCreatedDragDataOwnershipAcrossReplacementNilHostAndStaleDrop(
 		b := NewDragBridge(nil, nil, h)
 		var events []string
 		metadata := &bridgeFakeDragData{onRelease: func() { events = append(events, "release metadata") }}
-		real := &bridgeFakeDragData{onRelease: func() { events = append(events, "release real") }}
+		realData := &bridgeFakeDragData{onRelease: func() { events = append(events, "release real") }}
 		b.newMetadataData = func(gtkdnd.DragMetadata) cef.DragData { return metadata }
 		b.newDragData = func() cef.DragData {
 			events = append(events, "create real")
-			return real
+			return realData
 		}
 		data := b.targetEnterData([]string{"text/plain"}, true, "own text", "")
 		b.dispatchTargetEnter(data, &cef.MouseEvent{}, cef.DragOperationsMaskDragOperationCopy)
-		if metadata.releases != 1 || real.releases != 1 {
-			t.Fatalf("releases metadata=%d real=%d", metadata.releases, real.releases)
+		if metadata.releases != 1 || realData.releases != 1 {
+			t.Fatalf("releases metadata=%d real=%d", metadata.releases, realData.releases)
 		}
 		if want := []string{"release metadata", "create real", "release real"}; !reflect.DeepEqual(events, want) {
 			t.Fatalf("ownership order=%v, want %v", events, want)
@@ -1207,6 +1213,11 @@ func TestDragBridgeSchedulerRefusalReturnsZeroWithoutTakingCEFCompletion(t *test
 	}
 	if len(h.ended) != 0 || h.systems != 0 {
 		t.Fatalf("completion unexpectedly emitted: %v/%d", h.ended, h.systems)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sourceHost != nil || b.sourceText != "" || b.sourceLinkURL != "" {
+		t.Fatalf("scheduler refusal retained source state: host=%v text=%q link=%q", b.sourceHost != nil, b.sourceText, b.sourceLinkURL)
 	}
 }
 

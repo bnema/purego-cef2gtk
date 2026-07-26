@@ -195,7 +195,7 @@ func (p *TargetDragProtocol) Drop(token uintptr) bool {
 	return ok
 }
 
-func (p *TargetDragProtocol) matches(token uintptr, close bool) bool {
+func (p *TargetDragProtocol) matches(token uintptr, closeLifecycle bool) bool {
 	if p == nil || token == 0 {
 		return false
 	}
@@ -204,7 +204,7 @@ func (p *TargetDragProtocol) matches(token uintptr, close bool) bool {
 	if !p.state.entered || token != p.state.token {
 		return false
 	}
-	if close {
+	if closeLifecycle {
 		p.state.entered, p.state.token, p.state.contentReal, p.state.motionValid = false, 0, false, false
 	}
 	return true

@@ -24,8 +24,10 @@ type releasableAsyncSource interface {
 
 const dndTraceEnvVar = "PUREGO_CEF2GTK_TRACE_DND"
 
+var dndTraceEnabled = os.Getenv(dndTraceEnvVar) == "1"
+
 func traceDND(format string, args ...any) {
-	if os.Getenv(dndTraceEnvVar) == "1" {
+	if dndTraceEnabled {
 		_, _ = fmt.Fprintf(os.Stderr, "purego-cef2gtk dnd: "+format+"\n", args...)
 	}
 }

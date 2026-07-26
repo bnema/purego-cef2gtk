@@ -92,6 +92,8 @@ func TestMalformedPayloadsAndRemoteFileURIsAreRejected(t *testing.T) {
 		{name: "invalid UTF-8", mime: "text/plain", data: []byte{0xff}, want: ErrMalformedPayload},
 		{name: "unsupported charset", mime: "text/plain;charset=iso-8859-1", data: []byte("text"), want: ErrMalformedPayload},
 		{name: "titled link missing title", mime: "text/x-moz-url", data: []byte("https://example.test"), want: ErrMalformedPayload},
+		{name: "titled link extra title line", mime: "text/x-moz-url", data: []byte("https://example.test\nFirst title\nSecond title"), want: ErrMalformedPayload},
+		{name: "multiple HTTP links", mime: "text/uri-list", data: []byte("https://example.test/one\nhttps://example.test/two"), want: ErrMalformedPayload},
 		{name: "odd UTF-16", mime: "text/x-moz-url", data: []byte{0xff, 0xfe, 0x01}, want: ErrMalformedPayload},
 	}
 	for _, tt := range tests {

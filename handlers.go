@@ -274,22 +274,20 @@ func (h *renderHandler) StartDragging(browser cef.Browser, data cef.DragData, al
 		return 0
 	}
 	h.view.dragMu.RLock()
-	drag := h.view.drag
-	h.view.dragMu.RUnlock()
-	if drag == nil {
+	defer h.view.dragMu.RUnlock()
+	if h.view.drag == nil {
 		return 0
 	}
-	return drag.Start(browser, data, allowed, x, y)
+	return h.view.drag.Start(browser, data, allowed, x, y)
 }
 func (h *renderHandler) UpdateDragCursor(_ cef.Browser, operation cef.DragOperationsMask) {
 	if h == nil || h.view == nil {
 		return
 	}
 	h.view.dragMu.RLock()
-	drag := h.view.drag
-	h.view.dragMu.RUnlock()
-	if drag != nil {
-		drag.UpdateCursor(operation)
+	defer h.view.dragMu.RUnlock()
+	if h.view.drag != nil {
+		h.view.drag.UpdateCursor(operation)
 	}
 }
 func (h *renderHandler) OnScrollOffsetChanged(cef.Browser, float64, float64)              {}

@@ -118,7 +118,7 @@ func (*boundedDragFileWriter) Flush() int32    { return 0 }
 func (*boundedDragFileWriter) MayBlock() int32 { return 0 }
 
 func draggedImageMIME(name string, content []byte) string {
-	if name == "" || name == "." || name == ".." || strings.IndexByte(name, 0) >= 0 || strings.ContainsAny(name, `/\\`) || filepath.Base(name) != name {
+	if name == "" || name == "." || name == ".." || strings.IndexByte(name, 0) >= 0 || strings.ContainsAny(name, "/\\") || filepath.Base(name) != name {
 		return ""
 	}
 	ext := strings.ToLower(filepath.Ext(name))
@@ -266,6 +266,7 @@ func (b *DragBridge) Start(browser cef.Browser, data cef.DragData, offered cef.D
 	})
 	if id == 0 {
 		b.protocol.RejectStart(gen)
+		b.cleanupSource()
 		return 0
 	}
 	return 1

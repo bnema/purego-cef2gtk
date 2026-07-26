@@ -90,14 +90,21 @@
     <pre id="event-log" aria-live="polite"></pre>
   </section>
 
-  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js" integrity="sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU" crossorigin="anonymous"></script>
   <script>
     const eventLog = document.querySelector('#event-log');
+    const maxLogEntries = 250;
+    const logEntries = [];
     const log = (action, details = '') => {
       const line = `${new Date().toISOString()} action=${action}${details ? ` ${details}` : ''}`;
-      eventLog.textContent = `${line}\n${eventLog.textContent}`;
+      logEntries.unshift(line);
+      if (logEntries.length > maxLogEntries) logEntries.length = maxLogEntries;
+      eventLog.textContent = logEntries.join('\n');
     };
-    document.querySelector('#clear-log').addEventListener('click', () => { eventLog.textContent = ''; });
+    document.querySelector('#clear-log').addEventListener('click', () => {
+      logEntries.length = 0;
+      eventLog.textContent = '';
+    });
 
     const nativeSlider = document.querySelector('#native-slider');
     const nativeValue = document.querySelector('#native-value');
@@ -127,10 +134,20 @@
     customSlider.addEventListener('pointermove', (event) => {
       if (customSlider.hasPointerCapture(event.pointerId)) updateCustomFromPointer(event);
     });
+    const releaseCustomPointerCapture = (pointerId) => {
+      if (customSlider.hasPointerCapture(pointerId)) customSlider.releasePointerCapture(pointerId);
+    };
     customSlider.addEventListener('pointerup', (event) => {
       updateCustomFromPointer(event);
-      customSlider.releasePointerCapture(event.pointerId);
-      log('custom-slider-pointerup', `value=${customSlider.getAttribute('aria-valuenow')}`);
+      releaseCustomPointerCapture(event.pointerId);
+      log('custom-slider-pointerup', `pointerId=${event.pointerId} value=${customSlider.getAttribute('aria-valuenow')}`);
+    });
+    customSlider.addEventListener('pointercancel', (event) => {
+      releaseCustomPointerCapture(event.pointerId);
+      log('custom-slider-pointercancel', `pointerId=${event.pointerId}`);
+    });
+    customSlider.addEventListener('lostpointercapture', (event) => {
+      log('custom-slider-lostpointercapture', `pointerId=${event.pointerId}`);
     });
     customSlider.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
@@ -172,7 +189,7 @@
     const dropZone = document.querySelector('#file-drop-zone');
     ['dragenter', 'dragover'].forEach((action) => dropZone.addEventListener(action, (event) => {
       event.preventDefault();
-      event.dataTransfer.dropEffect = 'copy';
+      event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy';
       dropZone.classList.add('active');
       log(action, `formats=${Array.from(event.dataTransfer.types).join(',')} effectAllowed=${event.dataTransfer.effectAllowed} dropEffect=${event.dataTransfer.dropEffect}`);
     }));
@@ -182,7 +199,6 @@
     });
     dropZone.addEventListener('drop', (event) => {
       event.preventDefault();
-      event.dataTransfer.dropEffect = 'copy';
       dropZone.classList.remove('active');
       const formats = Array.from(event.dataTransfer.types).join(',');
       const files = Array.from(event.dataTransfer.files).map((file) => `${file.name}(${file.size}B)`).join(',');

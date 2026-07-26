@@ -112,8 +112,9 @@ func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
 			names = formats.GetMimeTypes(&count)
 		}
 		n := NegotiateDragActions(GDKToCEFDragActions(drop.GetActions()), cef.DragOperationsMaskDragOperationEvery)
+		proposed := b.preferredAction(n)
 		e := b.dragMouseEvent(drop, x, y)
-		traceDND("external-drop advertised=%q offered=%d allowed=%d deterministic_preferred=%d selected_preferred=%d", names, n.Offered, n.Allowed, n.Preferred, b.preferredAction(n))
+		traceDND("external-drop advertised=%q offered=%d allowed=%d deterministic_preferred=%d selected_preferred=%d", names, n.Offered, n.Allowed, n.Preferred, proposed)
 		b.retainDrop(drop)
 		source := b.newDropSource(drop)
 		if source == nil {
@@ -122,7 +123,7 @@ func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
 			b.releaseDrop(drop)
 			return true
 		}
-		b.beginExternalDrop(plan, names, source, e, b.preferredAction(n), func(action gdk.DragAction) {
+		b.beginExternalDrop(plan, names, source, e, proposed, func(action gdk.DragAction) {
 			drop.Finish(action)
 			b.releaseDrop(drop)
 		})

@@ -303,10 +303,9 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 	}
 	v.input.SetHost(host)
 	v.dragMu.RLock()
-	drag := v.drag
-	v.dragMu.RUnlock()
-	if drag != nil {
-		drag.SetHost(host)
+	defer v.dragMu.RUnlock()
+	if v.drag != nil {
+		v.drag.SetHost(host)
 	}
 	return nil
 }

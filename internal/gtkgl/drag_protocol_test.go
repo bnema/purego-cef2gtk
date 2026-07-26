@@ -2,6 +2,7 @@ package gtkgl
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/puregotk/v4/gdk"
@@ -73,6 +74,83 @@ func TestDragProtocolGenerationAndIdempotentClosure(t *testing.T) {
 	}
 	if r.ended[0].X != -1 || r.ended[0].Y != -1 || r.ended[0].Operation != cef.DragOperationsMaskDragOperationMove {
 		t.Fatalf("end=%+v", r.ended[0])
+	}
+}
+
+func TestDragProtocolRejectStartOnlyResetsMatchingStartingGeneration(t *testing.T) {
+	var nilProtocol *DragProtocol
+	nilProtocol.RejectStart(1)
+
+	p := NewDragProtocol(nil, nil, nil)
+	gen, ok := p.Begin()
+	if !ok {
+		t.Fatal("begin rejected")
+	}
+	p.RejectStart(gen + 1)
+	if !p.IsStarting(gen) {
+		t.Fatal("mismatched generation reset starting state")
+	}
+	p.RejectStart(gen)
+	if current, active := p.CurrentGeneration(); current != gen || active {
+		t.Fatalf("matching rejection generation=%d active=%v", current, active)
+	}
+	next, ok := p.Begin()
+	if !ok || next != gen+1 {
+		t.Fatalf("begin after rejection generation=%d ok=%v", next, ok)
+	}
+	if !p.Activate(next) {
+		t.Fatal("activation rejected")
+	}
+	p.RejectStart(next)
+	if current, active := p.CurrentGeneration(); current != next || !active {
+		t.Fatalf("active generation changed by rejection: generation=%d active=%v", current, active)
+	}
+}
+
+func TestDragProtocolCurrentGenerationReportsNilIdleStartingAndActiveStates(t *testing.T) {
+	var nilProtocol *DragProtocol
+	if gen, active := nilProtocol.CurrentGeneration(); gen != 0 || active {
+		t.Fatalf("nil protocol generation=%d active=%v", gen, active)
+	}
+
+	p := NewDragProtocol(nil, nil, nil)
+	if gen, active := p.CurrentGeneration(); gen != 0 || active {
+		t.Fatalf("idle protocol generation=%d active=%v", gen, active)
+	}
+	gen, _ := p.Begin()
+	if current, active := p.CurrentGeneration(); current != gen || !active {
+		t.Fatalf("starting protocol generation=%d active=%v", current, active)
+	}
+	p.Activate(gen)
+	if current, active := p.CurrentGeneration(); current != gen || !active {
+		t.Fatalf("active protocol generation=%d active=%v", current, active)
+	}
+	p.Finish(gen, SourceFinish{})
+	if current, active := p.CurrentGeneration(); current != gen || active {
+		t.Fatalf("finished protocol generation=%d active=%v", current, active)
+	}
+}
+
+func TestDragProtocolIsStartingRequiresMatchingStartingGeneration(t *testing.T) {
+	var nilProtocol *DragProtocol
+	if nilProtocol.IsStarting(1) {
+		t.Fatal("nil protocol reported starting")
+	}
+
+	p := NewDragProtocol(nil, nil, nil)
+	if p.IsStarting(0) {
+		t.Fatal("idle protocol reported starting")
+	}
+	gen, _ := p.Begin()
+	if !p.IsStarting(gen) {
+		t.Fatal("matching generation not reported starting")
+	}
+	if p.IsStarting(gen + 1) {
+		t.Fatal("mismatched generation reported starting")
+	}
+	p.Activate(gen)
+	if p.IsStarting(gen) {
+		t.Fatal("active generation reported starting")
 	}
 }
 
@@ -175,20 +253,42 @@ func TestTargetDragProtocolDispatchBlocksLaterGenerationUntilOldCallbackReturns(
 	go func() {
 		dispatchDone <- p.DispatchDrop(plan.Generation, func(TargetDropPlan) {
 			close(enteredDispatch)
-			<-releaseDispatch
+			select {
+			case <-releaseDispatch:
+			case <-time.After(time.Second):
+				t.Error("timed out waiting to release old content dispatch")
+			}
 		})
 	}()
-	<-enteredDispatch
+	select {
+	case <-enteredDispatch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for old content dispatch")
+	}
 	newEnter := make(chan uint64, 1)
 	go func() { newEnter <- p.Enter(36) }()
 	select {
 	case <-newEnter:
 		t.Fatal("later generation entered during old content dispatch")
-	default:
+	case <-time.After(50 * time.Millisecond):
+		// The later generation remains blocked while the old callback runs.
 	}
 	close(releaseDispatch)
-	if !<-dispatchDone || <-newEnter == 0 {
-		t.Fatal("dispatch or later enter failed")
+	select {
+	case ok := <-dispatchDone:
+		if !ok {
+			t.Fatal("old content dispatch failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for old content dispatch to return")
+	}
+	select {
+	case generation := <-newEnter:
+		if generation == 0 {
+			t.Fatal("later enter failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for later generation to enter")
 	}
 }
 
