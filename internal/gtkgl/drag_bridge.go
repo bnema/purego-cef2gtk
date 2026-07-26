@@ -272,6 +272,7 @@ func (b *DragBridge) clearActiveDrop(token uintptr) {
 		return
 	}
 	b.activeDrop, b.activeAllowed = nil, 0
+	b.selectedAction, b.selectedKnown = 0, false
 	b.dropGeneration++
 	b.statusPending = false
 	b.mu.Unlock()

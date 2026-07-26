@@ -27,7 +27,7 @@ func OutboundFormats(payload OutboundPayload) []OutboundFormat {
 		formats = append(formats, OutboundFormat{MIME: "text/uri-list", Value: uriList})
 	} else if link := outboundHTTPURL(payload.LinkURL); link != "" {
 		formats = append(formats, OutboundFormat{MIME: "text/uri-list", Value: []byte(link + "\r\n")})
-		if payload.LinkTitle != "" && strings.IndexByte(payload.LinkTitle, 0) < 0 {
+		if payload.LinkTitle != "" && !strings.ContainsAny(payload.LinkTitle, "\x00\r\n") {
 			formats = append(formats, OutboundFormat{MIME: "text/x-moz-url", Value: encodeMozURL(link + "\n" + payload.LinkTitle)})
 		}
 	} else if link := outboundLocalFileURL(payload.LinkURL); link != "" {

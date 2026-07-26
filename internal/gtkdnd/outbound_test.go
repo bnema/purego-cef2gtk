@@ -135,6 +135,15 @@ func TestOutboundFormatsSerializesTitledHTTPLinkWithoutFiles(t *testing.T) {
 	}
 }
 
+func TestOutboundFormatsOmitsMozURLForLineDelimitedTitle(t *testing.T) {
+	for _, title := range []string{"line one\nline two", "line one\rline two"} {
+		got := OutboundFormats(OutboundPayload{LinkURL: "https://example.test/article", LinkTitle: title})
+		if len(got) != 1 || got[0].MIME != "text/uri-list" {
+			t.Fatalf("title %q formats = %#v, want only text/uri-list", title, got)
+		}
+	}
+}
+
 func TestOutboundFormatsIncludesExactImageContentUnderDeclaredMIME(t *testing.T) {
 	image := []byte{0xff, 0xd8, 0xff, 0xe0, 's', 'o', 'u', 'r', 'c', 'e'}
 	got := OutboundFormats(OutboundPayload{ImageMIME: "image/jpeg", ImageBytes: image})

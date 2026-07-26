@@ -370,19 +370,16 @@ func (p *DragProtocol) Detach() {
 		return
 	}
 	p.mu.Lock()
-	gen, active := p.generation, p.state != dragIdle
-	p.generation++
+	detachedGen, active := p.generation, p.state != dragIdle
 	p.mu.Unlock()
 	if active {
-		// Finish the invalidated operation under its old generation through a
-		// dedicated closure path because normal stale callbacks are rejected.
-		p.finishDetached(gen)
+		p.finishDetached(detachedGen)
 	}
 }
 
 func (p *DragProtocol) finishDetached(oldGen uint64) {
 	p.mu.Lock()
-	if p.state == dragIdle {
+	if p.generation != oldGen || p.state == dragIdle {
 		p.mu.Unlock()
 		return
 	}
@@ -398,5 +395,4 @@ func (p *DragProtocol) finishDetached(oldGen uint64) {
 	if disarm != nil {
 		disarm()
 	}
-	_ = oldGen
 }

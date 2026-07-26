@@ -22,6 +22,8 @@ type nativeDropSource struct {
 	openCallback     *gio.AsyncReadyCallback
 	readCallback     *gio.AsyncReadyCallback
 	unrefCallback    func(any) error
+	readFinish       func(gio.AsyncResult, *string) (*gio.InputStream, error)
+	readAsync        func([]string, *gio.Cancellable, *gio.AsyncReadyCallback)
 	pending          int
 	releaseRequested bool
 	released         bool
@@ -47,7 +49,15 @@ func newNativeDropSource(drop *gdk.Drop) releasableAsyncSource {
 	// The source keeps a separate reference because the bridge may finish and
 	// release its operation reference before a cancellation callback arrives.
 	drop.Ref()
-	return &nativeDropSource{drop: drop, cancellable: cancellable, unrefCallback: glib.UnrefCallback}
+	return &nativeDropSource{
+		drop:          drop,
+		cancellable:   cancellable,
+		unrefCallback: glib.UnrefCallback,
+		readFinish:    drop.ReadFinish,
+		readAsync: func(mimes []string, cancellable *gio.Cancellable, callback *gio.AsyncReadyCallback) {
+			drop.ReadAsync(mimes, 0, cancellable, callback, 0)
+		},
+	}
 }
 
 func (s *nativeDropSource) OpenAsync(mime string, done func(gtkdnd.AsyncStream, string, error)) {
@@ -60,7 +70,7 @@ func (s *nativeDropSource) OpenAsync(mime string, done func(gtkdnd.AsyncStream, 
 	s.pending++
 	callback := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
 		var actual string
-		stream, err := s.drop.ReadFinish(&gio.AsyncResultBase{Ptr: resultPtr}, &actual)
+		stream, err := s.readFinish(&gio.AsyncResultBase{Ptr: resultPtr}, &actual)
 		actual = resolvedDropMIME(mime, actual, stream, err)
 		traceDND("read-open requested_mime=%q actual_mime=%q stream=%t error=%v", mime, actual, stream != nil, err)
 		s.mu.Lock()
@@ -73,12 +83,16 @@ func (s *nativeDropSource) OpenAsync(mime string, done func(gtkdnd.AsyncStream, 
 		}
 		s.mu.Unlock()
 		s.callbackDone(true)
+		if stream == nil {
+			done(nil, actual, err)
+			return
+		}
 		done(&nativeDropStream{source: s}, actual, err)
 	})
 	s.openCallback = &callback
 	cancellable := s.cancellable
 	s.mu.Unlock()
-	s.drop.ReadAsync([]string{mime}, 0, cancellable, &callback, 0)
+	s.readAsync([]string{mime}, cancellable, &callback)
 }
 
 func (s *nativeDropSource) Cancel() {
@@ -164,6 +178,7 @@ func (s *nativeDropStream) ReadAsync(maxBytes int, done func([]byte, error)) {
 			size := bytes.GetSize()
 			ptr := bytes.GetData(&size)
 			if size != 0 && ptr != 0 {
+				// Copy immediately: the pointer is borrowed only until GBytes is unreffed below.
 				raw := *(*unsafe.Pointer)(unsafe.Pointer(&ptr))
 				chunk = append([]byte(nil), unsafe.Slice((*byte)(raw), int(size))...)
 			}

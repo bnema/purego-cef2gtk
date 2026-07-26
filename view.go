@@ -62,8 +62,10 @@ type View struct {
 	renderer                    renderer
 	signalObject                *gobject.Object
 	input                       *gtkgl.InputBridge
+	attachInputToWidget         func(*gtkgl.InputBridge, *gtk.Widget)
 	dragMu                      sync.RWMutex
 	drag                        *gtkgl.DragBridge
+	attachDrag                  func(*gtkgl.DragBridge) bool
 	inputWidget                 *gtk.Widget
 	diag                        *diagnosticsRecorder
 	destroyed                   atomic.Bool

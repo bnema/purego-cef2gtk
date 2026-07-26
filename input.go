@@ -177,12 +177,21 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
 	v.input.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
-	v.input.AttachToWidget(targetWidget)
+	if v.attachInputToWidget != nil {
+		v.attachInputToWidget(v.input, targetWidget)
+	} else {
+		v.input.AttachToWidget(targetWidget)
+	}
 	drag := gtkgl.NewDragBridge(targetWidget, v.input, host)
 	drag.SetFileDropHandler(viewFileDropPolicy(v))
-	if !drag.Attach() {
-		v.input.Detach()
-		v.input = nil
+	attached := false
+	if v.attachDrag != nil {
+		attached = v.attachDrag(drag)
+	} else {
+		attached = drag.Attach()
+	}
+	if !attached {
+		v.cleanupInputAttachment()
 		return errors.New("failed to attach GTK drag target")
 	}
 	v.dragMu.Lock()
@@ -271,6 +280,15 @@ func toGTKGLNavigationSwipeHandler(fn func(NavigationSwipeAction)) func(gtkgl.Na
 	}
 }
 
+func (v *View) cleanupInputAttachment() {
+	if v.input != nil {
+		v.input.Detach()
+		v.input = nil
+	}
+	v.inputWidget = nil
+	v.setInputScaleOverride(0)
+}
+
 // DetachInput removes input controllers attached by AttachInput.
 func (v *View) DetachInput() error {
 	if v == nil {
@@ -282,12 +300,7 @@ func (v *View) DetachInput() error {
 		v.drag = nil
 	}
 	v.dragMu.Unlock()
-	if v.input != nil {
-		v.input.Detach()
-		v.input = nil
-	}
-	v.inputWidget = nil
-	v.setInputScaleOverride(0)
+	v.cleanupInputAttachment()
 	return nil
 }
 

@@ -328,6 +328,44 @@ func TestDeviceToLogicalCoordinate(t *testing.T) {
 	}
 }
 
+func TestDragProtocolDetachFinishesCapturedGenerationWithoutIncrement(t *testing.T) {
+	r := &protocolRecorder{}
+	p := NewDragProtocol(r.endedAt, func() { r.systems++ }, func() { r.disarms++ })
+	gen, ok := p.Begin()
+	if !ok {
+		t.Fatal("Begin rejected")
+	}
+	if !p.Activate(gen) {
+		t.Fatal("activation rejected")
+	}
+
+	p.Detach()
+
+	if current, active := p.CurrentGeneration(); current != gen || active {
+		t.Fatalf("generation after Detach=%d active=%v, want captured generation %d idle", current, active, gen)
+	}
+	if len(r.ended) != 1 || r.systems != 1 || r.disarms != 1 {
+		t.Fatalf("ended=%v systems=%d disarms=%d", r.ended, r.systems, r.disarms)
+	}
+}
+
+func TestDragProtocolStaleDetachedCleanupPreservesNewBegin(t *testing.T) {
+	p := NewDragProtocol(nil, nil, nil)
+	oldGen, _ := p.Begin()
+	p.Activate(oldGen)
+	p.Finish(oldGen, SourceFinish{})
+
+	newGen, ok := p.Begin()
+	if !ok {
+		t.Fatal("new Begin rejected")
+	}
+	p.finishDetached(oldGen)
+
+	if !p.IsStarting(newGen) {
+		t.Fatal("stale detached cleanup cleared new generation")
+	}
+}
+
 func TestDragProtocolCancelAndDetachUseNone(t *testing.T) {
 	r := &protocolRecorder{}
 	p := NewDragProtocol(r.endedAt, func() { r.systems++ }, nil)

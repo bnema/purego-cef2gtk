@@ -87,6 +87,7 @@ func parseTitledLink(data []byte) (InboundPayload, error) {
 		return InboundPayload{}, ErrMalformedPayload
 	}
 	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.TrimSuffix(value, "\n")
 	parts := strings.Split(value, "\n")
 	if len(parts) != 2 {
 		return InboundPayload{}, fmt.Errorf("%w: titled link has no title", ErrMalformedPayload)

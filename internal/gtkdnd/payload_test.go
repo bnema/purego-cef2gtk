@@ -66,6 +66,31 @@ func TestTitledLinkPayloadMapsURLAndTitleToCEFDragData(t *testing.T) {
 	}
 }
 
+func TestTitledLinkAllowsOneOptionalTrailingNewlineOnly(t *testing.T) {
+	for _, value := range []string{
+		"https://example.test/article\nReadable title\n",
+		"https://example.test/article\r\nReadable title\r\n",
+	} {
+		payload, err := ParseInboundPayload("text/x-moz-url", utf16LE(value))
+		if err != nil {
+			t.Fatalf("ParseInboundPayload(%q) error = %v", value, err)
+		}
+		if payload.LinkURL != "https://example.test/article" || payload.LinkTitle != "Readable title" {
+			t.Fatalf("payload = %#v", payload)
+		}
+	}
+
+	for _, value := range []string{
+		"https://example.test/article\n",
+		"https://example.test/article\nReadable title\n\n",
+		"https://example.test/article\nReadable title\nextra",
+	} {
+		if _, err := ParseInboundPayload("text/x-moz-url", utf16LE(value)); !errors.Is(err, ErrMalformedPayload) {
+			t.Fatalf("ParseInboundPayload(%q) error = %v, want malformed", value, err)
+		}
+	}
+}
+
 func utf16LE(value string) []byte {
 	units := utf16.Encode([]rune(value))
 	data := make([]byte, 2+len(units)*2)

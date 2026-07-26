@@ -3,6 +3,7 @@ package gtkgl
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -745,6 +746,42 @@ func TestResolvedDropMIMEFallsBackOnlyForSuccessfulSingleMIMERead(t *testing.T) 
 	}
 }
 
+func TestNativeDropSourceNilStreamPreservesErrorAndCleanup(t *testing.T) {
+	readErr := errors.New("read finish")
+	for _, wantErr := range []error{nil, readErr} {
+		t.Run(fmt.Sprint(wantErr), func(t *testing.T) {
+			callbackReleases := 0
+			source := &nativeDropSource{
+				drop: &gdk.Drop{},
+				unrefCallback: func(any) error {
+					callbackReleases++
+					return nil
+				},
+				readFinish: func(_ gio.AsyncResult, actual *string) (*gio.InputStream, error) {
+					*actual = "text/plain"
+					return nil, wantErr
+				},
+				readAsync: func(_ []string, _ *gio.Cancellable, callback *gio.AsyncReadyCallback) {
+					(*callback)(0, 1, 0)
+				},
+			}
+			reader := gtkdnd.NewAsyncReader(gtkdnd.ReadLimits{SupportedMIMEs: []string{"text/plain"}})
+			var result gtkdnd.ReadResult
+			reader.Read([]string{"text/plain"}, source, func(got gtkdnd.ReadResult) { result = got })
+			expected := wantErr
+			if expected == nil {
+				expected = gtkdnd.ErrNilStream
+			}
+			if !errors.Is(result.Err, expected) {
+				t.Fatalf("read error = %v, want %v", result.Err, expected)
+			}
+			if callbackReleases != 1 || source.pending != 0 {
+				t.Fatalf("callback releases=%d pending=%d", callbackReleases, source.pending)
+			}
+		})
+	}
+}
+
 func TestNativeDropSourceReleasesEveryAsyncCallbackSlot(t *testing.T) {
 	source := &nativeDropSource{}
 	released := 0
@@ -1189,6 +1226,20 @@ func TestDragBridgeUpdateCursorConcurrentLatestWins(t *testing.T) {
 	queued[0]()
 	if len(preferred) != 1 || preferred[0] != gdk.ActionCopyValue {
 		t.Fatalf("preferred updates=%v, want only latest Copy", preferred)
+	}
+}
+
+func TestDragBridgeClearActiveDropDoesNotReusePriorSelection(t *testing.T) {
+	b := NewDragBridge(nil, nil, nil)
+	b.UpdateCursor(cef.DragOperationsMaskDragOperationMove)
+	b.clearActiveDrop(0)
+
+	n := NegotiateDragActions(
+		cef.DragOperationsMaskDragOperationCopy|cef.DragOperationsMaskDragOperationMove,
+		cef.DragOperationsMaskDragOperationEvery,
+	)
+	if got := b.preferredAction(n); got != cef.DragOperationsMaskDragOperationCopy {
+		t.Fatalf("next drag preferred action=%d, want fresh negotiation Copy", got)
 	}
 }
 

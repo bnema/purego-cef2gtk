@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/gtk"
 )
 
 func TestViewFileDropPolicyTracksHookReplacement(t *testing.T) {
@@ -87,6 +88,58 @@ func TestInputScaleOverrideRemainsStickyAcrossObservedScaleChanges(t *testing.T)
 	v.setInputScaleOverride(math.Inf(1))
 	if got := v.inputScaleForObservedScale(1.25); got != 1.25 {
 		t.Fatalf("input scale after infinite override = %v, want auto 1.25", got)
+	}
+}
+
+func TestAttachInputToWidgetFailureCleansPriorAttachmentAndScaleOverride(t *testing.T) {
+	setOSRBackingScaleEnv(t, "auto")
+	widget := &gtk.Widget{}
+	v := &View{
+		widget:      widget,
+		input:       gtkgl.NewInputBridge(nil, 2),
+		inputWidget: &gtk.Widget{},
+		attachInputToWidget: func(*gtkgl.InputBridge, *gtk.Widget) {
+			// Avoid native GTK setup; this test exercises the View attachment lifecycle.
+		},
+		attachDrag: func(*gtkgl.DragBridge) bool { return false },
+	}
+	v.storeObservedScale(1.25)
+	v.setInputScaleOverride(3)
+
+	err := v.AttachInputToWidget(nil, widget, InputOptions{Scale: 2})
+	if err == nil || err.Error() != "failed to attach GTK drag target" {
+		t.Fatalf("AttachInputToWidget error=%v, want drag target attach error", err)
+	}
+	if v.input != nil || v.inputWidget != nil {
+		t.Fatalf("failed attachment retained input=%v widget=%v", v.input != nil, v.inputWidget != nil)
+	}
+	if got := v.inputScaleForObservedScale(1.25); got != 1.25 {
+		t.Fatalf("observed scale after failed attachment=%v, want 1.25", got)
+	}
+	if err := v.DetachInput(); err != nil {
+		t.Fatalf("DetachInput after failed attachment: %v", err)
+	}
+	if err := v.DetachInput(); err != nil {
+		t.Fatalf("second DetachInput after failed attachment: %v", err)
+	}
+}
+
+func TestDetachInputClearsWidgetAndScaleOverride(t *testing.T) {
+	setOSRBackingScaleEnv(t, "auto")
+	v := &View{
+		input:       gtkgl.NewInputBridge(nil, 2),
+		inputWidget: &gtk.Widget{},
+	}
+	v.setInputScaleOverride(2)
+
+	if err := v.DetachInput(); err != nil {
+		t.Fatal(err)
+	}
+	if v.input != nil || v.inputWidget != nil {
+		t.Fatalf("attachment retained input=%v widget=%v", v.input != nil, v.inputWidget != nil)
+	}
+	if got := v.inputScaleForObservedScale(1.25); got != 1.25 {
+		t.Fatalf("observed scale after detach=%v, want 1.25", got)
 	}
 }
 
