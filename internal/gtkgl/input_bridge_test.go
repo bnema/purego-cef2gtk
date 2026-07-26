@@ -17,6 +17,7 @@ type recordingBrowserHost struct {
 	hiddenStates  []int32
 	focusStates   []int32
 	invalidations []cef.PaintElementType
+	wheels        []cef.MouseEvent
 }
 
 type recordedMouseMove struct {
@@ -41,6 +42,10 @@ func (h *recordingBrowserHost) SendMouseClickEvent(event *cef.MouseEvent, button
 
 func (h *recordingBrowserHost) SendCaptureLostEvent() {
 	h.captureLosts++
+}
+
+func (h *recordingBrowserHost) SendMouseWheelEvent(event *cef.MouseEvent, _, _ int32) {
+	h.wheels = append(h.wheels, *event)
 }
 
 func (h *recordingBrowserHost) WasHidden(hidden int32) {
@@ -93,7 +98,7 @@ func TestInputBridgeAlreadyFocusedLeftMouseDownDoesNotResynchronizeBrowser(t *te
 	}
 }
 
-func TestInputBridgeSynchronizesBrowserOnlyOnFocusTransitions(t *testing.T) {
+func TestInputBridgeFocusWithUnknownVisibilityDoesNotUnhideBrowser(t *testing.T) {
 	host := &recordingBrowserHost{}
 	ib := NewInputBridge(host, 1)
 
@@ -102,14 +107,81 @@ func TestInputBridgeSynchronizesBrowserOnlyOnFocusTransitions(t *testing.T) {
 	ib.onFocusOut()
 	ib.onFocusOut()
 
-	if len(host.hiddenStates) != 1 || host.hiddenStates[0] != 0 {
-		t.Fatalf("focus transition hidden states = %v, want [0]", host.hiddenStates)
+	if len(host.hiddenStates) != 0 {
+		t.Fatalf("focus transition hidden states = %v, want none while visibility is unknown", host.hiddenStates)
 	}
 	if len(host.focusStates) != 2 || host.focusStates[0] != 1 || host.focusStates[1] != 0 {
 		t.Fatalf("focus transition states = %v, want [1 0]", host.focusStates)
 	}
 	if len(host.invalidations) != 1 || host.invalidations[0] != cef.PaintElementTypePetView {
 		t.Fatalf("focus transition invalidations = %v, want one view invalidation", host.invalidations)
+	}
+}
+
+func TestInputBridgeFocusPreservesKnownHiddenVisibility(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.SetVisible(false)
+
+	ib.onFocusIn()
+
+	if len(host.hiddenStates) != 1 || host.hiddenStates[0] != 1 {
+		t.Fatalf("hidden focus states = %v, want [1]", host.hiddenStates)
+	}
+	if len(host.focusStates) != 1 || host.focusStates[0] != 1 || len(host.invalidations) != 1 {
+		t.Fatalf("hidden focus delivery = %v/%v, want focus-in and invalidation", host.focusStates, host.invalidations)
+	}
+}
+
+func TestInputBridgeFocusCombinesKnownUndeliveredVisibleState(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	ib.SetVisible(true)
+	ib.onFocusIn()
+	host := &recordingBrowserHost{}
+
+	ib.SetHost(host)
+
+	if len(host.hiddenStates) != 1 || host.hiddenStates[0] != 0 {
+		t.Fatalf("visible focus hidden states = %v, want [0]", host.hiddenStates)
+	}
+	if len(host.focusStates) != 1 || host.focusStates[0] != 1 || len(host.invalidations) != 1 {
+		t.Fatalf("visible focus delivery = %v/%v, want focus-in and invalidation", host.focusStates, host.invalidations)
+	}
+}
+
+func TestInputBridgeSynchronizesVisibilityOnReattachment(t *testing.T) {
+	firstHost := &recordingBrowserHost{}
+	first := NewInputBridge(firstHost, 1)
+	first.syncWidgetVisibility(false, true)
+	first.Detach()
+
+	replacementHost := &recordingBrowserHost{}
+	replacement := NewInputBridge(replacementHost, 1)
+	replacement.syncWidgetVisibility(true, true)
+
+	if len(firstHost.hiddenStates) != 1 || firstHost.hiddenStates[0] != 1 {
+		t.Fatalf("first attachment visibility = %v, want [1]", firstHost.hiddenStates)
+	}
+	if len(replacementHost.hiddenStates) != 1 || replacementHost.hiddenStates[0] != 0 {
+		t.Fatalf("replacement attachment visibility = %v, want [0]", replacementHost.hiddenStates)
+	}
+}
+
+func TestInputBridgeVisibilityRequiresMappedAndVisibleWidget(t *testing.T) {
+	for _, state := range []struct {
+		mapped, visible bool
+		want            int32
+	}{
+		{mapped: false, visible: false, want: 1},
+		{mapped: false, visible: true, want: 1},
+		{mapped: true, visible: false, want: 1},
+		{mapped: true, visible: true, want: 0},
+	} {
+		host := &recordingBrowserHost{}
+		NewInputBridge(host, 1).syncWidgetVisibility(state.mapped, state.visible)
+		if len(host.hiddenStates) != 1 || host.hiddenStates[0] != state.want {
+			t.Fatalf("mapped=%v visible=%v hidden states = %v, want [%d]", state.mapped, state.visible, host.hiddenStates, state.want)
+		}
 	}
 }
 
@@ -248,17 +320,27 @@ func TestInputBridgeGestureClaimCanReenterCancelWithoutDeadlock(t *testing.T) {
 	}
 }
 
-func TestInputBridgeIgnoresIdleLeaveWithoutRealNonzeroCoordinates(t *testing.T) {
+func TestInputBridgeSuppressesIdleLeaveWithoutRealCoordinates(t *testing.T) {
 	host := &recordingBrowserHost{}
 	ib := NewInputBridge(host, 1)
 
 	ib.onMouseMove(0, 0, 0, true)
-	ib.onMouseMove(0, 0, 0, false)
-	host.moves = nil
-	ib.onMouseMove(0, 0, 0, true)
 
 	if len(host.moves) != 0 {
-		t.Fatalf("invalid/zero idle leaves forwarded = %d, want 0", len(host.moves))
+		t.Fatalf("leave without coordinates forwarded = %d, want 0", len(host.moves))
+	}
+}
+
+func TestInputBridgeForwardsIdleLeaveAfterRealZeroCoordinateMotion(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.onMouseMove(0, 0, 0, false)
+	host.moves = nil
+
+	ib.onMouseMove(0, 0, 0, true)
+
+	if len(host.moves) != 1 || host.moves[0].leave != 1 || host.moves[0].event.X != 0 || host.moves[0].event.Y != 0 {
+		t.Fatalf("zero-coordinate idle leave = %+v, want one leave at (0,0)", host.moves)
 	}
 }
 
@@ -285,6 +367,26 @@ func TestInputBridgePreservesAllocationBoundaryAndOutOfAllocationMotion(t *testi
 		if len(host.moves) != 2 || host.moves[0].event.X != int32(point[0]) || host.moves[0].event.Y != int32(point[1]) || host.moves[1].event != host.moves[0].event || host.moves[1].leave != 1 {
 			t.Fatalf("boundary/out-of-allocation move and leave for %v = %+v", point, host.moves)
 		}
+	}
+}
+
+func TestInputBridgePressAndReleaseCoordinatesDriveSubsequentScroll(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 2)
+
+	ib.onMousePress(11, 13, 1, 0, 1)
+	ib.onScrollUpdate(0, 1, gdk.ScrollUnitWheelValue, true, 0)
+	ib.onMouseRelease(17, 19, 1, 0, 1)
+	ib.onScrollUpdate(0, 1, gdk.ScrollUnitWheelValue, true, 0)
+
+	if len(host.wheels) != 2 {
+		t.Fatalf("wheel events = %d, want 2", len(host.wheels))
+	}
+	if host.wheels[0].X != 22 || host.wheels[0].Y != 26 {
+		t.Fatalf("scroll after press coordinates = (%d,%d), want (22,26)", host.wheels[0].X, host.wheels[0].Y)
+	}
+	if host.wheels[1].X != 34 || host.wheels[1].Y != 38 {
+		t.Fatalf("scroll after release coordinates = (%d,%d), want (34,38)", host.wheels[1].X, host.wheels[1].Y)
 	}
 }
 
