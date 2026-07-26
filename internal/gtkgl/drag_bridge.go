@@ -3,10 +3,12 @@ package gtkgl
 import (
 	"errors"
 	"sync"
+	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkdnd"
 	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/gio"
 	"github.com/bnema/puregotk/v4/glib"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
@@ -20,35 +22,211 @@ type nativeDragStart func(dragPayload, cef.DragOperationsMask, int32, int32) (*g
 type dragScheduler func(func()) uint
 type dragStatus func(*gdk.Drop, gdk.DragAction, gdk.DragAction)
 
+type releasableAsyncSource interface {
+	gtkdnd.AsyncSource
+	Release()
+}
+
+// nativeDropSource owns one cancellable and any stream returned by ReadFinish.
+// Callback values remain pinned while GLib has an outstanding operation; GIO
+// guarantees every async callback runs once, including after cancellation.
+type nativeDropSource struct {
+	mu               sync.Mutex
+	drop             *gdk.Drop
+	cancellable      *gio.Cancellable
+	stream           *gio.InputStream
+	openCallback     *gio.AsyncReadyCallback
+	readCallback     *gio.AsyncReadyCallback
+	unrefCallback    func(any) error
+	pending          int
+	releaseRequested bool
+	released         bool
+}
+
+type nativeDropStream struct{ source *nativeDropSource }
+
+func newNativeDropSource(drop *gdk.Drop) releasableAsyncSource {
+	if drop == nil {
+		return nil
+	}
+	cancellable := gio.NewCancellable()
+	if cancellable == nil {
+		return nil
+	}
+	// The source keeps a separate reference because the bridge may finish and
+	// release its operation reference before a cancellation callback arrives.
+	drop.Ref()
+	return &nativeDropSource{drop: drop, cancellable: cancellable, unrefCallback: glib.UnrefCallback}
+}
+
+func (s *nativeDropSource) OpenAsync(mime string, done func(gtkdnd.AsyncStream, string, error)) {
+	s.mu.Lock()
+	if s.released || s.pending != 0 {
+		s.mu.Unlock()
+		done(nil, "", errors.New("drop read source unavailable"))
+		return
+	}
+	s.pending++
+	callback := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
+		var actual string
+		stream, err := s.drop.ReadFinish(&gio.AsyncResultBase{Ptr: resultPtr}, &actual)
+		s.mu.Lock()
+		if stream != nil {
+			if err == nil {
+				s.stream = stream
+			} else {
+				stream.Unref()
+			}
+		}
+		s.mu.Unlock()
+		s.callbackDone(true)
+		done(&nativeDropStream{source: s}, actual, err)
+	})
+	s.openCallback = &callback
+	cancellable := s.cancellable
+	s.mu.Unlock()
+	s.drop.ReadAsync([]string{mime}, 0, cancellable, &callback, 0)
+}
+
+func (s *nativeDropSource) Cancel() {
+	s.mu.Lock()
+	cancellable := s.cancellable
+	s.mu.Unlock()
+	if cancellable != nil {
+		cancellable.Cancel()
+	}
+}
+
+func (s *nativeDropSource) Release() {
+	s.mu.Lock()
+	if s.released || s.releaseRequested {
+		s.mu.Unlock()
+		return
+	}
+	s.releaseRequested = true
+	if s.pending != 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.releaseLocked()
+	s.mu.Unlock()
+}
+
+func (s *nativeDropSource) callbackDone(open bool) {
+	s.mu.Lock()
+	var callback *gio.AsyncReadyCallback
+	if open {
+		callback, s.openCallback = s.openCallback, nil
+	} else {
+		callback, s.readCallback = s.readCallback, nil
+	}
+	unref := s.unrefCallback
+	s.pending--
+	if s.pending == 0 && s.releaseRequested {
+		s.releaseLocked()
+	}
+	s.mu.Unlock()
+	if callback != nil && unref != nil {
+		_ = unref(callback)
+	}
+}
+
+func (s *nativeDropSource) releaseLocked() {
+	if s.released {
+		return
+	}
+	s.released = true
+	if s.stream != nil {
+		s.stream.Unref()
+		s.stream = nil
+	}
+	if s.cancellable != nil {
+		s.cancellable.Unref()
+		s.cancellable = nil
+	}
+	if s.drop != nil {
+		s.drop.Unref()
+		s.drop = nil
+	}
+	s.openCallback, s.readCallback = nil, nil
+}
+
+func (s *nativeDropStream) ReadAsync(maxBytes int, done func([]byte, error)) {
+	if s == nil || s.source == nil {
+		done(nil, errors.New("missing drop stream"))
+		return
+	}
+	source := s.source
+	source.mu.Lock()
+	if source.released || source.stream == nil || source.pending != 0 {
+		source.mu.Unlock()
+		done(nil, errors.New("drop stream unavailable"))
+		return
+	}
+	source.pending++
+	callback := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
+		bytes, err := source.stream.ReadBytesFinish(&gio.AsyncResultBase{Ptr: resultPtr})
+		var chunk []byte
+		if bytes != nil {
+			size := bytes.GetSize()
+			ptr := bytes.GetData(&size)
+			if size != 0 && ptr != 0 {
+				raw := *(*unsafe.Pointer)(unsafe.Pointer(&ptr))
+				chunk = append([]byte(nil), unsafe.Slice((*byte)(raw), int(size))...)
+			}
+			bytes.Unref()
+		}
+		source.callbackDone(false)
+		done(chunk, err)
+	})
+	source.readCallback = &callback
+	stream, cancellable := source.stream, source.cancellable
+	source.mu.Unlock()
+	stream.ReadBytesAsync(uint(maxBytes), 0, cancellable, &callback, 0)
+}
+
 type DragBridge struct {
-	mu             sync.Mutex
-	widget         *gtk.Widget
-	input          *InputBridge
-	host           cef.BrowserHost
-	protocol       *DragProtocol
-	targetProtocol *TargetDragProtocol
-	target         *gtk.DropTargetAsync
-	targetHandlers []uint
-	schedule       dragScheduler
-	status         dragStatus
-	retainDrop     func(*gdk.Drop)
-	releaseDrop    func(*gdk.Drop)
-	startNative    nativeDragStart
-	cleanupNative  func(*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes)
-	sourceHost     cef.BrowserHost
-	sourcePayload  dragPayload
-	sourceDrag     *gdk.Drag
-	sourceHandlers []uint
-	providers      []*gdk.ContentProvider
-	bytes          []*glib.Bytes
-	selectedAction cef.DragOperationsMask
-	selectedKnown  bool
-	activeDrop     *gdk.Drop
-	activeAllowed  cef.DragOperationsMask
-	statusPending  bool
-	statusTicket   uint64
-	statusRevision uint64
-	dropGeneration uint64
+	mu              sync.Mutex
+	widget          *gtk.Widget
+	input           *InputBridge
+	host            cef.BrowserHost
+	protocol        *DragProtocol
+	targetProtocol  *TargetDragProtocol
+	target          *gtk.DropTargetAsync
+	targetHandlers  []uint
+	schedule        dragScheduler
+	status          dragStatus
+	retainDrop      func(*gdk.Drop)
+	releaseDrop     func(*gdk.Drop)
+	startNative     nativeDragStart
+	cleanupNative   func(*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes)
+	sourceHost      cef.BrowserHost
+	sourcePayload   dragPayload
+	sourceDrag      *gdk.Drag
+	sourceHandlers  []uint
+	providers       []*gdk.ContentProvider
+	bytes           []*glib.Bytes
+	selectedAction  cef.DragOperationsMask
+	selectedKnown   bool
+	activeDrop      *gdk.Drop
+	activeAllowed   cef.DragOperationsMask
+	statusPending   bool
+	statusTicket    uint64
+	statusRevision  uint64
+	dropGeneration  uint64
+	externalReader  *gtkdnd.AsyncReader
+	newInboundData  func(gtkdnd.InboundPayload) cef.DragData
+	fileDropAllowed func([]string) bool
+	newDropSource   func(*gdk.Drop) releasableAsyncSource
+}
+
+func externalDropReadLimits() gtkdnd.ReadLimits {
+	return gtkdnd.ReadLimits{
+		SupportedMIMEs:  []string{"text/uri-list", "text/x-moz-url", "text/html", "text/plain;charset=utf-8", "text/plain"},
+		PayloadBytes:    32 << 20,
+		CumulativeBytes: 256 << 20,
+		ChunkBytes:      64 << 10,
+	}
 }
 
 func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost) *DragBridge {
@@ -66,6 +244,9 @@ func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost)
 	b.cleanupNative = b.releaseNative
 	b.protocol = NewDragProtocol(b.sourceEndedAt, b.sourceSystemEnded, b.sourceDisarm)
 	b.targetProtocol = NewTargetDragProtocol()
+	b.externalReader = gtkdnd.NewAsyncReader(externalDropReadLimits())
+	b.newInboundData = gtkdnd.NewInboundDragData
+	b.newDropSource = newNativeDropSource
 	return b
 }
 
@@ -110,6 +291,16 @@ func (b *DragBridge) SetHost(host cef.BrowserHost) {
 	}
 }
 func (b *DragBridge) currentHost() cef.BrowserHost { b.mu.Lock(); defer b.mu.Unlock(); return b.host }
+
+// SetFileDropHandler installs an optional policy for validated local paths.
+func (b *DragBridge) SetFileDropHandler(allow func([]string) bool) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.fileDropAllowed = allow
+	b.mu.Unlock()
+}
 
 // UpdateCursor receives CEF's selected operation on the CEF UI thread and
 // posts the corresponding status update to GTK.
@@ -365,6 +556,7 @@ func (b *DragBridge) targetEnter(drop *gdk.Drop, x, y float64) gdk.DragAction {
 	text, uri := b.sourcePayload.Text, b.sourcePayload.URI
 	b.mu.Unlock()
 	if own && text != "" {
+		b.targetProtocol.MarkContentReal(drop.GoPointer())
 		data = cef.DragDataCreate()
 		if uri != "" {
 			data.SetLinkURL(uri)
@@ -408,14 +600,38 @@ func (b *DragBridge) targetMotion(drop *gdk.Drop, x, y float64) gdk.DragAction {
 	return CEFToGDKDragActions(preferred)
 }
 func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
-	if drop == nil || !b.targetProtocol.Drop(drop.GoPointer()) {
+	if drop == nil {
+		return false
+	}
+	plan, ok := b.targetProtocol.BeginDrop(drop.GoPointer())
+	if !ok {
 		return false
 	}
 	b.clearActiveDrop(drop.GoPointer())
 	drag := drop.GetDrag()
 	if drag == nil {
-		return false
-	} // external payload reading starts in B-2
+		formats := drop.GetFormats()
+		var names []string
+		if formats != nil {
+			var count uint
+			names = formats.GetMimeTypes(&count)
+		}
+		n := NegotiateDragActions(GDKToCEFDragActions(drop.GetActions()), cef.DragOperationsMaskDragOperationEvery)
+		e := b.dragMouseEvent(drop, x, y)
+		b.retainDrop(drop)
+		source := b.newDropSource(drop)
+		if source == nil {
+			b.targetProtocol.CompleteDrop(plan.Generation)
+			drop.Finish(gdk.ActionNoneValue)
+			b.releaseDrop(drop)
+			return true
+		}
+		b.beginExternalDrop(plan, names, source, e, b.preferredAction(n), func(action gdk.DragAction) {
+			drop.Finish(action)
+			b.releaseDrop(drop)
+		})
+		return true
+	}
 	defer drag.Unref()
 	action := drag.GetSelectedAction()
 	if action == gdk.ActionNoneValue {
@@ -429,8 +645,49 @@ func (b *DragBridge) targetDrop(drop *gdk.Drop, x, y float64) bool {
 	if gen, ok := b.protocol.CurrentGeneration(); ok {
 		b.protocol.OwnDrop(gen, e.X, e.Y, GDKToCEFDragActions(action))
 	}
+	b.targetProtocol.CompleteDrop(plan.Generation)
 	drop.Finish(action)
 	return true
+}
+
+func (b *DragBridge) beginExternalDrop(plan TargetDropPlan, advertised []string, source releasableAsyncSource, event cef.MouseEvent, proposed cef.DragOperationsMask, finish func(gdk.DragAction)) {
+	if source == nil {
+		finish(gdk.ActionNoneValue)
+		return
+	}
+	b.externalReader.Read(advertised, source, func(result gtkdnd.ReadResult) {
+		defer source.Release()
+		finishAction := gdk.ActionNoneValue
+		if result.Err == nil {
+			payload, err := gtkdnd.ParseInboundPayload(result.MIME, result.Data)
+			if err == nil {
+				b.mu.Lock()
+				allow, makeData := b.fileDropAllowed, b.newInboundData
+				b.mu.Unlock()
+				accepted := gtkdnd.ApplyFileDropVeto(payload, proposed, allow)
+				if accepted != cef.DragOperationsMaskDragOperationNone {
+					b.targetProtocol.DispatchDrop(plan.Generation, func(completed TargetDropPlan) {
+						data := makeData(payload)
+						if data == nil {
+							return
+						}
+						if h := b.currentHost(); h != nil {
+							if completed.RequireContentReal {
+								h.DragTargetDragEnter(data, &event, accepted)
+								h.DragTargetDragOver(&event, accepted)
+							}
+							h.DragTargetDrop(&event)
+							finishAction = CEFToGDKDragActions(accepted)
+						}
+					})
+				}
+			}
+		}
+		// Errors, refusals, and stale callbacks can only close their own
+		// generation and retained drop.
+		b.targetProtocol.CompleteDrop(plan.Generation)
+		finish(finishAction)
+	})
 }
 
 func (b *DragBridge) sourceEndedAt(e SourceEnd) {
@@ -496,6 +753,7 @@ func (b *DragBridge) Detach() {
 	}
 	b.protocol.Detach()
 	b.targetProtocol.Detach()
+	b.externalReader.Detach()
 	b.clearActiveDrop(0)
 	b.cleanupSource()
 	if b.widget != nil && b.target != nil {

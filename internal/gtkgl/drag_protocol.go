@@ -64,6 +64,8 @@ type targetDragState struct {
 	generation      uint64
 	token           uintptr
 	entered         bool
+	reading         bool
+	contentReal     bool
 	motionValid     bool
 	motionX         int32
 	motionY         int32
@@ -96,7 +98,7 @@ func (p *TargetDragProtocol) Enter(token uintptr) uint64 {
 	}
 	p.state.generation++
 	p.state.token, p.state.entered = token, true
-	p.state.motionValid = false
+	p.state.reading, p.state.contentReal, p.state.motionValid = false, false, false
 	return p.state.generation
 }
 
@@ -117,8 +119,81 @@ func (p *TargetDragProtocol) Motion(token uintptr, x, y int32, modifiers uint32)
 	return TargetMotionDispatch
 }
 
+// TargetDropPlan captures the generation-scoped content decision for a drop.
+type TargetDropPlan struct {
+	Generation         uint64
+	RequireContentReal bool
+}
+
+func (p *TargetDragProtocol) MarkContentReal(token uintptr) bool {
+	if p == nil || token == 0 {
+		return false
+	}
+	p.state.mu.Lock()
+	defer p.state.mu.Unlock()
+	if !p.state.entered || token != p.state.token {
+		return false
+	}
+	p.state.contentReal = true
+	return true
+}
+
+func (p *TargetDragProtocol) BeginDrop(token uintptr) (TargetDropPlan, bool) {
+	if p == nil || token == 0 {
+		return TargetDropPlan{}, false
+	}
+	p.state.mu.Lock()
+	defer p.state.mu.Unlock()
+	if !p.state.entered || token != p.state.token {
+		return TargetDropPlan{}, false
+	}
+	plan := TargetDropPlan{Generation: p.state.generation, RequireContentReal: !p.state.contentReal}
+	p.state.entered, p.state.reading, p.state.token, p.state.motionValid = false, true, 0, false
+	return plan, true
+}
+
+// DispatchDrop serializes a content-real callback sequence with generation
+// changes, so an old payload cannot affect a later target lifecycle.
+func (p *TargetDragProtocol) DispatchDrop(generation uint64, dispatch func(TargetDropPlan)) bool {
+	if p == nil || generation == 0 {
+		return false
+	}
+	p.state.mu.Lock()
+	defer p.state.mu.Unlock()
+	if !p.state.reading || generation != p.state.generation {
+		return false
+	}
+	plan := TargetDropPlan{Generation: generation, RequireContentReal: !p.state.contentReal}
+	if dispatch != nil {
+		dispatch(plan)
+	}
+	p.state.reading, p.state.contentReal = false, false
+	return true
+}
+
+func (p *TargetDragProtocol) CompleteDrop(generation uint64) (TargetDropPlan, bool) {
+	if p == nil || generation == 0 {
+		return TargetDropPlan{}, false
+	}
+	p.state.mu.Lock()
+	defer p.state.mu.Unlock()
+	if !p.state.reading || generation != p.state.generation {
+		return TargetDropPlan{}, false
+	}
+	plan := TargetDropPlan{Generation: generation, RequireContentReal: !p.state.contentReal}
+	p.state.reading, p.state.contentReal = false, false
+	return plan, true
+}
+
 func (p *TargetDragProtocol) Leave(token uintptr) bool { return p.matches(token, true) }
-func (p *TargetDragProtocol) Drop(token uintptr) bool  { return p.matches(token, true) }
+func (p *TargetDragProtocol) Drop(token uintptr) bool {
+	plan, ok := p.BeginDrop(token)
+	if !ok {
+		return false
+	}
+	_, ok = p.CompleteDrop(plan.Generation)
+	return ok
+}
 
 func (p *TargetDragProtocol) matches(token uintptr, close bool) bool {
 	if p == nil || token == 0 {
@@ -130,7 +205,7 @@ func (p *TargetDragProtocol) matches(token uintptr, close bool) bool {
 		return false
 	}
 	if close {
-		p.state.entered, p.state.token, p.state.motionValid = false, 0, false
+		p.state.entered, p.state.token, p.state.contentReal, p.state.motionValid = false, 0, false, false
 	}
 	return true
 }
@@ -141,7 +216,7 @@ func (p *TargetDragProtocol) Detach() {
 	}
 	p.state.mu.Lock()
 	p.state.generation++
-	p.state.entered, p.state.token, p.state.motionValid = false, 0, false
+	p.state.entered, p.state.reading, p.state.token, p.state.contentReal, p.state.motionValid = false, false, 0, false, false
 	p.state.mu.Unlock()
 }
 

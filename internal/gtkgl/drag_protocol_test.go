@@ -147,6 +147,67 @@ func TestTargetDragProtocolMotionDeduplicationResetsAcrossEntries(t *testing.T) 
 	}
 }
 
+func TestTargetDragProtocolExternalCompletionRequiresOneContentRealReentry(t *testing.T) {
+	p := NewTargetDragProtocol()
+	gen := p.Enter(30)
+	if gen == 0 {
+		t.Fatal("enter rejected")
+	}
+	plan, ok := p.BeginDrop(30)
+	if !ok || !plan.RequireContentReal {
+		t.Fatalf("external plan=%+v ok=%v", plan, ok)
+	}
+	if complete, ok := p.CompleteDrop(plan.Generation); !ok || !complete.RequireContentReal {
+		t.Fatalf("first completion=%+v ok=%v", complete, ok)
+	}
+	if _, ok := p.CompleteDrop(plan.Generation); ok {
+		t.Fatal("duplicate completion accepted")
+	}
+}
+
+func TestTargetDragProtocolDispatchBlocksLaterGenerationUntilOldCallbackReturns(t *testing.T) {
+	p := NewTargetDragProtocol()
+	p.Enter(35)
+	plan, _ := p.BeginDrop(35)
+	enteredDispatch := make(chan struct{})
+	releaseDispatch := make(chan struct{})
+	dispatchDone := make(chan bool, 1)
+	go func() {
+		dispatchDone <- p.DispatchDrop(plan.Generation, func(TargetDropPlan) {
+			close(enteredDispatch)
+			<-releaseDispatch
+		})
+	}()
+	<-enteredDispatch
+	newEnter := make(chan uint64, 1)
+	go func() { newEnter <- p.Enter(36) }()
+	select {
+	case <-newEnter:
+		t.Fatal("later generation entered during old content dispatch")
+	default:
+	}
+	close(releaseDispatch)
+	if !<-dispatchDone || <-newEnter == 0 {
+		t.Fatal("dispatch or later enter failed")
+	}
+}
+
+func TestTargetDragProtocolOwnContentDoesNotReenterAndStaleReadIsRejected(t *testing.T) {
+	p := NewTargetDragProtocol()
+	p.Enter(40)
+	if !p.MarkContentReal(40) {
+		t.Fatal("own content not marked")
+	}
+	own, ok := p.BeginDrop(40)
+	if !ok || own.RequireContentReal {
+		t.Fatalf("own plan=%+v ok=%v", own, ok)
+	}
+	p.Enter(41)
+	if _, ok := p.CompleteDrop(own.Generation); ok {
+		t.Fatal("completion from prior generation accepted")
+	}
+}
+
 func TestTargetDragProtocolLeaveClosesOnlyMatchingEnter(t *testing.T) {
 	p := NewTargetDragProtocol()
 	p.Enter(20)

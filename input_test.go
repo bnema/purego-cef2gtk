@@ -8,6 +8,35 @@ import (
 	"github.com/bnema/puregotk/v4/gdk"
 )
 
+func TestViewFileDropPolicyTracksHookReplacement(t *testing.T) {
+	v := &View{}
+	policy := viewFileDropPolicy(v)
+	if !policy([]string{"/tmp/allowed.txt"}) {
+		t.Fatal("nil file-drop hook should allow")
+	}
+
+	var firstPaths []string
+	v.setHooks(Hooks{OnFileDrop: func(paths []string) bool {
+		firstPaths = append([]string(nil), paths...)
+		return false
+	}})
+	if policy([]string{"/tmp/vetoed.txt"}) {
+		t.Fatal("first replacement should veto")
+	}
+	if len(firstPaths) != 1 || firstPaths[0] != "/tmp/vetoed.txt" {
+		t.Fatalf("first hook paths=%v", firstPaths)
+	}
+
+	calls := 0
+	v.setHooks(Hooks{OnFileDrop: func([]string) bool {
+		calls++
+		return true
+	}})
+	if !policy([]string{"/tmp/replacement.txt"}) || calls != 1 {
+		t.Fatalf("replacement hook result/calls = true/%d", calls)
+	}
+}
+
 func TestInputOptionsNormalizedScale(t *testing.T) {
 	setOSRBackingScaleEnv(t, "")
 	if got := (InputOptions{}).normalizedScale(1.25); got != 1 {

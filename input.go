@@ -179,6 +179,7 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	v.input.AttachToWidget(targetWidget)
 	drag := gtkgl.NewDragBridge(targetWidget, v.input, host)
+	drag.SetFileDropHandler(viewFileDropPolicy(v))
 	if !drag.Attach() {
 		v.input.Detach()
 		v.input = nil
@@ -189,6 +190,13 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	v.dragMu.Unlock()
 	v.inputWidget = targetWidget
 	return nil
+}
+
+func viewFileDropPolicy(v *View) func([]string) bool {
+	return func(paths []string) bool {
+		hook := v.snapshotHooks().OnFileDrop
+		return hook == nil || hook(paths)
+	}
 }
 
 func toGTKGLScrollOptions(opts ScrollOptions) gtkgl.ScrollOptions {

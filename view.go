@@ -31,6 +31,9 @@ type Hooks struct {
 	OnUnsupportedPaint     func()
 	OnError                func(error)
 	OnTextSelectionChanged func(selectedText string, selectedRange *cef.Range)
+	// OnFileDrop is called with validated local paths before an external file
+	// drop reaches CEF. Return false to veto the drop; nil safely allows it.
+	OnFileDrop func(paths []string) bool
 	// OnFirstAcceleratedPaint is invoked once when CEF first supplies an accelerated frame.
 	OnFirstAcceleratedPaint func()
 	// OnFirstDMABUFTextureSwap is invoked once after GtkPicture.SetPaintable succeeds.

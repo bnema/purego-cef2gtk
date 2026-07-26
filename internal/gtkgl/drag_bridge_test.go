@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/bnema/purego-cef/cef"
+	"github.com/bnema/purego-cef2gtk/internal/gtkdnd"
 	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/gio"
 	"github.com/bnema/puregotk/v4/glib"
 )
 
@@ -28,14 +30,224 @@ func (d *dragTestData) GetLinkURL() string      { return d.link }
 
 type dragTestHost struct {
 	cef.BrowserHost
+	mu      sync.Mutex
 	ended   []SourceEnd
 	systems int
+	target  []string
 }
 
 func (h *dragTestHost) DragSourceEndedAt(x, y int32, op cef.DragOperationsMask) {
 	h.ended = append(h.ended, SourceEnd{x, y, op})
 }
 func (h *dragTestHost) DragSourceSystemDragEnded() { h.systems++ }
+func (h *dragTestHost) DragTargetDragEnter(cef.DragData, *cef.MouseEvent, cef.DragOperationsMask) {
+	h.mu.Lock()
+	h.target = append(h.target, "enter")
+	h.mu.Unlock()
+}
+func (h *dragTestHost) DragTargetDragOver(*cef.MouseEvent, cef.DragOperationsMask) {
+	h.mu.Lock()
+	h.target = append(h.target, "over")
+	h.mu.Unlock()
+}
+func (h *dragTestHost) DragTargetDrop(*cef.MouseEvent) {
+	h.mu.Lock()
+	h.target = append(h.target, "drop")
+	h.mu.Unlock()
+}
+
+type bridgeFakeStream struct {
+	mu        sync.Mutex
+	callbacks []func([]byte, error)
+}
+
+func (s *bridgeFakeStream) ReadAsync(_ int, callback func([]byte, error)) {
+	s.mu.Lock()
+	s.callbacks = append(s.callbacks, callback)
+	s.mu.Unlock()
+}
+func (s *bridgeFakeStream) complete(chunk []byte, err error) {
+	s.mu.Lock()
+	callback := s.callbacks[0]
+	s.callbacks = s.callbacks[1:]
+	s.mu.Unlock()
+	callback(chunk, err)
+}
+
+type bridgeFakeSource struct {
+	stream   *bridgeFakeStream
+	open     func(gtkdnd.AsyncStream, string, error)
+	cancels  int
+	releases int
+}
+
+func (s *bridgeFakeSource) OpenAsync(_ string, callback func(gtkdnd.AsyncStream, string, error)) {
+	s.open = callback
+}
+func (s *bridgeFakeSource) Cancel()  { s.cancels++ }
+func (s *bridgeFakeSource) Release() { s.releases++ }
+
+type bridgeFakeDragData struct{ cef.DragData }
+
+func TestDragBridgeExternalDropReadsToEOFFinishesAndReentersOnce(t *testing.T) {
+	h := &dragTestHost{}
+	b := NewDragBridge(nil, nil, h)
+	b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return &bridgeFakeDragData{} }
+	token := uintptr(50)
+	b.targetProtocol.Enter(token)
+	plan, ok := b.targetProtocol.BeginDrop(token)
+	if !ok {
+		t.Fatal("begin drop rejected")
+	}
+	source := &bridgeFakeSource{stream: &bridgeFakeStream{}}
+	finishes := []gdk.DragAction{}
+	e := cef.MouseEvent{X: 7, Y: 9}
+	b.beginExternalDrop(plan, []string{"text/plain"}, source, e,
+		cef.DragOperationsMaskDragOperationCopy, func(action gdk.DragAction) { finishes = append(finishes, action) })
+	source.open(source.stream, "text/plain", nil)
+	source.stream.complete([]byte("hello "), nil)
+	source.stream.complete([]byte("world"), nil)
+	if len(finishes) != 0 {
+		t.Fatal("drop finished before EOF")
+	}
+	source.stream.complete(nil, nil)
+
+	if got := h.target; len(got) != 3 || got[0] != "enter" || got[1] != "over" || got[2] != "drop" {
+		t.Fatalf("target order=%v", got)
+	}
+	if len(finishes) != 1 || finishes[0] != gdk.ActionCopyValue {
+		t.Fatalf("finishes=%v", finishes)
+	}
+	if source.cancels != 0 || source.releases != 1 {
+		t.Fatalf("source cancels=%d releases=%d", source.cancels, source.releases)
+	}
+}
+
+func TestDragBridgeExternalDropDetachCancelsAndLateCallbacksCannotFinishTwice(t *testing.T) {
+	h := &dragTestHost{}
+	b := NewDragBridge(nil, nil, h)
+	b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return &bridgeFakeDragData{} }
+	token := uintptr(60)
+	b.targetProtocol.Enter(token)
+	plan, _ := b.targetProtocol.BeginDrop(token)
+	source := &bridgeFakeSource{stream: &bridgeFakeStream{}}
+	var finishes []gdk.DragAction
+	b.beginExternalDrop(plan, []string{"text/plain"}, source, cef.MouseEvent{},
+		cef.DragOperationsMaskDragOperationCopy, func(action gdk.DragAction) { finishes = append(finishes, action) })
+	open := source.open
+	b.Detach()
+	open(source.stream, "text/plain", nil)
+	open(source.stream, "text/plain", nil)
+
+	if len(finishes) != 1 || finishes[0] != gdk.ActionNoneValue {
+		t.Fatalf("finishes=%v", finishes)
+	}
+	if source.cancels != 1 || source.releases != 1 || len(h.target) != 0 {
+		t.Fatalf("cancels=%d releases=%d target=%v", source.cancels, source.releases, h.target)
+	}
+}
+
+func TestNativeDropSourceReleasesEveryAsyncCallbackSlot(t *testing.T) {
+	source := &nativeDropSource{}
+	released := 0
+	source.unrefCallback = func(any) error {
+		released++
+		return nil
+	}
+
+	const operations = 1000
+	for i := 0; i < operations; i++ {
+		openCallback := gio.AsyncReadyCallback(func(_, _, _ uintptr) {})
+		source.mu.Lock()
+		source.pending = 1
+		source.openCallback = &openCallback
+		source.mu.Unlock()
+		source.callbackDone(true)
+
+		readCallback := gio.AsyncReadyCallback(func(_, _, _ uintptr) {})
+		source.mu.Lock()
+		source.pending = 1
+		source.readCallback = &readCallback
+		source.mu.Unlock()
+		source.callbackDone(false)
+	}
+
+	want := 2 * operations
+	if released != want {
+		t.Fatalf("released callback slots=%d, want %d", released, want)
+	}
+}
+
+func TestExternalDropReadLimitsBoundPayloadAndCumulativeBytes(t *testing.T) {
+	limits := externalDropReadLimits()
+	if limits.PayloadBytes <= 0 || limits.CumulativeBytes <= 0 {
+		t.Fatalf("production limits must be bounded: %+v", limits)
+	}
+	if limits.CumulativeBytes < limits.PayloadBytes {
+		t.Fatalf("cumulative limit %d is smaller than payload limit %d", limits.CumulativeBytes, limits.PayloadBytes)
+	}
+}
+
+func TestDragBridgeExternalFileDropInvokesPolicyAndVetoesCEFDispatch(t *testing.T) {
+	h := &dragTestHost{}
+	b := NewDragBridge(nil, nil, h)
+	b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return &bridgeFakeDragData{} }
+	var paths []string
+	b.SetFileDropHandler(func(got []string) bool {
+		paths = append([]string(nil), got...)
+		return false
+	})
+	token := uintptr(55)
+	b.targetProtocol.Enter(token)
+	plan, _ := b.targetProtocol.BeginDrop(token)
+	source := &bridgeFakeSource{stream: &bridgeFakeStream{}}
+	var finishes []gdk.DragAction
+	b.beginExternalDrop(plan, []string{"text/uri-list"}, source, cef.MouseEvent{},
+		cef.DragOperationsMaskDragOperationCopy, func(action gdk.DragAction) { finishes = append(finishes, action) })
+	source.open(source.stream, "text/uri-list", nil)
+	source.stream.complete([]byte("file:///tmp/drop.txt\r\n"), nil)
+	source.stream.complete(nil, nil)
+
+	if len(paths) != 1 || paths[0] != "/tmp/drop.txt" {
+		t.Fatalf("policy paths=%v", paths)
+	}
+	if len(h.target) != 0 {
+		t.Fatalf("vetoed drop reached CEF: %v", h.target)
+	}
+	if len(finishes) != 1 || finishes[0] != gdk.ActionNoneValue {
+		t.Fatalf("finishes=%v", finishes)
+	}
+}
+
+func TestDragBridgeExternalDropStressKeepsGenerationsIsolated(t *testing.T) {
+	h := &dragTestHost{}
+	b := NewDragBridge(nil, nil, h)
+	b.newInboundData = func(gtkdnd.InboundPayload) cef.DragData { return &bridgeFakeDragData{} }
+	const operations = 1000
+	finishes := make([]gdk.DragAction, 0, operations)
+	for i := 0; i < operations; i++ {
+		token := uintptr(100 + i)
+		b.targetProtocol.Enter(token)
+		plan, _ := b.targetProtocol.BeginDrop(token)
+		source := &bridgeFakeSource{stream: &bridgeFakeStream{}}
+		b.beginExternalDrop(plan, []string{"text/plain"}, source, cef.MouseEvent{},
+			cef.DragOperationsMaskDragOperationCopy, func(action gdk.DragAction) { finishes = append(finishes, action) })
+		source.open(source.stream, "text/plain", nil)
+		source.stream.complete([]byte("x"), nil)
+		source.stream.complete(nil, nil)
+		if source.releases != 1 {
+			t.Fatalf("operation %d releases=%d", i, source.releases)
+		}
+	}
+	if len(finishes) != operations {
+		t.Fatalf("finishes=%d", len(finishes))
+	}
+	for i, action := range finishes {
+		if action != gdk.ActionCopyValue {
+			t.Fatalf("finish %d action=%v", i, action)
+		}
+	}
+}
 
 func TestDragMouseEventUsesInputScaleAndButtonModifiers(t *testing.T) {
 	input := NewInputBridge(nil, 2)
