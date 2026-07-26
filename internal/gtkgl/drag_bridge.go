@@ -16,11 +16,24 @@ import (
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
-type dragPayload struct {
-	Text string
-	URI  string
+type imageHotspot struct {
+	X, Y  int32
+	Valid bool
 }
-type nativeDragStart func(dragPayload, cef.DragOperationsMask, int32, int32) (*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes, error)
+
+type dragPayload struct {
+	gtkdnd.OutboundPayload
+	Hotspot imageHotspot
+}
+
+type nativeDragResources struct {
+	Drag     *gdk.Drag
+	Provider *gdk.ContentProvider
+	Bytes    []*glib.Bytes
+	Texture  *gdk.Texture
+}
+
+type nativeDragStart func(dragPayload, cef.DragOperationsMask, int32, int32) (*nativeDragResources, error)
 type dragScheduler func(func()) uint
 type dragStatus func(*gdk.Drop, gdk.DragAction, gdk.DragAction)
 
@@ -206,38 +219,49 @@ func (s *nativeDropStream) ReadAsync(maxBytes int, done func([]byte, error)) {
 }
 
 type DragBridge struct {
-	mu              sync.Mutex
-	widget          *gtk.Widget
-	input           *InputBridge
-	host            cef.BrowserHost
-	protocol        *DragProtocol
-	targetProtocol  *TargetDragProtocol
-	target          *gtk.DropTargetAsync
-	targetHandlers  []uint
-	schedule        dragScheduler
-	status          dragStatus
-	retainDrop      func(*gdk.Drop)
-	releaseDrop     func(*gdk.Drop)
-	startNative     nativeDragStart
-	cleanupNative   func(*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes)
-	sourceHost      cef.BrowserHost
-	sourcePayload   dragPayload
-	sourceDrag      *gdk.Drag
-	sourceHandlers  []uint
-	providers       []*gdk.ContentProvider
-	bytes           []*glib.Bytes
-	selectedAction  cef.DragOperationsMask
-	selectedKnown   bool
-	activeDrop      *gdk.Drop
-	activeAllowed   cef.DragOperationsMask
-	statusPending   bool
-	statusTicket    uint64
-	statusRevision  uint64
-	dropGeneration  uint64
-	externalReader  *gtkdnd.AsyncReader
-	newInboundData  func(gtkdnd.InboundPayload) cef.DragData
-	fileDropAllowed func([]string) bool
-	newDropSource   func(*gdk.Drop) releasableAsyncSource
+	mu                  sync.Mutex
+	widget              *gtk.Widget
+	input               *InputBridge
+	host                cef.BrowserHost
+	protocol            *DragProtocol
+	targetProtocol      *TargetDragProtocol
+	target              *gtk.DropTargetAsync
+	targetHandlers      []uint
+	schedule            dragScheduler
+	status              dragStatus
+	retainDrop          func(*gdk.Drop)
+	releaseDrop         func(*gdk.Drop)
+	startNative         nativeDragStart
+	cleanupNative       func(*nativeDragResources)
+	newStringList       func(...string) cef.StringList
+	freeStringList      func(cef.StringList)
+	stringListToSlice   func(cef.StringList) []string
+	newContentBytes     func([]byte, uint) *glib.Bytes
+	newContentProvider  func(string, *glib.Bytes) *gdk.ContentProvider
+	newContentUnion     func([]uintptr) *gdk.ContentProvider
+	newTextureFromBytes func(*glib.Bytes) (*gdk.Texture, error)
+	setDragIcon         func(*gdk.Drag, gdk.Paintable, int, int)
+	unrefProvider       func(*gdk.ContentProvider)
+	unrefBytes          func(*glib.Bytes)
+	unrefTexture        func(*gdk.Texture)
+	unrefDrag           func(*gdk.Drag)
+	sourceHost          cef.BrowserHost
+	sourcePayload       dragPayload
+	sourceDrag          *gdk.Drag
+	sourceHandlers      []uint
+	nativeResources     *nativeDragResources
+	selectedAction      cef.DragOperationsMask
+	selectedKnown       bool
+	activeDrop          *gdk.Drop
+	activeAllowed       cef.DragOperationsMask
+	statusPending       bool
+	statusTicket        uint64
+	statusRevision      uint64
+	dropGeneration      uint64
+	externalReader      *gtkdnd.AsyncReader
+	newInboundData      func(gtkdnd.InboundPayload) cef.DragData
+	fileDropAllowed     func([]string) bool
+	newDropSource       func(*gdk.Drop) releasableAsyncSource
 }
 
 func externalDropReadLimits() gtkdnd.ReadLimits {
@@ -262,6 +286,23 @@ func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost)
 	b.releaseDrop = func(drop *gdk.Drop) { drop.Unref() }
 	b.startNative = b.beginNative
 	b.cleanupNative = b.releaseNative
+	b.newStringList = cef.NewStringList
+	b.freeStringList = cef.FreeStringList
+	b.stringListToSlice = cef.StringListToSlice
+	b.newContentBytes = glib.NewBytes
+	b.newContentProvider = gdk.NewContentProviderForBytes
+	b.newContentUnion = func(providers []uintptr) *gdk.ContentProvider {
+		if len(providers) == 0 {
+			return nil
+		}
+		return gdk.NewContentProviderUnion(uintptr(unsafe.Pointer(&providers[0])), uint(len(providers)))
+	}
+	b.newTextureFromBytes = gdk.NewTextureFromBytes
+	b.setDragIcon = gtk.DragIconSetFromPaintable
+	b.unrefProvider = func(value *gdk.ContentProvider) { value.Unref() }
+	b.unrefBytes = func(value *glib.Bytes) { value.Unref() }
+	b.unrefTexture = func(value *gdk.Texture) { value.Unref() }
+	b.unrefDrag = func(value *gdk.Drag) { value.Unref() }
 	b.protocol = NewDragProtocol(b.sourceEndedAt, b.sourceSystemEnded, b.sourceDisarm)
 	b.targetProtocol = NewTargetDragProtocol()
 	b.externalReader = gtkdnd.NewAsyncReader(externalDropReadLimits())
@@ -441,6 +482,57 @@ func (b *DragBridge) dragMouseEvent(drop *gdk.Drop, x, y float64) cef.MouseEvent
 	return BuildMouseEvent(x, y, mods, 1)
 }
 
+func decodeImageHotspot(raw uintptr) (int32, int32, bool) {
+	if unsafe.Sizeof(raw) != 8 {
+		return 0, 0, false
+	}
+	return int32(uint32(raw)), int32(uint32(uint64(raw) >> 32)), true
+}
+
+func releaseCEFHandle(value any) {
+	if releaser, ok := value.(interface{ Release() }); ok {
+		releaser.Release()
+	}
+}
+
+func (b *DragBridge) snapshotDragData(data cef.DragData) dragPayload {
+	payload := dragPayload{OutboundPayload: gtkdnd.OutboundPayload{
+		Text:      data.GetFragmentText(),
+		HTML:      data.GetFragmentHtml(),
+		LinkURL:   data.GetLinkURL(),
+		LinkTitle: data.GetLinkTitle(),
+	}}
+	if payload.Text == "" {
+		payload.Text = payload.LinkURL
+	}
+	if data.IsFile() {
+		if list := b.newStringList(); list != 0 {
+			data.GetFilePaths(list)
+			payload.Files = append([]string(nil), b.stringListToSlice(list)...)
+			b.freeStringList(list)
+		}
+	}
+	image := data.GetImage()
+	if image == nil {
+		return payload
+	}
+	defer releaseCEFHandle(image)
+	payload.Hotspot.X, payload.Hotspot.Y, payload.Hotspot.Valid = decodeImageHotspot(data.GetImageHotspot())
+	var width, height int32
+	png := image.GetAsPng(1, 1, &width, &height)
+	if png == nil {
+		return payload
+	}
+	defer releaseCEFHandle(png)
+	if size := png.GetSize(); size > 0 {
+		content := make([]byte, size)
+		if copied := png.GetData(unsafe.Pointer(&content[0]), size, 0); copied > 0 {
+			payload.ImagePNG = append([]byte(nil), content[:copied]...)
+		}
+	}
+	return payload
+}
+
 func (b *DragBridge) Start(browser cef.Browser, data cef.DragData, offered cef.DragOperationsMask, x, y int32) int32 {
 	if b == nil || browser == nil || data == nil {
 		return 0
@@ -449,10 +541,9 @@ func (b *DragBridge) Start(browser cef.Browser, data cef.DragData, offered cef.D
 	if !ok {
 		return 0
 	}
-	payload := dragPayload{Text: data.GetFragmentText(), URI: data.GetLinkURL()}
-	if payload.Text == "" {
-		payload.Text = payload.URI
-	}
+	// CEF drag data is only valid on the calling thread. Snapshot every value,
+	// including image bytes, before posting any work to GTK.
+	payload := b.snapshotDragData(data)
 	b.mu.Lock()
 	b.sourceHost = browser.GetHost()
 	b.sourcePayload = payload
@@ -462,24 +553,29 @@ func (b *DragBridge) Start(browser cef.Browser, data cef.DragData, offered cef.D
 		if !b.protocol.IsStarting(gen) {
 			return
 		}
-		drag, providers, bytes, err := b.startNative(payload, offered, x, y)
-		if err != nil || drag == nil {
+		resources, err := b.startNative(payload, offered, x, y)
+		if err != nil || resources == nil || resources.Drag == nil {
+			if resources != nil {
+				b.cleanupNative(resources)
+			}
 			b.protocol.Cancel(gen)
 			return
 		}
+		// Publish the GTK resources atomically with activation relative to
+		// Detach's completion cleanup. Terminal signals are connected before the
+		// lock is released, so an immediately delivered signal observes them.
+		b.mu.Lock()
 		if !b.protocol.Activate(gen) {
-			// The transition that made this generation stale already closed and
-			// disarmed the protocol; only the newly-created GTK objects remain.
-			b.cleanupNative(drag, providers, bytes)
+			b.mu.Unlock()
+			b.cleanupNative(resources)
 			return
 		}
-		b.mu.Lock()
-		b.sourceDrag, b.providers, b.bytes = drag, providers, bytes
+		b.sourceDrag, b.nativeResources = resources.Drag, resources
 		cancel := func(gdk.Drag, gdk.DragCancelReason) { b.protocol.Cancel(gen) }
 		finished := func(d gdk.Drag) {
 			b.protocol.Finish(gen, SourceFinish{Operation: GDKToCEFDragActions(d.GetSelectedAction())})
 		}
-		b.sourceHandlers = []uint{drag.ConnectCancel(&cancel), drag.ConnectDndFinished(&finished)}
+		b.sourceHandlers = []uint{resources.Drag.ConnectCancel(&cancel), resources.Drag.ConnectDndFinished(&finished)}
 		b.mu.Unlock()
 	})
 	if id == 0 {
@@ -489,48 +585,104 @@ func (b *DragBridge) Start(browser cef.Browser, data cef.DragData, offered cef.D
 	return 1
 }
 
-func (b *DragBridge) beginNative(payload dragPayload, offered cef.DragOperationsMask, x, y int32) (*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes, error) {
+func (b *DragBridge) createNativeContent(payload dragPayload) (*nativeDragResources, error) {
+	formats := gtkdnd.OutboundFormats(payload.OutboundPayload)
+	if len(formats) == 0 {
+		return nil, errors.New("missing drag content")
+	}
+	resources := &nativeDragResources{}
+	children := make([]*gdk.ContentProvider, 0, len(formats))
+	cleanupChildren := func() {
+		for _, provider := range children {
+			b.unrefProvider(provider)
+		}
+		for _, value := range resources.Bytes {
+			b.unrefBytes(value)
+		}
+		if resources.Texture != nil {
+			b.unrefTexture(resources.Texture)
+		}
+	}
+	for _, format := range formats {
+		value := b.newContentBytes(format.Value, uint(len(format.Value)))
+		if value == nil {
+			cleanupChildren()
+			return nil, errors.New("content bytes")
+		}
+		resources.Bytes = append(resources.Bytes, value)
+		provider := b.newContentProvider(format.MIME, value)
+		if provider == nil {
+			cleanupChildren()
+			return nil, errors.New("content provider")
+		}
+		children = append(children, provider)
+		if format.MIME == "image/png" {
+			// An invalid image only suppresses the icon. The PNG provider remains
+			// available and the drag can still start.
+			texture, err := b.newTextureFromBytes(value)
+			if err == nil {
+				resources.Texture = texture
+			} else if texture != nil {
+				b.unrefTexture(texture)
+			}
+		}
+	}
+	if len(children) == 1 {
+		resources.Provider = children[0]
+		return resources, nil
+	}
+	pointers := make([]uintptr, len(children))
+	for i, provider := range children {
+		pointers[i] = provider.GoPointer()
+	}
+	// GIR marks providers transfer-full. From this call onward the union owns
+	// every child, including when construction reports failure.
+	resources.Provider = b.newContentUnion(pointers)
+	children = nil
+	if resources.Provider == nil {
+		for _, value := range resources.Bytes {
+			b.unrefBytes(value)
+		}
+		if resources.Texture != nil {
+			b.unrefTexture(resources.Texture)
+		}
+		return nil, errors.New("content provider union")
+	}
+	return resources, nil
+}
+
+func (b *DragBridge) beginNative(payload dragPayload, offered cef.DragOperationsMask, x, y int32) (*nativeDragResources, error) {
 	if b.widget == nil {
-		return nil, nil, nil, errors.New("missing widget")
+		return nil, errors.New("missing widget")
 	}
 	native := b.widget.GetNative()
 	if native == nil {
-		return nil, nil, nil, errors.New("missing native")
+		return nil, errors.New("missing native")
 	}
 	defer gobject.ObjectNewFromInternalPtr(native.GoPointer()).Unref()
 	surface := native.GetSurface()
 	if surface == nil {
-		return nil, nil, nil, errors.New("missing surface")
+		return nil, errors.New("missing surface")
 	}
 	defer surface.Unref()
 	display := surface.GetDisplay()
 	if display == nil {
-		return nil, nil, nil, errors.New("missing display")
+		return nil, errors.New("missing display")
 	}
 	defer display.Unref()
 	seat := display.GetDefaultSeat()
 	if seat == nil {
-		return nil, nil, nil, errors.New("missing seat")
+		return nil, errors.New("missing seat")
 	}
 	defer seat.Unref()
 	device := seat.GetPointer()
 	if device == nil {
-		return nil, nil, nil, errors.New("missing pointer device")
+		return nil, errors.New("missing pointer device")
 	}
 	defer device.Unref()
-	mime, value := "text/plain;charset=utf-8", payload.Text
-	if payload.URI != "" {
-		mime, value = "text/uri-list", payload.URI+"\r\n"
-	}
-	content := []byte(value)
-	bytes := glib.NewBytes(content, uint(len(content)))
-	if bytes == nil {
-		return nil, nil, nil, errors.New("content bytes")
-	}
-	provider := gdk.NewContentProviderForBytes(mime, bytes)
-	if provider == nil {
-		bytes.Unref()
-		return nil, nil, nil, errors.New("content provider")
+	resources, err := b.createNativeContent(payload)
+	if err != nil {
+		return nil, err
 	}
 	if b.input != nil {
 		b.input.ArmDnd()
@@ -539,16 +691,23 @@ func (b *DragBridge) beginNative(payload dragPayload, offered cef.DragOperations
 	if b.input != nil {
 		scale = b.input.Scale()
 	}
-	drag := gdk.DragBegin(surface, device, provider, CEFToGDKDragActions(offered), DeviceToLogicalCoordinate(x, scale), DeviceToLogicalCoordinate(y, scale))
-	if drag == nil {
+	resources.Drag = gdk.DragBegin(surface, device, resources.Provider, CEFToGDKDragActions(offered), DeviceToLogicalCoordinate(x, scale), DeviceToLogicalCoordinate(y, scale))
+	if resources.Drag == nil {
 		if b.input != nil {
 			b.input.DisarmDnd()
 		}
-		provider.Unref()
-		bytes.Unref()
-		return nil, nil, nil, errors.New("drag begin")
+		b.releaseNative(resources)
+		return nil, errors.New("drag begin")
 	}
-	return drag, []*gdk.ContentProvider{provider}, []*glib.Bytes{bytes}, nil
+	b.applyNativeIcon(resources, payload.Hotspot)
+	return resources, nil
+}
+
+func (b *DragBridge) applyNativeIcon(resources *nativeDragResources, hotspot imageHotspot) {
+	if resources == nil || resources.Drag == nil || resources.Texture == nil || !hotspot.Valid {
+		return
+	}
+	b.setDragIcon(resources.Drag, resources.Texture, int(hotspot.X), int(hotspot.Y))
 }
 
 func (b *DragBridge) targetEnter(drop *gdk.Drop, x, y float64) gdk.DragAction {
@@ -573,7 +732,7 @@ func (b *DragBridge) targetEnter(drop *gdk.Drop, x, y float64) gdk.DragAction {
 	}
 	b.mu.Lock()
 	own := ownDrop && b.sourceDrag != nil
-	text, uri := b.sourcePayload.Text, b.sourcePayload.URI
+	text, uri := b.sourcePayload.Text, b.sourcePayload.LinkURL
 	b.mu.Unlock()
 	if own && text != "" {
 		b.targetProtocol.MarkContentReal(drop.GoPointer())
@@ -740,40 +899,46 @@ func (b *DragBridge) sourceDisarm() {
 		b.input.DisarmDnd()
 	}
 }
-func (b *DragBridge) releaseNative(drag *gdk.Drag, providers []*gdk.ContentProvider, values []*glib.Bytes) {
-	if drag != nil {
-		drag.Unref()
+func (b *DragBridge) releaseNative(resources *nativeDragResources) {
+	if resources == nil {
+		return
 	}
-	for _, provider := range providers {
-		provider.Unref()
+	if resources.Drag != nil {
+		b.unrefDrag(resources.Drag)
+		resources.Drag = nil
 	}
-	for _, value := range values {
-		value.Unref()
+	// A union provider owns its children (GIR transfer-full), so only the root
+	// provider is retained and released here.
+	if resources.Provider != nil {
+		b.unrefProvider(resources.Provider)
+		resources.Provider = nil
 	}
+	if resources.Texture != nil {
+		b.unrefTexture(resources.Texture)
+		resources.Texture = nil
+	}
+	for _, value := range resources.Bytes {
+		b.unrefBytes(value)
+	}
+	resources.Bytes = nil
 }
 
 func (b *DragBridge) cleanupSource() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.sourceDrag != nil {
 		for _, id := range b.sourceHandlers {
 			if id != 0 {
 				gobject.SignalHandlerDisconnect(&b.sourceDrag.Object, id)
 			}
 		}
-		b.sourceDrag.Unref()
 	}
-	for _, p := range b.providers {
-		p.Unref()
-	}
-	for _, v := range b.bytes {
-		v.Unref()
-	}
+	resources := b.nativeResources
 	b.sourceDrag = nil
 	b.sourceHandlers = nil
-	b.providers = nil
-	b.bytes = nil
+	b.nativeResources = nil
 	b.sourceHost = nil
+	b.mu.Unlock()
+	b.releaseNative(resources)
 }
 func (b *DragBridge) Detach() {
 	if b == nil {

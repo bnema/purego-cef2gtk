@@ -2,8 +2,10 @@ package gtkgl
 
 import (
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/purego-cef2gtk/internal/gtkdnd"
@@ -21,12 +23,47 @@ func (b *dragTestBrowser) GetHost() cef.BrowserHost { return b.host }
 
 type dragTestData struct {
 	cef.DragData
-	text string
-	link string
+	text, html, link, title string
+	image                   cef.Image
+	files                   bool
+	fileList                cef.StringList
 }
 
 func (d *dragTestData) GetFragmentText() string { return d.text }
+func (d *dragTestData) GetFragmentHtml() string { return d.html }
 func (d *dragTestData) GetLinkURL() string      { return d.link }
+func (d *dragTestData) GetLinkTitle() string    { return d.title }
+func (d *dragTestData) IsFile() bool            { return d.files }
+func (d *dragTestData) GetFilePaths(list cef.StringList) int32 {
+	d.fileList = list
+	return 1
+}
+func (d *dragTestData) GetImage() cef.Image { return d.image }
+func (d *dragTestData) GetImageHotspot() uintptr {
+	y := int32(-9)
+	return uintptr(uint64(uint32(17)) | uint64(uint32(y))<<32)
+}
+
+type dragTestBinary struct {
+	cef.BinaryValue
+	data     []byte
+	releases int
+}
+
+func (b *dragTestBinary) GetSize() int { return len(b.data) }
+func (b *dragTestBinary) GetData(dst unsafe.Pointer, size, offset int) int {
+	return copy(unsafe.Slice((*byte)(dst), size), b.data[offset:])
+}
+func (b *dragTestBinary) Release() { b.releases++ }
+
+type dragTestImage struct {
+	cef.Image
+	png      *dragTestBinary
+	releases int
+}
+
+func (i *dragTestImage) GetAsPng(float32, int32, *int32, *int32) cef.BinaryValue { return i.png }
+func (i *dragTestImage) Release()                                                { i.releases++ }
 
 type dragTestHost struct {
 	cef.BrowserHost
@@ -88,6 +125,221 @@ func (s *bridgeFakeSource) Cancel()  { s.cancels++ }
 func (s *bridgeFakeSource) Release() { s.releases++ }
 
 type bridgeFakeDragData struct{ cef.DragData }
+
+func TestDecodeImageHotspotUsesPackedCEFPointABI(t *testing.T) {
+	negativeY := int32(-41)
+	raw := uintptr(uint64(uint32(23)) | uint64(uint32(negativeY))<<32)
+	x, y, ok := decodeImageHotspot(raw)
+	if unsafe.Sizeof(raw) == 8 {
+		if !ok || x != 23 || y != -41 {
+			t.Fatalf("decoded hotspot=(%d,%d,%t)", x, y, ok)
+		}
+	} else if ok || x != 0 || y != 0 {
+		t.Fatalf("non-64-bit hotspot fallback=(%d,%d,%t)", x, y, ok)
+	}
+}
+
+func TestDragBridgeStartSnapshotsAllCEFContentBeforeScheduling(t *testing.T) {
+	h := &dragTestHost{}
+	binary := &dragTestBinary{data: []byte{0x89, 'P', 'N', 'G'}}
+	image := &dragTestImage{png: binary}
+	data := &dragTestData{text: "plain", html: "<b>rich</b>", link: "https://example.test", title: "Example", image: image, files: true}
+	var idle func()
+	var got dragPayload
+	b := NewDragBridge(nil, nil, h)
+	b.newStringList = func(...string) cef.StringList { return 77 }
+	b.stringListToSlice = func(list cef.StringList) []string {
+		if list != 77 {
+			t.Fatalf("list=%d", list)
+		}
+		return []string{"/tmp/a.txt"}
+	}
+	freed := cef.StringList(0)
+	b.freeStringList = func(list cef.StringList) { freed = list }
+	b.schedule = func(fn func()) uint { idle = fn; return 1 }
+	b.startNative = func(payload dragPayload, _ cef.DragOperationsMask, _, _ int32) (*nativeDragResources, error) {
+		got = payload
+		return nil, errors.New("stop after snapshot")
+	}
+
+	if b.Start(&dragTestBrowser{host: h}, data, cef.DragOperationsMaskDragOperationCopy, 1, 2) != 1 {
+		t.Fatal("start rejected")
+	}
+	if data.fileList != 77 || freed != 77 || image.releases != 1 || binary.releases != 1 {
+		t.Fatalf("CEF ownership list=%d freed=%d image releases=%d binary releases=%d", data.fileList, freed, image.releases, binary.releases)
+	}
+	data.text, data.html, data.link, data.title = "mutated", "mutated", "mutated", "mutated"
+	binary.data[0] = 0
+	idle()
+
+	want := dragPayload{OutboundPayload: gtkdnd.OutboundPayload{
+		Text: "plain", HTML: "<b>rich</b>", Files: []string{"/tmp/a.txt"}, LinkURL: "https://example.test", LinkTitle: "Example", ImagePNG: []byte{0x89, 'P', 'N', 'G'},
+	}, Hotspot: imageHotspot{X: 17, Y: -9, Valid: unsafe.Sizeof(uintptr(0)) == 8}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("scheduled payload=%+v, want %+v", got, want)
+	}
+}
+
+func TestDragBridgeBuildsDeterministicProviderUnionAndCleansRootOwnership(t *testing.T) {
+	b := NewDragBridge(nil, nil, nil)
+	var mimes []string
+	var nextByte uintptr = 100
+	var nextProvider uintptr = 200
+	var unionChildren []uintptr
+	providerReleases := map[uintptr]int{}
+	byteReleases := map[uintptr]int{}
+	textureReleases := 0
+	b.newContentBytes = func(_ []byte, _ uint) *glib.Bytes {
+		nextByte++
+		return glib.BytesNewFromInternalPtr(nextByte)
+	}
+	b.newContentProvider = func(mime string, _ *glib.Bytes) *gdk.ContentProvider {
+		mimes = append(mimes, mime)
+		nextProvider++
+		return gdk.ContentProviderNewFromInternalPtr(nextProvider)
+	}
+	b.newContentUnion = func(children []uintptr) *gdk.ContentProvider {
+		unionChildren = append([]uintptr(nil), children...)
+		return gdk.ContentProviderNewFromInternalPtr(999)
+	}
+	b.newTextureFromBytes = func(*glib.Bytes) (*gdk.Texture, error) {
+		return gdk.TextureNewFromInternalPtr(500), nil
+	}
+	b.unrefProvider = func(value *gdk.ContentProvider) { providerReleases[value.GoPointer()]++ }
+	b.unrefBytes = func(value *glib.Bytes) { byteReleases[value.GoPointer()]++ }
+	b.unrefTexture = func(*gdk.Texture) { textureReleases++ }
+
+	resources, err := b.createNativeContent(dragPayload{OutboundPayload: gtkdnd.OutboundPayload{
+		Text: "plain", HTML: "<b>rich</b>", LinkURL: "https://example.test/page", LinkTitle: "Page", ImagePNG: []byte("png"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMIMEs := []string{"text/plain;charset=utf-8", "text/html", "text/uri-list", "text/x-moz-url", "image/png"}
+	if !reflect.DeepEqual(mimes, wantMIMEs) {
+		t.Fatalf("provider order=%v, want %v", mimes, wantMIMEs)
+	}
+	if !reflect.DeepEqual(unionChildren, []uintptr{201, 202, 203, 204, 205}) {
+		t.Fatalf("union children=%v", unionChildren)
+	}
+	b.releaseNative(resources)
+	if providerReleases[999] != 1 || len(providerReleases) != 1 {
+		t.Fatalf("provider releases=%v; children are transfer-full", providerReleases)
+	}
+	if len(byteReleases) != 5 {
+		t.Fatalf("GBytes releases=%v", byteReleases)
+	}
+	for ptr, count := range byteReleases {
+		if count != 1 {
+			t.Fatalf("GBytes %d releases=%d", ptr, count)
+		}
+	}
+	if textureReleases != 1 {
+		t.Fatalf("texture releases=%d", textureReleases)
+	}
+	b.releaseNative(resources)
+	if providerReleases[999] != 1 || textureReleases != 1 {
+		t.Fatalf("idempotent cleanup provider=%v texture=%d", providerReleases, textureReleases)
+	}
+}
+
+func TestDragBridgeProviderUnionFailureHonorsTransferredChildren(t *testing.T) {
+	b := NewDragBridge(nil, nil, nil)
+	var next uintptr = 10
+	childReleases, byteReleases := 0, 0
+	b.newContentBytes = func([]byte, uint) *glib.Bytes {
+		next++
+		return glib.BytesNewFromInternalPtr(next)
+	}
+	b.newContentProvider = func(string, *glib.Bytes) *gdk.ContentProvider {
+		next++
+		return gdk.ContentProviderNewFromInternalPtr(next)
+	}
+	b.newContentUnion = func([]uintptr) *gdk.ContentProvider { return nil }
+	b.newTextureFromBytes = func(*glib.Bytes) (*gdk.Texture, error) { return nil, errors.New("unused") }
+	b.unrefProvider = func(*gdk.ContentProvider) { childReleases++ }
+	b.unrefBytes = func(*glib.Bytes) { byteReleases++ }
+	b.unrefTexture = func(*gdk.Texture) {}
+
+	resources, err := b.createNativeContent(dragPayload{OutboundPayload: gtkdnd.OutboundPayload{Text: "plain", HTML: "<b>rich</b>"}})
+	if err == nil || resources != nil {
+		t.Fatalf("union failure resources=%+v err=%v", resources, err)
+	}
+	if childReleases != 0 || byteReleases != 2 {
+		t.Fatalf("transferred child releases=%d GBytes releases=%d", childReleases, byteReleases)
+	}
+}
+
+func TestDragBridgeNativeResourceCleanupHighCountIsExactlyOnce(t *testing.T) {
+	b := NewDragBridge(nil, nil, nil)
+	drags, providers, bytes, textures := 0, 0, 0, 0
+	b.unrefDrag = func(*gdk.Drag) { drags++ }
+	b.unrefProvider = func(*gdk.ContentProvider) { providers++ }
+	b.unrefBytes = func(*glib.Bytes) { bytes++ }
+	b.unrefTexture = func(*gdk.Texture) { textures++ }
+	const operations = 10000
+	for i := 0; i < operations; i++ {
+		resources := &nativeDragResources{
+			Drag: &gdk.Drag{}, Provider: &gdk.ContentProvider{}, Bytes: []*glib.Bytes{{}, {}}, Texture: &gdk.Texture{},
+		}
+		b.releaseNative(resources)
+		b.releaseNative(resources)
+	}
+	if drags != operations || providers != operations || bytes != 2*operations || textures != operations {
+		t.Fatalf("cleanup counts drag=%d provider=%d bytes=%d texture=%d", drags, providers, bytes, textures)
+	}
+}
+
+func TestDragBridgeImageIconUsesHotspotAndDecodeFailureDoesNotAbort(t *testing.T) {
+	b := NewDragBridge(nil, nil, nil)
+	b.newContentBytes = func([]byte, uint) *glib.Bytes { return glib.BytesNewFromInternalPtr(101) }
+	b.newContentProvider = func(string, *glib.Bytes) *gdk.ContentProvider {
+		return gdk.ContentProviderNewFromInternalPtr(201)
+	}
+	b.unrefProvider = func(*gdk.ContentProvider) {}
+	b.unrefBytes = func(*glib.Bytes) {}
+	b.unrefDrag = func(*gdk.Drag) {}
+	decodeTextureReleases := 0
+	b.unrefTexture = func(*gdk.Texture) { decodeTextureReleases++ }
+
+	decodeErr := errors.New("invalid png")
+	b.newTextureFromBytes = func(*glib.Bytes) (*gdk.Texture, error) {
+		return gdk.TextureNewFromInternalPtr(450), decodeErr
+	}
+	resources, err := b.createNativeContent(dragPayload{OutboundPayload: gtkdnd.OutboundPayload{ImagePNG: []byte("bad")}})
+	if err != nil || resources == nil || resources.Provider == nil || resources.Texture != nil {
+		t.Fatalf("decode fallback resources=%+v err=%v", resources, err)
+	}
+	if decodeTextureReleases != 1 {
+		t.Fatalf("failed decode texture releases=%d", decodeTextureReleases)
+	}
+	iconCalls := 0
+	b.setDragIcon = func(*gdk.Drag, gdk.Paintable, int, int) { iconCalls++ }
+	resources.Drag = &gdk.Drag{}
+	b.applyNativeIcon(resources, imageHotspot{X: 4, Y: 7, Valid: true})
+	if iconCalls != 0 {
+		t.Fatalf("decode failure set %d icons", iconCalls)
+	}
+
+	resources.Texture = gdk.TextureNewFromInternalPtr(500)
+	var gotX, gotY int
+	b.setDragIcon = func(_ *gdk.Drag, paintable gdk.Paintable, x, y int) {
+		iconCalls++
+		gotX, gotY = x, y
+		if paintable.GoPointer() != 500 {
+			t.Fatalf("paintable=%d", paintable.GoPointer())
+		}
+	}
+	b.applyNativeIcon(resources, imageHotspot{X: 4, Y: -7, Valid: true})
+	b.applyNativeIcon(resources, imageHotspot{X: 99, Y: 99, Valid: false})
+	if iconCalls != 1 || gotX != 4 || gotY != -7 {
+		t.Fatalf("icon calls=%d hotspot=(%d,%d)", iconCalls, gotX, gotY)
+	}
+	b.releaseNative(resources)
+	if decodeTextureReleases != 2 {
+		t.Fatalf("retained texture cleanup count=%d", decodeTextureReleases)
+	}
+}
 
 func TestDragBridgeExternalDropReadsToEOFFinishesAndReentersOnce(t *testing.T) {
 	h := &dragTestHost{}
@@ -651,8 +903,8 @@ func TestDragBridgeAcceptedNativeFailureClosesExactlyOnceWithNone(t *testing.T) 
 	var idle func()
 	b := NewDragBridge(nil, nil, h)
 	b.schedule = func(fn func()) uint { idle = fn; return 1 }
-	b.startNative = func(dragPayload, cef.DragOperationsMask, int32, int32) (*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes, error) {
-		return nil, nil, nil, errors.New("native start")
+	b.startNative = func(dragPayload, cef.DragOperationsMask, int32, int32) (*nativeDragResources, error) {
+		return nil, errors.New("native start")
 	}
 	if b.Start(&dragTestBrowser{host: h}, &dragTestData{text: "card"}, cef.DragOperationsMaskDragOperationMove, 1, 2) != 1 {
 		t.Fatal("accepted start rejected")
@@ -671,17 +923,17 @@ func TestDragBridgeSnapshotsLinkAsURIAndCleansStaleNativeResult(t *testing.T) {
 	cleanups := 0
 	b := NewDragBridge(nil, nil, h)
 	b.schedule = func(fn func()) uint { idle = fn; return 1 }
-	b.startNative = func(payload dragPayload, _ cef.DragOperationsMask, _, _ int32) (*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes, error) {
+	b.startNative = func(payload dragPayload, _ cef.DragOperationsMask, _, _ int32) (*nativeDragResources, error) {
 		got = payload
 		b.protocol.Detach()
-		return &gdk.Drag{}, nil, nil, nil
+		return &nativeDragResources{Drag: &gdk.Drag{}}, nil
 	}
-	b.cleanupNative = func(*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes) { cleanups++ }
+	b.cleanupNative = func(*nativeDragResources) { cleanups++ }
 	if b.Start(&dragTestBrowser{host: h}, &dragTestData{link: "https://example.invalid/item"}, cef.DragOperationsMaskDragOperationLink, 2, 4) != 1 {
 		t.Fatal("start rejected")
 	}
 	idle()
-	if got.URI != "https://example.invalid/item" || got.Text != got.URI {
+	if got.LinkURL != "https://example.invalid/item" || got.Text != got.LinkURL {
 		t.Fatalf("payload=%+v", got)
 	}
 	if cleanups != 1 {
@@ -695,9 +947,9 @@ func TestDragBridgeDetachMakesAcceptedIdleStale(t *testing.T) {
 	starts := 0
 	b := NewDragBridge(nil, nil, h)
 	b.schedule = func(fn func()) uint { idle = fn; return 1 }
-	b.startNative = func(dragPayload, cef.DragOperationsMask, int32, int32) (*gdk.Drag, []*gdk.ContentProvider, []*glib.Bytes, error) {
+	b.startNative = func(dragPayload, cef.DragOperationsMask, int32, int32) (*nativeDragResources, error) {
 		starts++
-		return nil, nil, nil, errors.New("must not run")
+		return nil, errors.New("must not run")
 	}
 	if b.Start(&dragTestBrowser{host: h}, &dragTestData{text: "card"}, cef.DragOperationsMaskDragOperationMove, 1, 2) != 1 {
 		t.Fatal("start rejected")

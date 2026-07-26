@@ -34,6 +34,16 @@ type InboundPayload struct {
 	LinkTitle string
 }
 
+// OutboundPayload is platform-independent content offered by an internal drag.
+type OutboundPayload struct {
+	Text      string
+	HTML      string
+	Files     []string
+	LinkURL   string
+	LinkTitle string
+	ImagePNG  []byte
+}
+
 // DragDataWriter is the subset of CefDragData used for inbound conversion.
 type DragDataWriter interface {
 	SetFragmentText(string)
