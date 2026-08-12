@@ -990,6 +990,10 @@ func (ib *InputBridge) onKeyRelease(keyval, keycode, mods uint) {
 	host.SendKeyEvent(&evt)
 }
 
+// pasteFromClipboard deliberately reads from GDK instead of calling
+// CefFrame.Paste. In Linux windowless (OSR) mode CEF has no native GTK window
+// from which to obtain the Wayland/X11 clipboard, so CefFrame.Paste can be a
+// no-op even though it is the preferred API for windowed browsers.
 func (ib *InputBridge) pasteFromClipboard() {
 	ib.mu.Lock()
 	clipboard := ib.clipboard
@@ -1029,6 +1033,12 @@ func (ib *InputBridge) injectClipboardText(text string) {
 	}
 }
 
+// pasteJavaScript asks Chromium's editing engine to insert the GDK clipboard
+// text first. That path preserves selection, contenteditable behavior, undo,
+// and the input events expected by controlled web forms. The prototype setter
+// is a fallback for input/textarea elements where execCommand is unavailable;
+// assigning active.value directly would update only the DOM on frameworks such
+// as React, leaving their form state stale until the user typed another key.
 func pasteJavaScript(text string) string {
 	quoted := strings.ReplaceAll(strconv.Quote(text), "</", "<\\/")
 	return `(function(text){
