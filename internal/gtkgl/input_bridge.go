@@ -3,8 +3,6 @@ package gtkgl
 import (
 	"math"
 	"reflect"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"unicode"
@@ -13,7 +11,6 @@ import (
 	"github.com/bnema/purego-cef/cef"
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
-	"github.com/bnema/puregotk/v4/gio"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
@@ -39,7 +36,6 @@ type InputBridge struct {
 	scale float64
 
 	lastX, lastY        float64
-	clipboard           *gdk.Clipboard
 	imContext           *gtk.IMContextSimple
 	detached            bool
 	focused             bool
@@ -337,9 +333,6 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	ib.mu.Lock()
 	ib.widget = widget
 	ib.detached = false
-	if display := gdk.DisplayGetDefault(); display != nil {
-		ib.clipboard = display.GetClipboard()
-	}
 	ib.mu.Unlock()
 
 	click := gtk.NewGestureClick()
@@ -484,7 +477,6 @@ func (ib *InputBridge) Detach() {
 	ib.imContext = nil
 	ib.imContextCommitHandler = 0
 	ib.widget = nil
-	ib.clipboard = nil
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.detach()
 	}
@@ -992,69 +984,23 @@ func (ib *InputBridge) onKeyRelease(keyval, keycode, mods uint) {
 
 func (ib *InputBridge) pasteFromClipboard() {
 	ib.mu.Lock()
-	cb := ib.clipboard
 	detached := ib.detached
+	host := ib.host
 	ib.mu.Unlock()
-	if detached || cb == nil {
+	if detached || host == nil {
 		return
 	}
-	asyncCb := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
-		text, err := cb.ReadTextFinish(&gio.AsyncResultBase{Ptr: resultPtr})
-		if err != nil || text == "" {
-			return
-		}
-		ib.mu.Lock()
-		detached := ib.detached
-		host := ib.host
-		ib.mu.Unlock()
-		if detached || host == nil {
-			return
-		}
-		browser := host.GetBrowser()
-		if browser == nil {
-			return
-		}
-		frame := browser.GetMainFrame()
-		if frame == nil {
-			return
-		}
-		frame.ExecuteJavaScript(pasteJavaScript(text), "", 0)
-	})
-	cb.ReadTextAsync(nil, &asyncCb, 0)
-}
-
-func pasteJavaScript(text string) string {
-	quoted := jsString(text)
-	return `(function(text){
-const active=document.activeElement;
-if(active && (active.tagName==='TEXTAREA' || (active.tagName==='INPUT' && 'value' in active))){
-  const start=active.selectionStart ?? active.value.length;
-  const end=active.selectionEnd ?? start;
-  active.value=active.value.slice(0,start)+text+active.value.slice(end);
-  const next=start+text.length;
-  active.selectionStart=next; active.selectionEnd=next;
-  active.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
-  return;
-}
-const selection=window.getSelection && window.getSelection();
-if(selection && selection.rangeCount){
-  const range=selection.getRangeAt(0);
-  range.deleteContents();
-  const node=document.createTextNode(text);
-  range.insertNode(node);
-  range.setStartAfter(node); range.collapse(true);
-  selection.removeAllRanges(); selection.addRange(range);
-  return;
-}
-// document.execCommand is deprecated but retained as a compatibility fallback
-// for older/locked-down CEF pages where Selection/Range insertion is unavailable.
-if(document.execCommand){ document.execCommand('insertText',false,text); }
-})(` + quoted + `);`
-}
-
-func jsString(s string) string {
-	q := strconv.Quote(s)
-	return strings.ReplaceAll(q, "</", "<\\/")
+	browser := host.GetBrowser()
+	if browser == nil {
+		return
+	}
+	frame := browser.GetFocusedFrame()
+	if frame == nil {
+		frame = browser.GetMainFrame()
+	}
+	if frame != nil {
+		frame.Paste()
+	}
 }
 
 // DragMouseEvent applies the same scale and modifier translation as normal

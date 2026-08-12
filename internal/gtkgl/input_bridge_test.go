@@ -11,6 +11,7 @@ import (
 
 type recordingBrowserHost struct {
 	cef.BrowserHost
+	browser       cef.Browser
 	moves         []recordedMouseMove
 	clicks        []recordedMouseClick
 	captureLosts  int
@@ -31,6 +32,24 @@ type recordedMouseClick struct {
 	mouseUp int32
 	count   int32
 }
+
+type recordingBrowser struct {
+	cef.Browser
+	focusedFrame cef.Frame
+	mainFrame    cef.Frame
+}
+
+type recordingFrame struct {
+	cef.Frame
+	pastes int
+}
+
+func (h *recordingBrowserHost) GetBrowser() cef.Browser { return h.browser }
+
+func (b *recordingBrowser) GetFocusedFrame() cef.Frame { return b.focusedFrame }
+func (b *recordingBrowser) GetMainFrame() cef.Frame    { return b.mainFrame }
+
+func (f *recordingFrame) Paste() { f.pastes++ }
 
 func (h *recordingBrowserHost) SendMouseMoveEvent(event *cef.MouseEvent, leave int32) {
 	h.moves = append(h.moves, recordedMouseMove{event: *event, leave: leave})
@@ -937,6 +956,34 @@ func TestMiddleClickConsumedReleaseOnlyOnce(t *testing.T) {
 	}
 	if ib.consumeMiddleClickRelease() {
 		t.Fatalf("second release consumed unexpectedly")
+	}
+}
+
+func TestPasteFromClipboardUsesCEFFocusedFrame(t *testing.T) {
+	focused := &recordingFrame{}
+	main := &recordingFrame{}
+	host := &recordingBrowserHost{browser: &recordingBrowser{focusedFrame: focused, mainFrame: main}}
+	ib := NewInputBridge(host, 1)
+
+	ib.pasteFromClipboard()
+
+	if focused.pastes != 1 {
+		t.Fatalf("focused frame pastes = %d, want 1", focused.pastes)
+	}
+	if main.pastes != 0 {
+		t.Fatalf("main frame pastes = %d, want 0", main.pastes)
+	}
+}
+
+func TestPasteFromClipboardFallsBackToMainFrame(t *testing.T) {
+	main := &recordingFrame{}
+	host := &recordingBrowserHost{browser: &recordingBrowser{mainFrame: main}}
+	ib := NewInputBridge(host, 1)
+
+	ib.pasteFromClipboard()
+
+	if main.pastes != 1 {
+		t.Fatalf("main frame pastes = %d, want 1", main.pastes)
 	}
 }
 
