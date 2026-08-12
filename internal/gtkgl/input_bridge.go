@@ -3,6 +3,8 @@ package gtkgl
 import (
 	"math"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"unicode"
@@ -11,6 +13,7 @@ import (
 	"github.com/bnema/purego-cef/cef"
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
+	"github.com/bnema/puregotk/v4/gio"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
@@ -36,6 +39,7 @@ type InputBridge struct {
 	scale float64
 
 	lastX, lastY        float64
+	clipboard           *gdk.Clipboard
 	imContext           *gtk.IMContextSimple
 	detached            bool
 	focused             bool
@@ -333,6 +337,9 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	ib.mu.Lock()
 	ib.widget = widget
 	ib.detached = false
+	if display := widget.GetDisplay(); display != nil {
+		ib.clipboard = display.GetClipboard()
+	}
 	ib.mu.Unlock()
 
 	click := gtk.NewGestureClick()
@@ -474,6 +481,7 @@ func (ib *InputBridge) Detach() {
 	ib.detached = true
 	ib.controllers = nil
 	ib.callbacks = nil
+	ib.clipboard = nil
 	ib.imContext = nil
 	ib.imContextCommitHandler = 0
 	ib.widget = nil
@@ -984,10 +992,28 @@ func (ib *InputBridge) onKeyRelease(keyval, keycode, mods uint) {
 
 func (ib *InputBridge) pasteFromClipboard() {
 	ib.mu.Lock()
+	clipboard := ib.clipboard
+	detached := ib.detached
+	ib.mu.Unlock()
+	if detached || clipboard == nil {
+		return
+	}
+	asyncCb := gio.AsyncReadyCallback(func(_, resultPtr, _ uintptr) {
+		text, err := clipboard.ReadTextFinish(&gio.AsyncResultBase{Ptr: resultPtr})
+		if err != nil || text == "" {
+			return
+		}
+		ib.injectClipboardText(text)
+	})
+	clipboard.ReadTextAsync(nil, &asyncCb, 0)
+}
+
+func (ib *InputBridge) injectClipboardText(text string) {
+	ib.mu.Lock()
 	detached := ib.detached
 	host := ib.host
 	ib.mu.Unlock()
-	if detached || host == nil {
+	if detached || host == nil || text == "" {
 		return
 	}
 	browser := host.GetBrowser()
@@ -999,8 +1025,29 @@ func (ib *InputBridge) pasteFromClipboard() {
 		frame = browser.GetMainFrame()
 	}
 	if frame != nil {
-		frame.Paste()
+		frame.ExecuteJavaScript(pasteJavaScript(text), "", 0)
 	}
+}
+
+func pasteJavaScript(text string) string {
+	quoted := strings.ReplaceAll(strconv.Quote(text), "</", "<\\/")
+	return `(function(text){
+const active=document.activeElement;
+if(!active)return;
+if(document.execCommand&&document.execCommand('insertText',false,text))return;
+if(active.tagName!=='INPUT'&&active.tagName!=='TEXTAREA')return;
+const proto=active.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+const descriptor=Object.getOwnPropertyDescriptor(proto,'value');
+const setter=descriptor&&descriptor.set;
+if(!setter)return;
+const start=active.selectionStart==null?active.value.length:active.selectionStart;
+const end=active.selectionEnd==null?start:active.selectionEnd;
+const next=active.value.slice(0,start)+text+active.value.slice(end);
+setter.call(active,next);
+const caret=start+text.length;
+try{active.setSelectionRange(caret,caret);}catch(_){}
+active.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:text}));
+})(` + quoted + `);`
 }
 
 // DragMouseEvent applies the same scale and modifier translation as normal

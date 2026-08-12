@@ -1,6 +1,7 @@
 package gtkgl
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ type recordingBrowser struct {
 
 type recordingFrame struct {
 	cef.Frame
-	pastes int
+	scripts []string
 }
 
 func (h *recordingBrowserHost) GetBrowser() cef.Browser { return h.browser }
@@ -49,7 +50,9 @@ func (h *recordingBrowserHost) GetBrowser() cef.Browser { return h.browser }
 func (b *recordingBrowser) GetFocusedFrame() cef.Frame { return b.focusedFrame }
 func (b *recordingBrowser) GetMainFrame() cef.Frame    { return b.mainFrame }
 
-func (f *recordingFrame) Paste() { f.pastes++ }
+func (f *recordingFrame) ExecuteJavaScript(code, _ string, _ int32) {
+	f.scripts = append(f.scripts, code)
+}
 
 func (h *recordingBrowserHost) SendMouseMoveEvent(event *cef.MouseEvent, leave int32) {
 	h.moves = append(h.moves, recordedMouseMove{event: *event, leave: leave})
@@ -959,31 +962,46 @@ func TestMiddleClickConsumedReleaseOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestPasteFromClipboardUsesCEFFocusedFrame(t *testing.T) {
+func TestInjectClipboardTextUsesCEFFocusedFrame(t *testing.T) {
 	focused := &recordingFrame{}
 	main := &recordingFrame{}
 	host := &recordingBrowserHost{browser: &recordingBrowser{focusedFrame: focused, mainFrame: main}}
 	ib := NewInputBridge(host, 1)
 
-	ib.pasteFromClipboard()
+	ib.injectClipboardText("secret")
 
-	if focused.pastes != 1 {
-		t.Fatalf("focused frame pastes = %d, want 1", focused.pastes)
+	if len(focused.scripts) != 1 {
+		t.Fatalf("focused frame scripts = %d, want 1", len(focused.scripts))
 	}
-	if main.pastes != 0 {
-		t.Fatalf("main frame pastes = %d, want 0", main.pastes)
+	if len(main.scripts) != 0 {
+		t.Fatalf("main frame scripts = %d, want 0", len(main.scripts))
 	}
 }
 
-func TestPasteFromClipboardFallsBackToMainFrame(t *testing.T) {
+func TestInjectClipboardTextFallsBackToMainFrame(t *testing.T) {
 	main := &recordingFrame{}
 	host := &recordingBrowserHost{browser: &recordingBrowser{mainFrame: main}}
 	ib := NewInputBridge(host, 1)
 
-	ib.pasteFromClipboard()
+	ib.injectClipboardText("secret")
 
-	if main.pastes != 1 {
-		t.Fatalf("main frame pastes = %d, want 1", main.pastes)
+	if len(main.scripts) != 1 {
+		t.Fatalf("main frame scripts = %d, want 1", len(main.scripts))
+	}
+}
+
+func TestPasteJavaScriptUsesChromiumEditingThenControlledInputFallback(t *testing.T) {
+	script := pasteJavaScript("pa'ss</script>\n")
+	for _, want := range []string{
+		"document.execCommand('insertText',false,text)",
+		"Object.getOwnPropertyDescriptor(proto,'value')",
+		"setter.call(active,next)",
+		"new InputEvent('input'",
+		`"pa'ss<\/script>\n"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("paste script does not contain %q:\n%s", want, script)
+		}
 	}
 }
 
