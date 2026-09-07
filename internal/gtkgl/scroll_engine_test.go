@@ -534,8 +534,8 @@ func TestEngineImpulseAcrossPointerPositionsJoinsBurst(t *testing.T) {
 	if c.session.pendingX <= 30 {
 		t.Fatalf("displaced impulses did not join burst: %v", c.session.pendingX)
 	}
-	if c.session.anchorX != 10 || c.session.anchorY != 20 {
-		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.anchorX, c.session.anchorY)
+	if c.session.x != 10 || c.session.y != 20 {
+		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.x, c.session.y)
 	}
 }
 

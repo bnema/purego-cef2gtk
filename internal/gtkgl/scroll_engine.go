@@ -58,9 +58,6 @@ type scrollSession struct {
 	lastDeliveryT      float64
 	hasDelivery        bool
 	hasClock           bool
-	// anchorX/anchorY record the burst origin for the trace: synthetic
-	// delivery uses the frozen (x, y) coords for the whole burst.
-	anchorX, anchorY float64
 	// sentX/sentY tally dispatched integers for the trace.
 	sentX, sentY int64
 }
@@ -489,8 +486,6 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 			host:        host,
 			x:           x,
 			y:           y,
-			anchorX:     x,
-			anchorY:     y,
 			scale:       scale,
 			mods:        mods,
 			precise:     true,
