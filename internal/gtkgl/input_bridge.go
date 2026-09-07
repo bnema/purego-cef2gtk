@@ -69,11 +69,15 @@ type InputBridge struct {
 
 // NewInputBridge creates an input bridge. Scale values <= 0 are treated as 1.
 func NewInputBridge(host cef.BrowserHost, scale float64) *InputBridge {
+	controller := newScrollController()
+	if scrollTraceEnabled() {
+		controller.tracer = newScrollTracer()
+	}
 	return &InputBridge{
 		host:           host,
 		scale:          normalizeScale(scale),
 		pointerTracker: NewPointerTracker(defaultDragThreshold, nil, nil),
-		scroll:         newScrollController(),
+		scroll:         controller,
 	}
 }
 
@@ -422,13 +426,13 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	ib.syncWidgetVisibility(widget.GetMapped(), widget.GetVisible())
 }
 
-// wireScrollTick installs frame-clock scheduling for animated scroll motion.
-// Engine timestamps and frame ticks then share the widget clock domain.
+// wireScrollTick installs frame scheduling for animated scroll motion.
+// Timestamps still use the shared monotonic engine clock; the widget only
+// drives tick delivery.
 func (ib *InputBridge) wireScrollTick(widget *gtk.Widget) {
 	if ib == nil || ib.scroll == nil || widget == nil {
 		return
 	}
-	ib.scroll.now = ib.frameClockSeconds
 	ib.scroll.tickBackend = &scrollTickBackend{
 		registrar: func(cb *gtk.TickCallback) uint {
 			return widget.AddTickCallback(cb, 0, nil)

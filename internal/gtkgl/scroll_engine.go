@@ -58,6 +58,8 @@ type scrollSession struct {
 	lastDeliveryT      float64
 	hasDelivery        bool
 	hasClock           bool
+	// sentX/sentY tally dispatched integers for the trace.
+	sentX, sentY int64
 }
 
 // scrollTickBackend wires frame scheduling to the owning widget. Tests leave
@@ -78,8 +80,14 @@ type scrollTickState struct {
 	gen uint64
 }
 
+// scrollClockBase anchors the monotonic engine clock. All session
+// timestamps (physical events and frame ticks) share this domain so event
+// intervals stay live even when no GTK frames render between input events.
+// Never reset it: sessions compare instants across attaches and gestures.
+var scrollClockBase = time.Now()
+
 func wallClockSeconds() float64 {
-	return float64(time.Now().UnixNano()) / 1e9
+	return time.Since(scrollClockBase).Seconds()
 }
 
 func defaultWheelSender(host cef.BrowserHost, evt *cef.MouseEvent, dx, dy int32) {
@@ -109,8 +117,10 @@ func (c *scrollController) cleanupEpoch(epoch uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.session.epoch != epoch {
+		c.tracef("cleanup-skip epoch=%d live=%d", epoch, c.session.epoch)
 		return false
 	}
+	c.tracef("cleanup-run epoch=%d kind=%d", epoch, c.session.kind)
 	c.session = scrollSession{}
 	c.stopTickLocked()
 	return true
@@ -122,7 +132,9 @@ func (c *scrollController) cancelNow() {
 	if c == nil {
 		return
 	}
-	c.cleanupEpoch(c.invalidate())
+	retired := c.invalidate()
+	c.tracef("cancel-now retired=%d", retired)
+	c.cleanupEpoch(retired)
 }
 
 // suppressRelease poisons touchpad release eligibility without retiring the
@@ -164,7 +176,12 @@ func (c *scrollController) submitGated(epoch uint64, host cef.BrowserHost, evt *
 }
 
 func (c *scrollController) submitLocked(epoch uint64, host cef.BrowserHost, evt *cef.MouseEvent, dx, dy int32, now float64) bool {
-	if epoch != c.epoch.Load() || host == nil || !sameBrowserHost(c.session.host, host) {
+	if epoch != c.epoch.Load() {
+		c.tracef("submit-reject stale-epoch want=%d have=%d dx=%d dy=%d", epoch, c.epoch.Load(), dx, dy)
+		return false
+	}
+	if host == nil || !sameBrowserHost(c.session.host, host) {
+		c.tracef("submit-reject host-mismatch dx=%d dy=%d", dx, dy)
 		return false
 	}
 	sender := c.sender
@@ -172,6 +189,8 @@ func (c *scrollController) submitLocked(epoch uint64, host cef.BrowserHost, evt 
 		sender = defaultWheelSender
 	}
 	sender(host, evt, dx, dy)
+	c.session.sentX += int64(dx)
+	c.session.sentY += int64(dy)
 	c.session.lastDeliveryT = now
 	c.session.hasDelivery = true
 	return true
@@ -196,6 +215,8 @@ func (c *scrollController) submitPhysical(epoch uint64, host cef.BrowserHost, ev
 	}
 	sender(host, evt, dx, dy)
 	if c.session.epoch == epoch {
+		c.session.sentX += int64(dx)
+		c.session.sentY += int64(dy)
 		c.session.lastDeliveryT = now
 		c.session.hasDelivery = true
 	}
@@ -224,13 +245,26 @@ func (c *scrollController) animatedClass(opts ScrollOptions, unit gdk.ScrollUnit
 	return scrollClassNone
 }
 
-// beginTouch starts a fresh touchpad gesture, invalidating previous motion
-// before the application is notified. Callers notify the application after
-// this returns.
+// beginTouch starts a fresh touchpad gesture, invalidating previous touch
+// motion before the application is notified. A live wheel burst is
+// preserved: the gesture's own updates reclassify it on arrival (surface
+// updates take over the session, wheel updates join the burst), so a begin
+// signal from a mixed device stream never discards motion prematurely.
+// Callers notify the application after this returns.
 func (c *scrollController) beginTouch(x, y float64, scale float64, mods uint, host cef.BrowserHost) uint64 {
 	if c == nil {
 		return 0
 	}
+	c.mu.Lock()
+	if s := &c.session; s.kind == scrollSessionWheel && s.epoch == c.epoch.Load() && s.burstActive {
+		// A live wheel burst survives the begin signal without even
+		// retiring its epoch; the gesture's own updates reclassify the
+		// session on arrival.
+		epoch := s.epoch
+		c.mu.Unlock()
+		return epoch
+	}
+	c.mu.Unlock()
 	c.invalidate()
 	epoch := c.epoch.Load()
 	c.mu.Lock()
@@ -295,14 +329,17 @@ func (c *scrollController) updateTouch(unit gdk.ScrollUnit, unitKnown bool, cons
 		return false
 	}
 	if mods != s.mods {
+		c.tracef("touch-mods-kill old=%x new=%x", s.mods, mods)
 		*s = scrollSession{}
 		return false
 	}
 	if consumed {
+		c.tracef("touch-consumed")
 		s.poisoned = true
 		return false
 	}
 	if !unitKnown || unit != gdk.ScrollUnitSurfaceValue {
+		c.tracef("touch-class-end")
 		s.touchActive = false
 		return false
 	}
@@ -325,9 +362,11 @@ func (c *scrollController) endTouch() {
 	}
 	s.touchActive = false
 	if s.poisoned || s.navigated || s.accepted == 0 {
+		c.tracef("touch-end no-release poisoned=%v navigated=%v accepted=%d", s.poisoned, s.navigated, s.accepted)
 		return
 	}
 	s.awaitingVelocity = true
+	c.tracef("touch-end awaiting-velocity")
 }
 
 // releaseFromDecelerate arms release motion from GTK release velocity in
@@ -344,10 +383,12 @@ func (c *scrollController) releaseFromDecelerate(now float64, x, y float64, scal
 	defer c.mu.Unlock()
 	s := &c.session
 	if s.kind != scrollSessionTouchpad || s.epoch != c.epoch.Load() || !s.awaitingVelocity {
+		c.tracef("release-reject no-await kind=%d", s.kind)
 		return false
 	}
 	s.awaitingVelocity = false
 	if s.poisoned || s.navigated || !isFinite(vx) || !isFinite(vy) {
+		c.tracef("release-reject poisoned=%v navigated=%v finite=%v", s.poisoned, s.navigated, isFinite(vx) && isFinite(vy))
 		s.releasing = false
 		return false
 	}
@@ -358,6 +399,7 @@ func (c *scrollController) releaseFromDecelerate(now float64, x, y float64, scal
 	ovy := -vy * precise * vertical
 	stop := touchpadReleaseStop(ovx, ovy)
 	if stop <= 0 {
+		c.tracef("release-reject sub-threshold v=(%.1f,%.1f)", ovx, ovy)
 		return false
 	}
 	s.releasing = true
@@ -371,6 +413,7 @@ func (c *scrollController) releaseFromDecelerate(now float64, x, y float64, scal
 	s.mods = mods
 	s.precise = true
 	s.hasClock = true
+	c.tracef("release-arm v=(%.1f,%.1f) stop=%.3f", ovx, ovy, stop)
 	c.ensureTickLocked()
 	return true
 }
@@ -385,8 +428,33 @@ func (c *scrollController) abandonTouch() {
 	if c.session.kind != scrollSessionTouchpad {
 		return
 	}
+	c.tracef("abandon-touch")
 	c.session = scrollSession{}
 	c.stopTickLocked()
+}
+
+// wheelFreshLocked reports whether an impulse starts a new burst and why:
+// new (no live wheel burst), idle (past the idle deadline on a live burst),
+// mods, anchor, or host mismatch. An idle burst retires through
+// endBurstLocked so overload accounting applies; other switches discard
+// pending intentionally.
+func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, x, y float64, mods uint, host cef.BrowserHost) (bool, string) {
+	if s.kind != scrollSessionWheel || s.epoch != c.epoch.Load() || !s.burstActive {
+		return true, "new"
+	}
+	if (now - s.lastImpulseT) > scrollWheelIdleTimeout {
+		return true, "idle"
+	}
+	if mods != s.mods {
+		return true, "mods"
+	}
+	if x != s.x || y != s.y {
+		return true, "anchor"
+	}
+	if !sameBrowserHost(s.host, host) {
+		return true, "host"
+	}
+	return false, ""
 }
 
 // impulseWheel accumulates one accepted wheel impulse, advancing the burst
@@ -406,14 +474,12 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 		return
 	}
 	s := &c.session
-	fresh := s.kind != scrollSessionWheel || s.epoch != c.epoch.Load() || !s.burstActive ||
-		mods != s.mods || x != s.x || y != s.y ||
-		(now-s.lastImpulseT) > scrollWheelIdleTimeout ||
-		!sameBrowserHost(s.host, host)
+	fresh, reason := c.wheelFreshLocked(s, now, x, y, mods, host)
 	if fresh {
-		if s.kind == scrollSessionWheel && s.burstActive && (now-s.lastImpulseT) > scrollWheelIdleTimeout {
+		if reason == "idle" {
 			c.endBurstLocked(now, s)
 		}
+		c.tracef("burst-fresh reason=%s discarded=(%.1f,%.1f) sent=(%d,%d)", reason, s.pendingX, s.pendingY, s.sentX, s.sentY)
 		*s = scrollSession{
 			epoch:       c.epoch.Load(),
 			kind:        scrollSessionWheel,
@@ -442,6 +508,7 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 	s.pendingY += fy
 	s.lastImpulseT = now
 	s.lastStepT = now
+	c.tracef("impulse t=%.3f f=(%.1f,%.1f) pending=(%.1f,%.1f) res=(%.2f,%.2f)", now, fx, fy, s.pendingX, s.pendingY, s.resX, s.resY)
 	if pendingOverload(s.pendingX, s.pendingY) {
 		c.overloadCompletions++
 		s.pendingX, s.pendingY = 0, 0
@@ -484,12 +551,14 @@ func (c *scrollController) emitWheelShareLocked(s *scrollSession, now float64) {
 	s.pendingY -= float64(cy)
 	s.resX, s.resY = rx, ry
 	if cx == 0 && cy == 0 {
+		c.tracef("wheel-emit dt=%.4f emitted=(0,0) pending=(%.1f,%.1f)", dt, s.pendingX, s.pendingY)
 		return
 	}
 	evt := BuildMouseEvent(s.x, s.y, s.mods, s.scale)
 	if s.precise {
 		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 	}
+	c.tracef("wheel-emit dt=%.4f emitted=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dt, cx, cy, s.pendingX, s.pendingY, s.resX, s.resY)
 	c.submitLocked(c.epoch.Load(), s.host, &evt, cx, cy, now)
 }
 
@@ -528,11 +597,13 @@ func (c *scrollController) stepReleaseLocked(s *scrollSession, now float64) bool
 		return false
 	}
 	if !s.hasClock {
+		c.tracef("release-no-clock")
 		*s = scrollSession{}
 		c.stopTickLocked()
 		return false
 	}
 	if now-s.lastT > scrollFrameStallThreshold {
+		c.tracef("release-stall gap=%.3f sent=(%d,%d)", now-s.lastT, s.sentX, s.sentY)
 		*s = scrollSession{}
 		c.stopTickLocked()
 		return false
@@ -558,6 +629,7 @@ func (c *scrollController) stepReleaseLocked(s *scrollSession, now float64) bool
 		s.lastT = s.t0 + b
 	}
 	if now-s.t0 >= s.stopT {
+		c.tracef("release-done sent=(%d,%d) dropped-res=(%.2f,%.2f)", s.sentX, s.sentY, s.resX, s.resY)
 		*s = scrollSession{}
 		c.stopTickLocked()
 		return false
@@ -572,12 +644,15 @@ func (c *scrollController) stepWheelLocked(s *scrollSession, now float64) bool {
 		return false
 	}
 	if (now - s.lastImpulseT) > scrollWheelIdleTimeout {
+		px, py := s.pendingX, s.pendingY
 		c.endBurstLocked(now, s)
+		c.tracef("burst-idle discarded=(%.1f,%.1f) sent=(%d,%d) overloads=%d", px, py, s.sentX, s.sentY, c.overloadCompletions)
 		*s = scrollSession{}
 		c.stopTickLocked()
 		return false
 	}
 	if s.hasClock && now-s.lastStepT > scrollFrameStallThreshold {
+		c.tracef("burst-stall gap=%.3f discarded=(%.1f,%.1f) sent=(%d,%d)", now-s.lastStepT, s.pendingX, s.pendingY, s.sentX, s.sentY)
 		s.pendingX, s.pendingY = 0, 0
 		*s = scrollSession{}
 		c.stopTickLocked()
@@ -591,6 +666,7 @@ func (c *scrollController) stepWheelLocked(s *scrollSession, now float64) bool {
 		// Integer delivery is finished; the fractional remainder stays with
 		// the session until the idle deadline or the next impulse resumes
 		// the burst. No tick is needed while nothing integer can emit.
+		c.tracef("burst-settled pending=(%.2f,%.2f) res=(%.2f,%.2f) sent=(%d,%d)", s.pendingX, s.pendingY, s.resX, s.resY, s.sentX, s.sentY)
 		c.stopTickLocked()
 		return false
 	}
@@ -612,6 +688,7 @@ func (c *scrollController) noteModifiers(mods uint) {
 	if mods == s.mods {
 		return
 	}
+	c.tracef("session-kill mods old=%x new=%x kind=%d discarded=(%.1f,%.1f) sent=(%d,%d)", s.mods, mods, s.kind, s.pendingX, s.pendingY, s.sentX, s.sentY)
 	*s = scrollSession{}
 	c.stopTickLocked()
 }
@@ -631,6 +708,7 @@ func (c *scrollController) notePointer(x, y float64) {
 	if x == s.x && y == s.y {
 		return
 	}
+	c.tracef("session-kill anchor old=(%.1f,%.1f) new=(%.1f,%.1f) discarded=(%.1f,%.1f) sent=(%d,%d)", s.x, s.y, x, y, s.pendingX, s.pendingY, s.sentX, s.sentY)
 	s.burstActive = false
 	s.pendingX, s.pendingY = 0, 0
 	c.stopTickLocked()
@@ -656,6 +734,7 @@ func (c *scrollController) ensureTickLocked() {
 		return c.tickFire(gen)
 	}
 	c.tickState.id = c.tickBackend.registrar(cb)
+	c.tracef("tick-ensure id=%d gen=%d", c.tickState.id, gen)
 }
 
 // stopTickLocked removes the tick registration without releasing the
@@ -664,6 +743,7 @@ func (c *scrollController) stopTickLocked() {
 	if c.tickBackend == nil || c.tickState.id == 0 {
 		return
 	}
+	c.tracef("tick-stop id=%d", c.tickState.id)
 	c.tickBackend.remover(c.tickState.id)
 	c.tickState.id = 0
 	c.tickState.gen++
@@ -694,6 +774,7 @@ func (c *scrollController) tickFire(gen uint64) bool {
 	if c.now != nil {
 		now = c.now()
 	}
+	c.tracef("tick-fire gen=%d t=%.3f", gen, now)
 	keep := c.step(now)
 	if !keep {
 		c.mu.Lock()

@@ -441,6 +441,38 @@ func TestEngineReentrantInvalidateDuringSubmit(t *testing.T) {
 	}
 }
 
+func TestEngineBeginPreservesLiveWheelBurst(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	epochBefore := c.epoch.Load()
+	returned := c.beginTouch(10, 20, 1, 0, host)
+	if returned != epochBefore {
+		t.Fatalf("begin epoch = %d, want untouched %d", returned, epochBefore)
+	}
+	if c.session.kind != scrollSessionWheel || !c.session.burstActive {
+		t.Fatalf("begin discarded live burst: %+v", c.session)
+	}
+	if c.session.pendingX != 30 {
+		t.Fatalf("burst pending = %v, want 30", c.session.pendingX)
+	}
+	// A wheel update after the begin joins the preserved burst.
+	c.impulseWheel(100.05, 10, 20, 1, 0, host, 30, 0)
+	if c.session.pendingX <= 30 {
+		t.Fatalf("preserved burst did not accumulate: %v", c.session.pendingX)
+	}
+}
+
+func TestEngineBeginReplacesStaleBurst(t *testing.T) {
+	c, host := newEngineController(nil)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.invalidate()
+	c.beginTouch(10, 20, 1, 0, host)
+	if c.session.kind != scrollSessionTouchpad || !c.session.touchActive {
+		t.Fatalf("begin did not start touch session: %+v", c.session)
+	}
+}
+
 func TestEngineOldCleanupKeepsNewSession(t *testing.T) {
 	c, host := newEngineController(nil)
 	c.beginTouch(10, 20, 1, 0, host)

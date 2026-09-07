@@ -114,6 +114,15 @@ epoch; `CancelScrollEpoch` cleans up that epoch on the GTK thread without
 touching newer sessions. `CancelScroll` does both inline on the GTK thread.
 Already-submitted CEF events cannot be retracted.
 
+All engine timestamps share one monotonic clock so event intervals stay live
+whether or not GTK frames render between input events.
+
+For diagnosis, `PUREGO_CEF2GTK_SCROLL_TRACE=1` enables a bounded (2000-line)
+stderr trace of input events (both monotonic and GDK timestamps, units,
+deltas, coordinates, modifiers), tick lifecycle, engine decisions with
+discarded quantities, and per-burst submission totals. It never logs page
+content or URLs.
+
 See `examples/simple-browser` for a complete accelerated-only GTK+CEF setup.
 
 ## Development

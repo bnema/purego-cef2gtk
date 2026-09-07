@@ -114,6 +114,8 @@ type scrollController struct {
 	// without a widget (unit tests drive step manually).
 	tickBackend *scrollTickBackend
 	tickState   scrollTickState
+	// tracer sinks the bounded opt-in scroll trace. Nil disables it.
+	tracer *scrollTracer
 }
 
 func newScrollController() *scrollController {
@@ -231,13 +233,14 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 	if class := ib.scroll.animatedClass(opts, unit, unitKnown, mods); class != scrollClassNone {
 		epochBefore := ib.scroll.epoch.Load()
 		consumed := handler != nil && handler(event) == ScrollConsume
+		ib.scroll.tracef("input update class=%d unit=%v known=%v dx=%.2f dy=%.2f ix=%d iy=%d mods=%x xy=(%.1f,%.1f) consumed=%v epoch=%d mono=%.3f gdk_us=%d", class, unit, unitKnown, dx, dy, deltaX, deltaY, mods, x, y, consumed, epochBefore, ib.scrollNow(), ib.frameClockMicro())
 		if ib.scroll.epoch.Load() != epochBefore {
 			// The application invalidated from inside its callback:
 			// drop this update without delivery or session writes.
 			// Later physical input starts a fresh gesture.
 			return
 		}
-		ib.routeAnimatedUpdate(class, host, x, y, scale, mods, unit, unitKnown, dx, dy, opts, consumed, deltaX, deltaY)
+		ib.routeAnimatedUpdate(class, host, x, y, scale, mods, effectiveUnit, unitKnown, dx, dy, opts, consumed, deltaX, deltaY)
 		return
 	}
 	if handler != nil && handler(event) == ScrollConsume {
@@ -302,11 +305,13 @@ func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, 
 		if opts.TouchpadInertia {
 			// A fresh begin invalidates previous motion before the
 			// application is notified below.
-			ib.scroll.beginTouch(x, y, scale, mods, host)
+			beginEpoch := ib.scroll.beginTouch(x, y, scale, mods, host)
+			ib.scroll.tracef("input begin epoch=%d mono=%.3f gdk_us=%d", beginEpoch, ib.scrollNow(), ib.frameClockMicro())
 		}
 	case ScrollPhaseEnd:
 		ib.finishNavigationSwipe()
 		ib.resetNavigationSwipe()
+		ib.scroll.tracef("input end")
 		ib.scroll.endTouch()
 	}
 	if handler == nil {
@@ -325,7 +330,8 @@ func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, 
 func (ib *InputBridge) onScrollDecelerate(velocityX, velocityY float64, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
 	host, x, y, scale, opts, handler := ib.currentScrollState()
 	if opts.TouchpadInertia {
-		ib.scroll.releaseFromDecelerate(ib.scrollNow(), x, y, scale, mods, host, velocityX, velocityY, opts)
+		armed := ib.scroll.releaseFromDecelerate(ib.scrollNow(), x, y, scale, mods, host, velocityX, velocityY, opts)
+		ib.scroll.tracef("input decelerate v=(%.1f,%.1f) armed=%v", velocityX, velocityY, armed)
 	}
 	if handler == nil {
 		return
@@ -348,9 +354,9 @@ func (ib *InputBridge) suppressRelease() {
 	ib.scroll.suppressRelease()
 }
 
-// scrollNow reports engine-clock seconds for session timestamps. The
-// bridge installs a frame-clock reader on attach so physical events and
-// frame ticks share one clock domain; tests inject a manual clock.
+// scrollNow reports engine-clock seconds for session timestamps: the
+// shared monotonic clock for physical events and frame ticks. Tests inject
+// a manual clock through the controller hook.
 func (ib *InputBridge) scrollNow() float64 {
 	if ib == nil || ib.scroll == nil {
 		return wallClockSeconds()
@@ -358,27 +364,27 @@ func (ib *InputBridge) scrollNow() float64 {
 	if now := ib.scroll.now; now != nil {
 		return now()
 	}
-	return ib.frameClockSeconds()
+	return wallClockSeconds()
 }
 
-// frameClockSeconds reads the widget frame clock in seconds, falling back
-// to the wall clock outside frames or without a widget. GetFrameTime
-// returns microseconds.
-func (ib *InputBridge) frameClockSeconds() float64 {
+// frameClockMicro reports the raw GDK frame-clock time in microseconds for
+// trace interval comparison (0 when unavailable). Engine timestamps use the
+// monotonic clock instead; never mix the two domains in dt math.
+func (ib *InputBridge) frameClockMicro() int64 {
 	if ib == nil {
-		return wallClockSeconds()
+		return 0
 	}
 	ib.mu.Lock()
 	widget := ib.widget
 	ib.mu.Unlock()
-	if widget != nil {
-		if clock := widget.GetFrameClock(); clock != nil {
-			if us := clock.GetFrameTime(); us > 0 {
-				return float64(us) / 1e6
-			}
-		}
+	if widget == nil {
+		return 0
 	}
-	return wallClockSeconds()
+	clock := widget.GetFrameClock()
+	if clock == nil {
+		return 0
+	}
+	return clock.GetFrameTime()
 }
 
 func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
