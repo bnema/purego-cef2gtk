@@ -367,6 +367,54 @@ func TestEngineModifierInterruption(t *testing.T) {
 	}
 }
 
+func TestAnchorEpsilonBoundary(t *testing.T) {
+	if anchorLeft(0, 0, 8, 0) {
+		t.Fatal("exactly-epsilon distance terminates")
+	}
+	if anchorLeft(0, 0, 5.65, 5.65) {
+		t.Fatal("inside-diagonal terminates")
+	}
+	if !anchorLeft(0, 0, 8.1, 0) {
+		t.Fatal("beyond-epsilon survives")
+	}
+	if !anchorLeft(0, 0, 6, 6) {
+		t.Fatal("outside-diagonal survives")
+	}
+}
+
+func TestEnginePointerJitterSurvives(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.notePointer(11.2, 21.2)
+	if c.session.kind != scrollSessionWheel || !c.session.burstActive {
+		t.Fatalf("jitter killed burst: %+v", c.session)
+	}
+	if c.session.anchorX != 10 || c.session.anchorY != 20 {
+		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.anchorX, c.session.anchorY)
+	}
+	c.notePointer(30, 20)
+	if c.session.burstActive {
+		t.Fatal("teleport preserves burst")
+	}
+}
+
+func TestEngineCumulativeDriftTerminates(t *testing.T) {
+	c, host := newEngineController(nil)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	// Small steps accumulate against the fixed origin: the third step
+	// leaves the radius even though each step is small.
+	c.notePointer(13, 20)
+	c.notePointer(16, 20)
+	if !c.session.burstActive {
+		t.Fatal("burst died inside radius")
+	}
+	c.notePointer(19, 20)
+	if c.session.burstActive {
+		t.Fatal("cumulative drift past radius preserves burst")
+	}
+}
+
 func TestEnginePointerAnchorChangeEndsBurst(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
@@ -490,6 +538,70 @@ func TestEngineOldCleanupKeepsNewSession(t *testing.T) {
 	}
 	if c.session.kind != scrollSessionNone {
 		t.Fatalf("session survives current cleanup: %+v", c.session)
+	}
+}
+
+func TestEngineImpulseWithinEpsilonJoinsBurst(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	// Same burst: jittered impulse accumulates instead of restarting.
+	c.impulseWheel(100.05, 12, 21, 1, 0, host, 30, 0)
+	if c.session.pendingX <= 30 {
+		t.Fatalf("jittered impulse did not join burst: %v", c.session.pendingX)
+	}
+	if c.session.anchorX != 10 || c.session.anchorY != 20 {
+		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.anchorX, c.session.anchorY)
+	}
+	// Beyond the radius: fresh burst, old pending intentionally dropped.
+	c.impulseWheel(100.1, 40, 20, 1, 0, host, 30, 0)
+	if c.session.anchorX != 40 || c.session.pendingX != 30 {
+		t.Fatalf("teleport did not restart burst: %+v", c.session)
+	}
+}
+
+func TestEngineSyntheticDeliveryUsesFrozenAnchor(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.notePointer(12, 21)
+	c.step(100.05)
+	if len(rec.subs) == 0 {
+		t.Fatal("burst submitted nothing")
+	}
+	for _, s := range rec.subs {
+		if s.evt.X != 10 || s.evt.Y != 20 {
+			t.Fatalf("synthetic coords = (%d,%d), want frozen anchor (10,20)", s.evt.X, s.evt.Y)
+		}
+	}
+}
+
+func TestEngineMirroredSignReplay(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, -30, 15)
+	stepUntilDone(c, 100.0, 1.0/60)
+	tx, ty := rec.total()
+	if tx >= 0 || ty <= 0 {
+		t.Fatalf("mirrored total = (%d,%d), want (-,+)", tx, ty)
+	}
+	c.notePointer(10+scrollAnchorEpsilon+1, 20)
+	if c.session.burstActive {
+		t.Fatal("negative burst survives teleport")
+	}
+}
+
+func TestEngineStaleSessionStepSubmitsNothing(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	armTouchRelease(t, c, host, 1.0, 800, 0)
+	c.invalidate()
+	c.step(1.05)
+	if len(rec.subs) != 0 {
+		t.Fatalf("invalidated release submitted %d events", len(rec.subs))
+	}
+	if c.session.kind != scrollSessionNone {
+		t.Fatalf("stale session survives step: %+v", c.session)
 	}
 }
 

@@ -1,6 +1,7 @@
 package gtkgl
 
 import (
+	"math"
 	"time"
 
 	"github.com/bnema/purego-cef/cef"
@@ -58,8 +59,31 @@ type scrollSession struct {
 	lastDeliveryT      float64
 	hasDelivery        bool
 	hasClock           bool
+	// anchorX/anchorY freeze the burst origin: synthetic delivery uses the
+	// frozen (x, y) coords, while the tolerance radius is measured from the
+	// origin so slow drift cannot walk the anchor across targets.
+	anchorX, anchorY float64
 	// sentX/sentY tally dispatched integers for the trace.
 	sentX, sentY int64
+}
+
+// scrollAnchorEpsilon is the burst-anchor tolerance radius in logical
+// pixels, measured from the burst origin. Pointer jitter inside the radius
+// never terminates a burst; leaving it does. Sized from trace data: 97.4%
+// of observed anchor kills were within 8px micro-jitter, a single genuine
+// target change measured 2272px.
+const scrollAnchorEpsilon = 8.0
+
+// anchorLeft reports whether (x, y) left the tolerance radius around the
+// burst origin (ax, ay).
+func anchorLeft(ax, ay, x, y float64) bool {
+	dx, dy := x-ax, y-ay
+	return dx*dx+dy*dy > scrollAnchorEpsilon*scrollAnchorEpsilon
+}
+
+// anchorDist is the Euclidean distance used by anchorLeft, for the trace.
+func anchorDist(ax, ay, x, y float64) float64 {
+	return math.Hypot(x-ax, y-ay)
 }
 
 // scrollTickBackend wires frame scheduling to the owning widget. Tests leave
@@ -448,7 +472,8 @@ func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, x, y 
 	if mods != s.mods {
 		return true, "mods"
 	}
-	if x != s.x || y != s.y {
+	if anchorLeft(s.anchorX, s.anchorY, x, y) {
+		c.tracef("burst-anchor-left dist=%.1f origin=(%.1f,%.1f) at=(%.1f,%.1f)", anchorDist(s.anchorX, s.anchorY, x, y), s.anchorX, s.anchorY, x, y)
 		return true, "anchor"
 	}
 	if !sameBrowserHost(s.host, host) {
@@ -486,6 +511,8 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 			host:        host,
 			x:           x,
 			y:           y,
+			anchorX:     x,
+			anchorY:     y,
 			scale:       scale,
 			mods:        mods,
 			precise:     true,
@@ -525,7 +552,7 @@ func (c *scrollController) endBurstLocked(now float64, s *scrollSession) {
 	if s.kind != scrollSessionWheel || !s.burstActive {
 		return
 	}
-	if (now-s.lastImpulseT) > scrollWheelIdleTimeout && !wheelRemainderSettled(s.pendingX, s.pendingY) {
+	if (now-s.lastImpulseT) > scrollWheelIdleTimeout && !wheelRemainderSettled(s.pendingX-s.resX, s.pendingY-s.resY) {
 		c.overloadCompletions++
 	}
 	s.burstActive = false
@@ -543,8 +570,12 @@ func (c *scrollController) emitWheelShareLocked(s *scrollSession, now float64) {
 		return
 	}
 	share := wheelEmissionShare(dt)
-	ex := s.pendingX*share + s.resX
-	ey := s.pendingY*share + s.resY
+	// Decay the ideal float target; the delivery residual only rejoins for
+	// integer quantization and never feeds the next decay step.
+	idealX := s.pendingX - s.resX
+	idealY := s.pendingY - s.resY
+	ex := idealX*share + s.resX
+	ey := idealY*share + s.resY
 	cx, rx := extractWheelChunk(ex)
 	cy, ry := extractWheelChunk(ey)
 	s.pendingX -= float64(cx)
@@ -624,7 +655,9 @@ func (c *scrollController) stepReleaseLocked(s *scrollSession, now float64) bool
 			if s.precise {
 				evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 			}
-			c.submitLocked(c.epoch.Load(), s.host, &evt, cx, cy, now)
+			// Session epoch, not reloaded current: a racing invalidation
+			// must reject this submission.
+			c.submitLocked(s.epoch, s.host, &evt, cx, cy, now)
 		}
 		s.lastT = s.t0 + b
 	}
@@ -662,7 +695,7 @@ func (c *scrollController) stepWheelLocked(s *scrollSession, now float64) bool {
 		c.emitWheelShareLocked(s, now)
 		s.lastStepT = now
 	}
-	if wheelRemainderSettled(s.pendingX, s.pendingY) {
+	if wheelRemainderSettled(s.pendingX-s.resX, s.pendingY-s.resY) {
 		// Integer delivery is finished; the fractional remainder stays with
 		// the session until the idle deadline or the next impulse resumes
 		// the burst. No tick is needed while nothing integer can emit.
@@ -693,8 +726,10 @@ func (c *scrollController) noteModifiers(mods uint) {
 	c.stopTickLocked()
 }
 
-// notePointer terminates a wheel burst when the pointer anchor changes
-// mid-burst. Touchpad direct tracking keeps live coordinates instead.
+// notePointer terminates a wheel burst when the pointer leaves the burst
+// origin's tolerance radius. Jitter inside the radius is ignored and the
+// frozen delivery anchor is kept. Touchpad direct tracking keeps live
+// coordinates instead.
 func (c *scrollController) notePointer(x, y float64) {
 	if c == nil {
 		return
@@ -705,10 +740,10 @@ func (c *scrollController) notePointer(x, y float64) {
 	if s.kind != scrollSessionWheel || s.epoch != c.epoch.Load() || !s.burstActive {
 		return
 	}
-	if x == s.x && y == s.y {
+	if !anchorLeft(s.anchorX, s.anchorY, x, y) {
 		return
 	}
-	c.tracef("session-kill anchor old=(%.1f,%.1f) new=(%.1f,%.1f) discarded=(%.1f,%.1f) sent=(%d,%d)", s.x, s.y, x, y, s.pendingX, s.pendingY, s.sentX, s.sentY)
+	c.tracef("session-kill anchor dist=%.1f origin=(%.1f,%.1f) at=(%.1f,%.1f) discarded=(%.1f,%.1f) sent=(%d,%d)", anchorDist(s.anchorX, s.anchorY, x, y), s.anchorX, s.anchorY, x, y, s.pendingX, s.pendingY, s.sentX, s.sentY)
 	s.burstActive = false
 	s.pendingX, s.pendingY = 0, 0
 	c.stopTickLocked()

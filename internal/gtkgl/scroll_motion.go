@@ -89,9 +89,12 @@ func pendingOverload(px, py float64) bool {
 	return math.Abs(px) > scrollOverloadEnvelope || math.Abs(py) > scrollOverloadEnvelope
 }
 
-// wheelRemainderSettled reports whether pending displacement is below one
-// output unit on both axes, so integer delivery can finish while the session
-// retains its fractional remainder.
+// wheelRemainderSettled reports whether undelivered ideal displacement is
+// below one output unit on both axes, so integer delivery can finish while
+// the session retains its fractional remainder. It measures the ideal
+// (pending minus delivery residue), not the ledger balance: the ideal
+// decays asymptotically and integer emission stalls below one unit, so
+// testing the ledger would livelock instead of settling.
 func wheelRemainderSettled(px, py float64) bool {
 	return math.Abs(px) < 1 && math.Abs(py) < 1
 }

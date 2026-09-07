@@ -133,6 +133,54 @@ func TestPendingOverloadEnvelope(t *testing.T) {
 	}
 }
 
+func TestWheelEmissionFollowsAnalyticOracle(t *testing.T) {
+	run := func(dts []float64, impulses ...float64) (ideal, pending float64) {
+		rec := &gateRecorder{}
+		c, host := newEngineController(rec)
+		t := 100.0
+		for _, f := range impulses {
+			c.impulseWheel(t, 10, 20, 1, 0, host, f, 0)
+		}
+		for _, dt := range dts {
+			t += dt
+			c.step(t)
+		}
+		s := c.session
+		return s.pendingX - s.resX, s.pendingX
+	}
+	grid := func(dt float64, n int) []float64 {
+		dts := make([]float64, n)
+		for i := range dts {
+			dts[i] = dt
+		}
+		return dts
+	}
+	// Analytic oracle: ideal decays exactly as P0*exp(-T/tau) over the
+	// stepped spans; only integer quantization stays in pending.
+	for name, dts := range map[string][]float64{
+		"60Hz":      grid(1.0/60, 10),
+		"120Hz":     grid(1.0/120, 20),
+		"144Hz":     grid(1.0/144, 24),
+		"irregular": {0.011, 0.029, 0.004, 0.028, 0.029, 0.04, 0.07},
+	} {
+		total := 0.0
+		for _, dt := range dts {
+			total += dt
+		}
+		ideal, _ := run(dts, 90)
+		want := 90 * math.Exp(-total/wheelSmoothingTau)
+		if math.Abs(ideal-want) > 1e-6 {
+			t.Fatalf("%s ideal = %v, want oracle %v", name, ideal, want)
+		}
+	}
+	// Fractional impulses and reversal track the signed oracle.
+	ideal, _ := run(grid(1.0/60, 10), 30.5, -10.25)
+	want := 20.25 * math.Exp(-(10.0/60)/wheelSmoothingTau)
+	if math.Abs(ideal-want) > 1e-6 {
+		t.Fatalf("reversal ideal = %v, want oracle %v", ideal, want)
+	}
+}
+
 func TestWheelRemainderSettled(t *testing.T) {
 	if !wheelRemainderSettled(0.9, -0.5) {
 		t.Fatal("sub-unit remainder not settled")
