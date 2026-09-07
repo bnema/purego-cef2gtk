@@ -118,8 +118,18 @@ type scrollController struct {
 	tracer *scrollTracer
 }
 
+// scrollEpochBlock spaces controller epoch bases so cleanup tokens never
+// collide across bridge instances: a stale token from a detached bridge
+// cannot match a live session on a reattached one. One block covers 4B
+// invalidations per controller, far beyond any session lifetime.
+const scrollEpochBlock = uint64(1) << 32
+
+var scrollEpochBase atomic.Uint64
+
 func newScrollController() *scrollController {
-	return &scrollController{}
+	c := &scrollController{}
+	c.epoch.Store(scrollEpochBase.Add(scrollEpochBlock))
+	return c
 }
 
 func (c *scrollController) setOptions(opts ScrollOptions, fn func(ScrollEvent) ScrollDecision) {
@@ -242,7 +252,7 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 			// Later physical input starts a fresh gesture.
 			return
 		}
-		ib.routeAnimatedUpdate(class, host, x, y, scale, mods, effectiveUnit, unitKnown, dx, dy, opts, consumed, deltaX, deltaY)
+		ib.routeAnimatedUpdate(class, host, x, y, scale, mods, effectiveUnit, unitKnown, dx, dy, opts, consumed, deltaX, deltaY, epochBefore)
 		return
 	}
 	if handler != nil && handler(event) == ScrollConsume {
@@ -264,39 +274,41 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 // (and, for synthetic output, host identity) through the gate, so no new
 // submission from the invalidated session can occur. Synthetic output never
 // passes through OnScroll or navigation recognition.
-func (ib *InputBridge) routeAnimatedUpdate(class animatedScrollClass, host cef.BrowserHost, x, y, scale float64, mods uint, unit gdk.ScrollUnit, unitKnown bool, dx, dy float64, opts ScrollOptions, consumed bool, deltaX, deltaY int32) {
+func (ib *InputBridge) routeAnimatedUpdate(class animatedScrollClass, host cef.BrowserHost, x, y, scale float64, mods uint, unit gdk.ScrollUnit, unitKnown bool, dx, dy float64, opts ScrollOptions, consumed bool, deltaX, deltaY int32, epochBefore uint64) {
 	now := ib.scrollNow()
 	c := ib.scroll
 	switch class {
 	case scrollClassTouchpad:
 		if consumed {
-			c.updateTouch(unit, unitKnown, true, mods, x, y)
+			c.updateTouch(unit, unitKnown, true, mods, x, y, epochBefore)
 			return
 		}
-		c.ensureTouchSession(x, y, scale, mods, host)
-		if !c.updateTouch(unit, unitKnown, false, mods, x, y) {
+		c.ensureTouchSession(x, y, scale, mods, host, epochBefore)
+		if !c.updateTouch(unit, unitKnown, false, mods, x, y, epochBefore) {
 			// Modifier change or class race lost the session: deliver
 			// directly without arming release.
-			ib.submitAnimatedDirect(host, x, y, mods, scale, unit, unitKnown, deltaX, deltaY, now)
+			ib.submitAnimatedDirect(host, x, y, mods, scale, unit, unitKnown, deltaX, deltaY, now, epochBefore)
 			return
 		}
-		ib.submitAnimatedDirect(host, x, y, mods, scale, unit, unitKnown, deltaX, deltaY, now)
+		ib.submitAnimatedDirect(host, x, y, mods, scale, unit, unitKnown, deltaX, deltaY, now, epochBefore)
 	case scrollClassWheel:
 		c.abandonTouch()
 		if consumed {
 			return
 		}
 		fx, fy := translateScrollFloat(dx, dy, unit, opts)
-		c.impulseWheel(now, x, y, scale, mods, host, fx, fy)
+		c.impulseWheel(now, x, y, scale, mods, host, fx, fy, epochBefore)
 	}
 }
 
-func (ib *InputBridge) submitAnimatedDirect(host cef.BrowserHost, x, y float64, mods uint, scale float64, unit gdk.ScrollUnit, unitKnown bool, deltaX, deltaY int32, now float64) {
+func (ib *InputBridge) submitAnimatedDirect(host cef.BrowserHost, x, y float64, mods uint, scale float64, unit gdk.ScrollUnit, unitKnown bool, deltaX, deltaY int32, now float64, epoch uint64) {
 	evt := BuildMouseEvent(x, y, mods, scale)
 	if unitKnown && unit == gdk.ScrollUnitSurfaceValue {
 		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 	}
-	ib.scroll.submitPhysical(ib.scroll.epoch.Load(), host, &evt, deltaX, deltaY, now)
+	// The update's own epoch, never reloaded: a racing invalidation
+	// rejects this submission instead of adopting it.
+	ib.scroll.submitPhysical(epoch, host, &evt, deltaX, deltaY, now)
 }
 
 func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, unitKnown bool, mods uint) {

@@ -141,7 +141,7 @@ func TestWheelEmissionFollowsAnalyticOracle(t *testing.T) {
 		c, host := newEngineController(rec)
 		t := 100.0
 		for _, f := range impulses {
-			c.impulseWheel(t, 10, 20, 1, 0, host, f, 0)
+			c.impulseWheel(t, 10, 20, 1, 0, host, f, 0, c.epoch.Load())
 		}
 		for _, dt := range dts {
 			t += dt
