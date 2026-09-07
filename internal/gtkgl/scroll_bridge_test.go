@@ -24,13 +24,35 @@ func forwardCounter(counts map[ScrollPhase]int) func(ScrollEvent) ScrollDecision
 	}
 }
 
-func stepReleaseToEnd(ib *InputBridge) {
-	t := ib.scroll.session.t0
+func stepReleaseToEnd(t *testing.T, ib *InputBridge) {
+	t.Helper()
+	tm := ib.scroll.session.t0
 	for i := 0; i < 10000; i++ {
-		t += 1.0 / 60
-		if !ib.scroll.step(t) {
+		tm += 1.0 / 60
+		if !ib.scroll.step(tm) {
 			return
 		}
+	}
+	t.Fatal("scroll animation did not terminate within 10000 frames")
+}
+
+func TestBridgeStaleRoutedUpdateAdoptsNothing(t *testing.T) {
+	// An update that started under an old epoch (invalidation landed
+	// between its check and its routing) must not open an adopted
+	// session under the new epoch, on either the wheel or the touch path.
+	ib, host, rec := newAnimatedTestBridge(forwardCounter(map[ScrollPhase]int{}), ScrollOptions{TouchpadInertia: true, WheelSmoothing: true})
+	stale := ib.scroll.epoch.Load()
+	ib.scroll.invalidate()
+	ib.routeAnimatedUpdate(scrollClassWheel, host, 10, 20, 1, 0, gdk.ScrollUnitWheelValue, true, 0, -1, ScrollOptions{WheelSmoothing: true}, false, 0, -240, stale)
+	if ib.scroll.session.kind != scrollSessionNone || ib.scroll.session.burstActive {
+		t.Fatalf("stale wheel routing opened session: %+v", ib.scroll.session)
+	}
+	ib.routeAnimatedUpdate(scrollClassTouchpad, host, 10, 20, 1, 0, gdk.ScrollUnitSurfaceValue, true, 0, 0, ScrollOptions{TouchpadInertia: true}, false, 0, 0, stale)
+	if ib.scroll.session.kind != scrollSessionNone {
+		t.Fatalf("stale touch routing opened session: %+v", ib.scroll.session)
+	}
+	if len(rec.subs) != 0 || len(host.events) != 0 {
+		t.Fatalf("stale routing submitted: gated=%d raw=%d", len(rec.subs), len(host.events))
 	}
 }
 
@@ -43,7 +65,7 @@ func TestBridgeAnimatedTouchpadDirectAndRelease(t *testing.T) {
 	ib.onScrollUpdate(10, 0, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollDecelerate(800, 0, gdk.ScrollUnitSurfaceValue, true, 0)
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 
 	// Physical tracking stays direct (2x25 units) and the release decays
 	// (~360 units); everything flows through the gate, never the raw host.
@@ -100,7 +122,7 @@ func TestBridgeHandlerCancelSuppressesPhysical(t *testing.T) {
 	// Later phases of the dead gesture stay silent too.
 	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollDecelerate(900, 0, gdk.ScrollUnitSurfaceValue, true, 0)
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 	if len(rec.subs) != 0 {
 		t.Fatalf("dead gesture submitted %d events", len(rec.subs))
 	}
@@ -118,7 +140,7 @@ func TestBridgeHandlerConsumePoisonsRelease(t *testing.T) {
 	ib.onScrollUpdate(10, 0, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollDecelerate(900, 0, gdk.ScrollUnitSurfaceValue, true, 0)
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 
 	if len(rec.subs) != 0 || len(host.events) != 0 {
 		t.Fatalf("consumed gesture delivered: gated=%d raw=%d, want 0/0", len(rec.subs), len(host.events))
@@ -176,7 +198,7 @@ func TestBridgeNavigationSuppressesRelease(t *testing.T) {
 	ib.onScrollUpdate(-150, 0, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollBoundary(ScrollPhaseEnd, gdk.ScrollUnitSurfaceValue, true, 0)
 	ib.onScrollDecelerate(900, 0, gdk.ScrollUnitSurfaceValue, true, 0)
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 
 	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
 		t.Fatalf("nav actions = %v, want one back", actions)
@@ -238,7 +260,7 @@ func TestBridgeDetachCancelsRelease(t *testing.T) {
 	if ib.scroll.session.kind != scrollSessionNone {
 		t.Fatalf("session kind = %v, want cleared on detach", ib.scroll.session.kind)
 	}
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 	if len(rec.subs) != before {
 		t.Fatalf("submissions after detach = %d, want %d", len(rec.subs), before)
 	}
@@ -256,7 +278,7 @@ func TestBridgeSetHostReplacementCancels(t *testing.T) {
 	if ib.scroll.session.kind != scrollSessionNone {
 		t.Fatalf("session kind = %v, want cleared on host replacement", ib.scroll.session.kind)
 	}
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 	if len(rec.subs) != before {
 		t.Fatalf("submissions after host replacement = %d, want %d", len(rec.subs), before)
 	}
@@ -274,7 +296,7 @@ func TestBridgePressCancelsRelease(t *testing.T) {
 	if ib.scroll.session.kind != scrollSessionNone {
 		t.Fatalf("session kind = %v, want cleared on press", ib.scroll.session.kind)
 	}
-	stepReleaseToEnd(ib)
+	stepReleaseToEnd(t, ib)
 	if len(rec.subs) != before {
 		t.Fatalf("submissions after press = %d, want %d", len(rec.subs), before)
 	}

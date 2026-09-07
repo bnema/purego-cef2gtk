@@ -454,8 +454,10 @@ func (v *View) updateCachedSizeOnGTKThread() {
 	obs := observeWidgetScale(v.widget)
 	scaleChanged := prevScale != obs.scale
 	v.storeObservedScale(obs.scale)
-	if scaleChanged && v.input != nil {
-		v.input.SetScale(v.inputScaleForObservedScale(v.effectiveScaleForSurface(obs.scale)))
+	if scaleChanged {
+		if bridge := v.inputBridge(); bridge != nil {
+			bridge.SetScale(v.inputScaleForObservedScale(v.effectiveScaleForSurface(obs.scale)))
+		}
 	}
 	if changed || scaleChanged {
 		v.traceScaleObservation("widget-update", width, height, prevScale, obs)
@@ -627,7 +629,7 @@ func (v *View) traceScaleObservation(reason string, width, height int32, prevSca
 	}
 	fmt.Fprintf(os.Stderr,
 		"cef2gtk-scale reason=%s backend=%s widget_logical=%dx%d scale=%.3f prev_scale=%.3f widget_scale_factor=%d surface_scale=%.3f surface_scale_factor=%d has_surface=%t input_attached=%t\n",
-		reason, v.backend.String(), width, height, obs.scale, prevScale, obs.widgetScaleFactor, obs.surfaceScale, obs.surfaceScaleFactor, obs.hasSurface, v.input != nil)
+		reason, v.backend.String(), width, height, obs.scale, prevScale, obs.widgetScaleFactor, obs.surfaceScale, obs.surfaceScaleFactor, obs.hasSurface, v.inputBridge() != nil)
 }
 
 func traceOSREnabled() bool {
@@ -1000,8 +1002,8 @@ func (v *View) ConfigureProfiling(opts ProfileOptions) error {
 		v.profilePtr.Store(nil)
 		v.profileOptions = ProfileOptions{}
 		v.renderer.SetProfiler(nil)
-		if v.input != nil {
-			v.input.SetProfiler(nil)
+		if bridge := v.inputBridge(); bridge != nil {
+			bridge.SetProfiler(nil)
 		}
 		return nil
 	}
@@ -1013,8 +1015,8 @@ func (v *View) ConfigureProfiling(opts ProfileOptions) error {
 	v.profileOptions = opts
 	v.profileEnabled.Store(true)
 	v.renderer.SetProfiler(recorder)
-	if v.input != nil {
-		v.input.SetProfiler(recorder)
+	if bridge := v.inputBridge(); bridge != nil {
+		bridge.SetProfiler(recorder)
 	}
 	return nil
 }

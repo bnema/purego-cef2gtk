@@ -41,24 +41,26 @@ func newEngineController(rec *gateRecorder) (*scrollController, *scrollWheelCapt
 	return c, host
 }
 
-func stepUntilDone(c *scrollController, from, dt float64) (float64, int) {
-	t := from
+func stepUntilDone(t *testing.T, c *scrollController, from, dt float64) (float64, int) {
+	t.Helper()
+	now := from
 	steps := 0
 	for i := 0; i < 10000; i++ {
-		t += dt
+		now += dt
 		steps++
-		if !c.step(t) {
-			return t, steps
+		if !c.step(now) {
+			return now, steps
 		}
 	}
-	return t, steps
+	t.Fatalf("scroll animation did not terminate within 10000 frames from %.3f", from)
+	return now, steps
 }
 
 func armTouchRelease(t *testing.T, c *scrollController, host cef.BrowserHost, now float64, vx, vy float64) {
 	t.Helper()
 	c.beginTouch(10, 20, 1, 0, host)
 	for i := 0; i < 3; i++ {
-		if !c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20) {
+		if !c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20, c.epoch.Load()) {
 			t.Fatal("touch update not accepted")
 		}
 	}
@@ -73,7 +75,7 @@ func TestEngineTouchpadReleaseDecaysFinite(t *testing.T) {
 	c, host := newEngineController(rec)
 	armTouchRelease(t, c, host, 1.0, 800, -400)
 
-	_, steps := stepUntilDone(c, 1.0, 1.0/60)
+	_, steps := stepUntilDone(t, c, 1.0, 1.0/60)
 	if steps > 200 {
 		t.Fatalf("release steps = %d, want finite decay under 200", steps)
 	}
@@ -101,7 +103,7 @@ func TestEngineReleaseUsesUnitsPerSecond(t *testing.T) {
 	c, host := newEngineController(rec)
 	armTouchRelease(t, c, host, 1.0, 1000, 0)
 
-	stepUntilDone(c, 1.0, 1.0/60)
+	stepUntilDone(t, c, 1.0, 1.0/60)
 	tx, _ := rec.total()
 	// 1000 u/s * 2.5 * 0.18 s = 450 output units. A mistaken extra x1000
 	// (pixels/ms confusion) would yield 450000.
@@ -115,7 +117,7 @@ func TestEngineReleaseMatchesAcrossFrameRates(t *testing.T) {
 		rec := &gateRecorder{}
 		c, host := newEngineController(rec)
 		armTouchRelease(t, c, host, 1.0, 800, -400)
-		stepUntilDone(c, 1.0, dt)
+		stepUntilDone(t, c, 1.0, dt)
 		tx, _ := rec.total()
 		return tx
 	}
@@ -146,7 +148,7 @@ func TestEngineConsumedGestureIneligible(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
 	c.beginTouch(10, 20, 1, 0, host)
-	c.updateTouch(gdk.ScrollUnitSurfaceValue, true, true, 0, 10, 20)
+	c.updateTouch(gdk.ScrollUnitSurfaceValue, true, true, 0, 10, 20, c.epoch.Load())
 	c.endTouch()
 	if c.releaseFromDecelerate(1.0, 10, 20, 1, 0, host, 900, 0, ScrollOptions{}) {
 		t.Fatal("consumed gesture armed release")
@@ -158,7 +160,7 @@ func TestEngineInvalidVelocityCancels(t *testing.T) {
 		rec := &gateRecorder{}
 		c, host := newEngineController(rec)
 		c.beginTouch(10, 20, 1, 0, host)
-		c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20)
+		c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20, c.epoch.Load())
 		c.endTouch()
 		if c.releaseFromDecelerate(1.0, 10, 20, 1, 0, host, v[0], v[1], ScrollOptions{}) {
 			t.Fatalf("velocity %v armed release", v)
@@ -189,7 +191,7 @@ func TestEngineLateDecelerateAfterInvalidateIgnored(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
 	c.beginTouch(10, 20, 1, 0, host)
-	c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20)
+	c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20, c.epoch.Load())
 	c.endTouch()
 	c.invalidate()
 	if c.releaseFromDecelerate(1.0, 10, 20, 1, 0, host, 900, 0, ScrollOptions{}) {
@@ -202,9 +204,9 @@ func TestEngineWheelConservesUninterruptedBurst(t *testing.T) {
 	c, host := newEngineController(rec)
 	base := 100.0
 	for i := 0; i < 2; i++ {
-		c.impulseWheel(base+float64(i)*0.016, 10, 20, 1, 0, host, 20, -10)
+		c.impulseWheel(base+float64(i)*0.016, 10, 20, 1, 0, host, 20, -10, c.epoch.Load())
 	}
-	stepUntilDone(c, base+0.016, 1.0/60)
+	stepUntilDone(t, c, base+0.016, 1.0/60)
 	tx, ty := rec.total()
 	// 40/-20 units in, conserved within integer quantization plus the
 	// retained sub-unit session remainder.
@@ -228,9 +230,9 @@ func TestEngineWheelConservesUninterruptedBurst(t *testing.T) {
 func TestEngineWheelReversalNetsPending(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	c.impulseWheel(100.016, 10, 20, 1, 0, host, -30, 0)
-	stepUntilDone(c, 100.016, 1.0/60)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
+	c.impulseWheel(100.016, 10, 20, 1, 0, host, -30, 0, c.epoch.Load())
+	stepUntilDone(t, c, 100.016, 1.0/60)
 	tx, _ := rec.total()
 	if math.Abs(float64(tx)) > 3 {
 		t.Fatalf("reversal total = %d, want near 0", tx)
@@ -244,8 +246,8 @@ func TestEngineWheelNotchConservesFully(t *testing.T) {
 	// the idle deadline, so the run may end through settling or through
 	// one explicit overload completion; either way displacement is
 	// conserved within a couple of units.
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, 240)
-	stepUntilDone(c, 100.0, 1.0/60)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, 240, c.epoch.Load())
+	stepUntilDone(t, c, 100.0, 1.0/60)
 	if c.overloadCompletions > 1 {
 		t.Fatalf("overload completions = %d, want at most 1", c.overloadCompletions)
 	}
@@ -264,8 +266,8 @@ func TestEngineWheelOverloadCompletionIsExplicit(t *testing.T) {
 	// A flood impulse cannot settle within the idle deadline: at 250 ms
 	// after the last impulse a multi-unit remainder is discarded as an
 	// explicit overload completion, never conserved motion.
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, 2000)
-	stepUntilDone(c, 100.0, 1.0/60)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, 2000, c.epoch.Load())
+	stepUntilDone(t, c, 100.0, 1.0/60)
 	if c.overloadCompletions != 1 {
 		t.Fatalf("overload completions = %d, want 1 recorded exception", c.overloadCompletions)
 	}
@@ -278,7 +280,7 @@ func TestEngineWheelOverloadCompletionIsExplicit(t *testing.T) {
 func TestEngineWheelEnvelopeOverloadCancels(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, scrollOverloadEnvelope*4, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, scrollOverloadEnvelope*4, 0, c.epoch.Load())
 	if len(rec.subs) != 0 {
 		t.Fatalf("overload submitted %d events", len(rec.subs))
 	}
@@ -290,7 +292,7 @@ func TestEngineWheelEnvelopeOverloadCancels(t *testing.T) {
 func TestEngineWheelNonFiniteRejected(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, math.NaN(), 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, math.NaN(), 0, c.epoch.Load())
 	if c.session.kind != scrollSessionNone {
 		t.Fatalf("session kind = %v, want none for NaN impulse", c.session.kind)
 	}
@@ -302,7 +304,7 @@ func TestEngineWheelNonFiniteRejected(t *testing.T) {
 func TestEngineWheelStallCancelsWithoutCatchUp(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	c.step(100.05)
 	before := len(rec.subs)
 	// A 150 ms frame gap exceeds the stall threshold but not the idle
@@ -321,15 +323,15 @@ func TestEngineWheelStallCancelsWithoutCatchUp(t *testing.T) {
 func TestEngineWheelSettledRemainderResumes(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 5, 0)
-	stepUntilDone(c, 100.0, 1.0/60)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 5, 0, c.epoch.Load())
+	stepUntilDone(t, c, 100.0, 1.0/60)
 	if c.session.kind != scrollSessionWheel || !c.session.burstActive {
 		t.Fatalf("settled burst not retained: %+v", c.session)
 	}
 	// A same-position impulse inside the idle window resumes the burst and
 	// reuses the retained fractional remainder.
-	c.impulseWheel(100.15, 10, 20, 1, 0, host, 5, 0)
-	stepUntilDone(c, 100.15, 1.0/60)
+	c.impulseWheel(100.15, 10, 20, 1, 0, host, 5, 0, c.epoch.Load())
+	stepUntilDone(t, c, 100.15, 1.0/60)
 	tx, _ := rec.total()
 	if math.Abs(float64(tx)-10) > 2 {
 		t.Fatalf("resumed total = %d, want near 10", tx)
@@ -339,7 +341,7 @@ func TestEngineWheelSettledRemainderResumes(t *testing.T) {
 func TestEngineWheelSparseOutputLosesLatch(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0.5, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0.5, 0, c.epoch.Load())
 	if c.step(100.05) {
 		t.Fatal("sub-unit burst keeps ticking")
 	}
@@ -357,7 +359,7 @@ func TestEngineWheelSparseOutputLosesLatch(t *testing.T) {
 func TestEngineModifierInterruption(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	c.noteModifiers(uint(gdk.ShiftMaskValue))
 	if c.session.kind != scrollSessionNone {
 		t.Fatalf("burst survives modifier change: %+v", c.session)
@@ -378,12 +380,12 @@ func TestEngineFiveNotchBurstSurvivesPointerDrift(t *testing.T) {
 	pts := [][2]float64{{946.6, 1472.6}, {946.0, 1476.0}, {945.2, 1479.0}, {944.6, 1482.0}, {944.2, 1484.6}}
 	for i, pt := range pts {
 		now := t0 + float64(i)*0.004
-		c.impulseWheel(now, pt[0], pt[1], 1, 0, host, 0, -240)
+		c.impulseWheel(now, pt[0], pt[1], 1, 0, host, 0, -240, c.epoch.Load())
 	}
 	if !c.session.burstActive {
 		t.Fatalf("drift killed 5-notch burst: %+v", c.session)
 	}
-	stepUntilDone(c, t0+0.02, 1.0/165)
+	stepUntilDone(t, c, t0+0.02, 1.0/165)
 	_, ty := rec.total()
 	// The tail keeps emitting after the last notch; only the sub-unit
 	// remainder and the documented idle-deadline overload cut (<1% here)
@@ -399,7 +401,7 @@ func TestEngineWheelEmitRejectsRacingInvalidation(t *testing.T) {
 	// path validates the session epoch, never the reloaded current.
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
 	stale := c.invalidate()
 	c.mu.Lock()
 	s := &c.session
@@ -411,6 +413,50 @@ func TestEngineWheelEmitRejectsRacingInvalidation(t *testing.T) {
 	c.mu.Unlock()
 	if len(rec.subs) != 0 {
 		t.Fatalf("racing invalidation submitted %d events", len(rec.subs))
+	}
+}
+
+func TestEngineStaleEpochImpulseRejected(t *testing.T) {
+	// An impulse carrying a pre-invalidation epoch is dropped instead of
+	// opening an adopted session under the new epoch.
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	live := c.epoch.Load()
+	c.invalidate()
+	if c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, live) {
+		t.Fatal("stale-epoch impulse accepted")
+	}
+	if c.session.kind != scrollSessionNone || c.session.burstActive {
+		t.Fatalf("stale impulse opened session: %+v", c.session)
+	}
+	if len(rec.subs) != 0 {
+		t.Fatalf("stale impulse submitted %d events", len(rec.subs))
+	}
+}
+
+func TestEngineStaleEpochTouchStartRejected(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	live := c.epoch.Load()
+	c.invalidate()
+	c.ensureTouchSession(10, 20, 1, 0, host, live)
+	if c.session.kind != scrollSessionNone {
+		t.Fatalf("stale touch start opened session: %+v", c.session)
+	}
+	if c.updateTouch(gdk.ScrollUnitSurfaceValue, true, false, 0, 10, 20, live) {
+		t.Fatal("stale-epoch touch update accepted")
+	}
+}
+
+func TestControllerEpochBasesUniqueAcrossBridges(t *testing.T) {
+	// Cleanup tokens must not collide across bridge instances: a stale
+	// token from a detached bridge cannot match a live session after
+	// reattach.
+	a := newScrollController()
+	b := newScrollController()
+	ea, eb := a.epoch.Load(), b.epoch.Load()
+	if eb <= ea || eb-ea < scrollEpochBlock {
+		t.Fatalf("epoch bases = (%d,%d), want distinct blocks", ea, eb)
 	}
 }
 
@@ -432,7 +478,7 @@ func TestEngineSubmitGateRejectsStaleEpoch(t *testing.T) {
 	}
 	// The live epoch still submits.
 	evt2 := cef.MouseEvent{}
-	c.ensureTouchSession(10, 20, 1, 0, host)
+	c.ensureTouchSession(10, 20, 1, 0, host, c.epoch.Load())
 	if !c.submitPhysical(c.epoch.Load(), host, &evt2, 5, 5, 200.0) {
 		t.Fatal("live epoch rejected")
 	}
@@ -463,7 +509,7 @@ func TestEngineReentrantInvalidateDuringSubmit(t *testing.T) {
 		c.invalidate()
 	}
 	armTouchRelease(t, c, host, 1.0, 800, 0)
-	stepUntilDone(c, 1.0, 1.0/60)
+	stepUntilDone(t, c, 1.0, 1.0/60)
 	// The first submission invalidated the session; exactly one gated
 	// submission escapes and the rest are rejected without deadlock.
 	if calls != 1 {
@@ -474,7 +520,7 @@ func TestEngineReentrantInvalidateDuringSubmit(t *testing.T) {
 func TestEngineBeginPreservesLiveWheelBurst(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	epochBefore := c.epoch.Load()
 	returned := c.beginTouch(10, 20, 1, 0, host)
 	if returned != epochBefore {
@@ -487,7 +533,7 @@ func TestEngineBeginPreservesLiveWheelBurst(t *testing.T) {
 		t.Fatalf("burst pending = %v, want 30", c.session.pendingX)
 	}
 	// A wheel update after the begin joins the preserved burst.
-	c.impulseWheel(100.05, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.05, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	if c.session.pendingX <= 30 {
 		t.Fatalf("preserved burst did not accumulate: %v", c.session.pendingX)
 	}
@@ -495,7 +541,7 @@ func TestEngineBeginPreservesLiveWheelBurst(t *testing.T) {
 
 func TestEngineBeginReplacesStaleBurst(t *testing.T) {
 	c, host := newEngineController(nil)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	c.invalidate()
 	c.beginTouch(10, 20, 1, 0, host)
 	if c.session.kind != scrollSessionTouchpad || !c.session.touchActive {
@@ -526,11 +572,11 @@ func TestEngineOldCleanupKeepsNewSession(t *testing.T) {
 func TestEngineImpulseAcrossPointerPositionsJoinsBurst(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	// Jittered and teleported impulses all join the live burst instead
 	// of restarting it; delivery stays at the frozen origin.
-	c.impulseWheel(100.05, 12, 21, 1, 0, host, 30, 0)
-	c.impulseWheel(100.1, 40, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.05, 12, 21, 1, 0, host, 30, 0, c.epoch.Load())
+	c.impulseWheel(100.1, 40, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	if c.session.pendingX <= 30 {
 		t.Fatalf("displaced impulses did not join burst: %v", c.session.pendingX)
 	}
@@ -542,10 +588,10 @@ func TestEngineImpulseAcrossPointerPositionsJoinsBurst(t *testing.T) {
 func TestEngineSyntheticDeliveryUsesFrozenOrigin(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0, c.epoch.Load())
 	// A far displaced impulse joins the burst; delivery stays at the
 	// frozen origin.
-	c.impulseWheel(100.05, 400, 900, 1, 0, host, 30, 0)
+	c.impulseWheel(100.05, 400, 900, 1, 0, host, 30, 0, c.epoch.Load())
 	c.step(100.1)
 	if len(rec.subs) == 0 {
 		t.Fatal("burst submitted nothing")
@@ -560,8 +606,8 @@ func TestEngineSyntheticDeliveryUsesFrozenOrigin(t *testing.T) {
 func TestEngineMirroredSignReplay(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, -30, 15)
-	stepUntilDone(c, 100.0, 1.0/60)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, -30, 15, c.epoch.Load())
+	stepUntilDone(t, c, 100.0, 1.0/60)
 	tx, ty := rec.total()
 	if tx >= 0 || ty <= 0 {
 		t.Fatalf("mirrored total = (%d,%d), want (-,+)", tx, ty)
@@ -665,7 +711,7 @@ func TestEngineTickReplacementAndTeardown(t *testing.T) {
 	if c.tickState.id != firstID {
 		t.Fatalf("tick id = %d, want %d after stale trampoline", c.tickState.id, firstID)
 	}
-	stepUntilDone(c, 1.0, 1.0/60)
+	stepUntilDone(t, c, 1.0, 1.0/60)
 	if stub.unrefs != 0 {
 		t.Fatalf("unrefs = %d during stepping, want 0 (teardown owns unref)", stub.unrefs)
 	}

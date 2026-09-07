@@ -55,8 +55,6 @@ type scrollSession struct {
 	pendingX, pendingY float64
 	lastImpulseT       float64
 	lastStepT          float64
-	lastDeliveryT      float64
-	hasDelivery        bool
 	hasClock           bool
 	// sentX/sentY tally dispatched integers for the trace.
 	sentX, sentY int64
@@ -191,8 +189,6 @@ func (c *scrollController) submitLocked(epoch uint64, host cef.BrowserHost, evt 
 	sender(host, evt, dx, dy)
 	c.session.sentX += int64(dx)
 	c.session.sentY += int64(dy)
-	c.session.lastDeliveryT = now
-	c.session.hasDelivery = true
 	return true
 }
 
@@ -217,8 +213,6 @@ func (c *scrollController) submitPhysical(epoch uint64, host cef.BrowserHost, ev
 	if c.session.epoch == epoch {
 		c.session.sentX += int64(dx)
 		c.session.sentY += int64(dy)
-		c.session.lastDeliveryT = now
-		c.session.hasDelivery = true
 	}
 	return true
 }
@@ -266,8 +260,11 @@ func (c *scrollController) beginTouch(x, y float64, scale float64, mods uint, ho
 	}
 	c.mu.Unlock()
 	c.invalidate()
-	epoch := c.epoch.Load()
 	c.mu.Lock()
+	// Read the epoch inside the lock: an invalidation landing between the
+	// bump above and this write would otherwise stamp the new session
+	// stale. A later bump still retires it through the submission gate.
+	epoch := c.epoch.Load()
 	c.session = scrollSession{
 		epoch:       epoch,
 		kind:        scrollSessionTouchpad,
@@ -287,13 +284,18 @@ func (c *scrollController) beginTouch(x, y float64, scale float64, mods uint, ho
 // touch gesture owns the controller, discarding any wheel burst
 // intentionally. It never bumps the epoch: a stale tick revalidates the
 // session kind and stops quietly, so no cross-thread invalidation is needed
-// for same-thread input-class switches.
-func (c *scrollController) ensureTouchSession(x, y float64, scale float64, mods uint, host cef.BrowserHost) {
+// for same-thread input-class switches. The caller passes the epoch its
+// update started under; a mismatch drops the session start instead of
+// adopting stale motion into the new epoch.
+func (c *scrollController) ensureTouchSession(x, y float64, scale float64, mods uint, host cef.BrowserHost, epoch uint64) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if epoch != c.epoch.Load() {
+		return
+	}
 	s := &c.session
 	if s.kind == scrollSessionTouchpad && s.epoch == c.epoch.Load() &&
 		(s.touchActive || s.awaitingVelocity || s.releasing) {
@@ -317,15 +319,17 @@ func (c *scrollController) ensureTouchSession(x, y float64, scale float64, mods 
 
 // updateTouch records a direct-phase touchpad update. It returns whether the
 // update was accepted for release eligibility. Consumed updates poison the
-// whole gesture; modifier changes terminate it.
-func (c *scrollController) updateTouch(unit gdk.ScrollUnit, unitKnown bool, consumed bool, mods uint, x, y float64) bool {
+// whole gesture; modifier changes terminate it. The update carries the
+// epoch its gesture started under: a mismatch means an invalidation landed
+// mid-flight and the update is dropped instead of adopted by the new epoch.
+func (c *scrollController) updateTouch(unit gdk.ScrollUnit, unitKnown bool, consumed bool, mods uint, x, y float64, epoch uint64) bool {
 	if c == nil {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := &c.session
-	if s.kind != scrollSessionTouchpad || s.epoch != c.epoch.Load() || !s.touchActive {
+	if epoch != c.epoch.Load() || s.kind != scrollSessionTouchpad || s.epoch != epoch || !s.touchActive {
 		return false
 	}
 	if mods != s.mods {
@@ -461,17 +465,23 @@ func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, mods 
 // plain addition. Bursts end (discarding pending intentionally) on session
 // changes, stalls, modifier or host mismatch, and the idle deadline.
 // Pointer motion never splits a burst: every impulse joins the live burst
-// and delivery stays at the frozen origin.
-func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64, mods uint, host cef.BrowserHost, fx, fy float64) {
+// and delivery stays at the frozen origin. The impulse carries the epoch
+// its update started under and reports acceptance: a mismatch means an
+// invalidation landed mid-flight and the impulse is dropped instead of
+// adopted by the new epoch.
+func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64, mods uint, host cef.BrowserHost, fx, fy float64, epoch uint64) bool {
 	if c == nil {
-		return
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if epoch != c.epoch.Load() {
+		return false
+	}
 	if !isFinite(fx) || !isFinite(fy) {
 		// Non-finite impulses never enter motion state; the session is
 		// left untouched rather than poisoned with NaN displacement.
-		return
+		return false
 	}
 	s := &c.session
 	fresh, reason := c.wheelFreshLocked(s, now, mods, host)
@@ -508,15 +518,18 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 	s.pendingY += fy
 	s.lastImpulseT = now
 	s.lastStepT = now
-	c.tracef("impulse t=%.3f f=(%.1f,%.1f) pending=(%.1f,%.1f) res=(%.2f,%.2f)", now, fx, fy, s.pendingX, s.pendingY, s.resX, s.resY)
+	if c.tracing() {
+		c.tracef("impulse t=%.3f f=(%.1f,%.1f) pending=(%.1f,%.1f) res=(%.2f,%.2f)", now, fx, fy, s.pendingX, s.pendingY, s.resX, s.resY)
+	}
 	if pendingOverload(s.pendingX, s.pendingY) {
 		c.overloadCompletions++
 		s.pendingX, s.pendingY = 0, 0
 		s.burstActive = false
 		c.stopTickLocked()
-		return
+		return false
 	}
 	c.ensureTickLocked()
+	return true
 }
 
 // endBurstLocked retires a wheel burst. A remainder above one unit past the
@@ -555,14 +568,18 @@ func (c *scrollController) emitWheelShareLocked(s *scrollSession, now float64) {
 	s.pendingY -= float64(cy)
 	s.resX, s.resY = rx, ry
 	if cx == 0 && cy == 0 {
-		c.tracef("wheel-emit dt=%.4f emitted=(0,0) pending=(%.1f,%.1f)", dt, s.pendingX, s.pendingY)
+		if c.tracing() {
+			c.tracef("wheel-emit dt=%.4f emitted=(0,0) pending=(%.1f,%.1f)", dt, s.pendingX, s.pendingY)
+		}
 		return
 	}
 	evt := BuildMouseEvent(s.x, s.y, s.mods, s.scale)
 	if s.precise {
 		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 	}
-	c.tracef("wheel-emit dt=%.4f emitted=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dt, cx, cy, s.pendingX, s.pendingY, s.resX, s.resY)
+	if c.tracing() {
+		c.tracef("wheel-emit dt=%.4f emitted=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dt, cx, cy, s.pendingX, s.pendingY, s.resX, s.resY)
+	}
 	// Session epoch, not reloaded current: a racing invalidation
 	// must reject this submission.
 	c.submitLocked(s.epoch, s.host, &evt, cx, cy, now)
@@ -774,7 +791,9 @@ func (c *scrollController) tickFire(gen uint64) bool {
 	if c.now != nil {
 		now = c.now()
 	}
-	c.tracef("tick-fire gen=%d t=%.3f", gen, now)
+	if c.tracing() {
+		c.tracef("tick-fire gen=%d t=%.3f", gen, now)
+	}
 	keep := c.step(now)
 	if !keep {
 		c.mu.Lock()
