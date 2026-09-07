@@ -91,6 +91,38 @@ cef.BrowserHostCreateBrowser(&info, client, "https://example.com/", &settings, n
 _ = view.AttachInput(browser.GetHost(), cef2gtk.InputOptions{Scale: 0})
 ```
 
+### Inertial scrolling
+
+Touchpad inertia and wheel smoothing are opt-in per `InputOptions.Scroll`:
+
+```go
+_ = view.AttachInput(host, cef2gtk.InputOptions{
+    Scroll: cef2gtk.ScrollOptions{TouchpadInertia: true, WheelSmoothing: true},
+})
+```
+
+Zero values keep direct scroll behavior. Touchpad motion tracks input
+directly; a valid release decays exponentially and stops on retouch,
+modifiers, press, focus loss, hide, host replacement, or detach. Wheel
+bursts interpolate accepted impulses across frames; Ctrl/Alt/Meta-modified
+input always bypasses animation with direct physical delivery. Synthetic
+output never passes through `OnScroll` or navigation recognition.
+
+Cancellation splits immediate invalidation from GTK cleanup:
+`InvalidateScroll` retires motion from any thread and returns the retired
+epoch; `CancelScrollEpoch` cleans up that epoch on the GTK thread without
+touching newer sessions. `CancelScroll` does both inline on the GTK thread.
+Already-submitted CEF events cannot be retracted.
+
+All engine timestamps share one monotonic clock so event intervals stay live
+whether or not GTK frames render between input events.
+
+For diagnosis, `PUREGO_CEF2GTK_SCROLL_TRACE=1` enables a bounded (2000-line)
+stderr trace of input events (both monotonic and GDK timestamps, units,
+deltas, coordinates, modifiers), tick lifecycle, engine decisions with
+discarded quantities, and per-burst submission totals. It never logs page
+content or URLs.
+
 See `examples/simple-browser` for a complete accelerated-only GTK+CEF setup.
 
 ## Development
