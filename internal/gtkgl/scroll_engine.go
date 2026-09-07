@@ -58,10 +58,8 @@ type scrollSession struct {
 	lastDeliveryT      float64
 	hasDelivery        bool
 	hasClock           bool
-	// anchorX/anchorY record the burst origin: synthetic delivery uses the
-	// frozen (x, y) coords for the whole burst. Pointer motion never
-	// retargets or cancels a wheel burst; only idle/stall, modifiers,
-	// host replacement, and lifecycle invalidation end it.
+	// anchorX/anchorY record the burst origin for the trace: synthetic
+	// delivery uses the frozen (x, y) coords for the whole burst.
 	anchorX, anchorY float64
 	// sentX/sentY tally dispatched integers for the trace.
 	sentX, sentY int64
@@ -444,7 +442,7 @@ func (c *scrollController) abandonTouch() {
 // endBurstLocked so overload accounting applies; other switches discard
 // pending intentionally. Pointer position never starts a fresh burst:
 // delivery stays at the frozen burst origin while the burst is live.
-func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, x, y float64, mods uint, host cef.BrowserHost) (bool, string) {
+func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, mods uint, host cef.BrowserHost) (bool, string) {
 	if s.kind != scrollSessionWheel || s.epoch != c.epoch.Load() || !s.burstActive {
 		return true, "new"
 	}
@@ -479,7 +477,7 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 		return
 	}
 	s := &c.session
-	fresh, reason := c.wheelFreshLocked(s, now, x, y, mods, host)
+	fresh, reason := c.wheelFreshLocked(s, now, mods, host)
 	if fresh {
 		if reason == "idle" {
 			c.endBurstLocked(now, s)
@@ -570,7 +568,9 @@ func (c *scrollController) emitWheelShareLocked(s *scrollSession, now float64) {
 		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 	}
 	c.tracef("wheel-emit dt=%.4f emitted=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dt, cx, cy, s.pendingX, s.pendingY, s.resX, s.resY)
-	c.submitLocked(c.epoch.Load(), s.host, &evt, cx, cy, now)
+	// Session epoch, not reloaded current: a racing invalidation
+	// must reject this submission.
+	c.submitLocked(s.epoch, s.host, &evt, cx, cy, now)
 }
 
 // step advances animated motion to now (seconds) and reports whether frame
@@ -704,13 +704,6 @@ func (c *scrollController) noteModifiers(mods uint) {
 	c.tracef("session-kill mods old=%x new=%x kind=%d discarded=(%.1f,%.1f) sent=(%d,%d)", s.mods, mods, s.kind, s.pendingX, s.pendingY, s.sentX, s.sentY)
 	*s = scrollSession{}
 	c.stopTickLocked()
-}
-
-// notePointer observes pointer motion without touching wheel bursts.
-// Wheel delivery stays at the frozen burst origin; only idle/stall,
-// modifiers, host replacement, and lifecycle invalidation end a burst.
-// Touchpad direct tracking keeps live coordinates instead.
-func (c *scrollController) notePointer(_, _ float64) {
 }
 
 // (removed: physical deliveries record through the submission gate)

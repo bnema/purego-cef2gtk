@@ -559,7 +559,6 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 	if claimGesture != nil {
 		claimGesture()
 	}
-	ib.scroll.notePointer(x, y)
 	if host == nil {
 		return
 	}

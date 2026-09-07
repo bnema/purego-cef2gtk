@@ -336,6 +336,10 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 // submission from the invalidated session can occur once this returns;
 // already-submitted CEF events cannot be retracted. Pass the retired epoch
 // to CancelScrollEpoch for GTK cleanup of the old tick and session state.
+// Wheel delivery is position-frozen at the burst origin, not element-pinned:
+// call this when the document or input context changes under a constant
+// host (navigation, popup, focus handover) so motion restarts at the new
+// target instead of finishing at the old coordinates.
 // Absent input reports zero.
 func (v *View) InvalidateScroll() uint64 {
 	if v == nil || v.input == nil {

@@ -370,8 +370,8 @@ func TestEngineModifierInterruption(t *testing.T) {
 func TestEngineFiveNotchBurstSurvivesPointerDrift(t *testing.T) {
 	// Replay of scroll-trace.log 14:28 (5x dy=1 -> 5x -240 with pointer
 	// drift 946,1472 -> 944,1484): the old anchor kill discarded -737
-	// of -1200 after the last tick. Pointer motion must no longer
-	// discard anything.
+	// of -1200 after the last tick. Displaced impulses must join the
+	// live burst instead of restarting or killing it.
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
 	t0 := 13.866
@@ -379,7 +379,6 @@ func TestEngineFiveNotchBurstSurvivesPointerDrift(t *testing.T) {
 	for i, pt := range pts {
 		now := t0 + float64(i)*0.004
 		c.impulseWheel(now, pt[0], pt[1], 1, 0, host, 0, -240)
-		c.notePointer(pt[0]+1, pt[1]+2)
 	}
 	if !c.session.burstActive {
 		t.Fatalf("drift killed 5-notch burst: %+v", c.session)
@@ -394,24 +393,24 @@ func TestEngineFiveNotchBurstSurvivesPointerDrift(t *testing.T) {
 	}
 }
 
-func TestEnginePointerMotionPreservesBurst(t *testing.T) {
+func TestEngineWheelEmitRejectsRacingInvalidation(t *testing.T) {
+	// An off-thread invalidation landing after the step's epoch check
+	// but before emission must reject the wheel submission: the emit
+	// path validates the session epoch, never the reloaded current.
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	// Jitter, drift, and teleports never split a burst: pointer motion
-	// does not retarget or cancel wheel delivery, which stays frozen
-	// at the burst origin.
-	for _, pt := range [][2]float64{{11.2, 21.2}, {13, 20}, {16, 20}, {19, 20}, {30, 20}, {40, 20}} {
-		c.notePointer(pt[0], pt[1])
-		if c.session.kind != scrollSessionWheel || !c.session.burstActive {
-			t.Fatalf("pointer (%v,%v) killed burst: %+v", pt[0], pt[1], c.session)
-		}
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240)
+	stale := c.invalidate()
+	c.mu.Lock()
+	s := &c.session
+	if s.epoch != stale || !s.burstActive {
+		c.mu.Unlock()
+		t.Fatalf("session not intact after invalidate: %+v", s)
 	}
-	if c.session.anchorX != 10 || c.session.anchorY != 20 {
-		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.anchorX, c.session.anchorY)
-	}
-	if c.session.pendingX != 30 {
-		t.Fatalf("pending = %v, want 30", c.session.pendingX)
+	c.emitWheelShareLocked(s, 100.05)
+	c.mu.Unlock()
+	if len(rec.subs) != 0 {
+		t.Fatalf("racing invalidation submitted %d events", len(rec.subs))
 	}
 }
 
@@ -540,14 +539,14 @@ func TestEngineImpulseAcrossPointerPositionsJoinsBurst(t *testing.T) {
 	}
 }
 
-func TestEngineSyntheticDeliveryUsesFrozenAnchor(t *testing.T) {
+func TestEngineSyntheticDeliveryUsesFrozenOrigin(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
 	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	c.notePointer(12, 21)
-	// Even a far teleport keeps delivery at the frozen origin.
-	c.notePointer(400, 900)
-	c.step(100.05)
+	// A far displaced impulse joins the burst; delivery stays at the
+	// frozen origin.
+	c.impulseWheel(100.05, 400, 900, 1, 0, host, 30, 0)
+	c.step(100.1)
 	if len(rec.subs) == 0 {
 		t.Fatal("burst submitted nothing")
 	}
@@ -567,9 +566,8 @@ func TestEngineMirroredSignReplay(t *testing.T) {
 	if tx >= 0 || ty <= 0 {
 		t.Fatalf("mirrored total = (%d,%d), want (-,+)", tx, ty)
 	}
-	c.notePointer(400, 900)
 	if !c.session.burstActive {
-		t.Fatal("pointer teleport killed burst")
+		t.Fatal("settled burst not retained")
 	}
 }
 
