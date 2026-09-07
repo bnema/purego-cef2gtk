@@ -27,6 +27,8 @@ func (ib *InputBridge) InjectScroll(dx, dy float64) bool {
 		return true
 	}
 	ib.scroll.abandonTouch()
-	ib.scroll.impulseWheel(ib.scrollNow(), x, y, scale, 0, host, dx, dy)
-	return true
+	// Current epoch: injection carries no stale check window (no application
+	// callback runs between its check and its routing), so the live epoch
+	// is exact here; a racing invalidation still retires it via the gate.
+	return ib.scroll.impulseWheel(ib.scrollNow(), x, y, scale, 0, host, dx, dy, ib.scroll.epoch.Load())
 }
