@@ -358,6 +358,23 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 	return nil
 }
 
+// InjectScroll feeds a synthetic scroll impulse (keyboard scrolling) into
+// the animated wheel engine from any thread. Repeated calls join the live
+// burst and the release tail coasts after the last impulse. It reports
+// whether the impulse was accepted.
+func (v *View) InjectScroll(dx, dy float64) bool {
+	if v == nil {
+		return false
+	}
+	accepted := false
+	err := gtkgl.RunOnGTKThreadSync(func() {
+		if bridge := v.inputBridge(); bridge != nil {
+			accepted = bridge.InjectScroll(dx, dy)
+		}
+	})
+	return err == nil && accepted
+}
+
 // InvalidateScroll immediately retires animated scroll motion and release
 // eligibility from any thread, returning the retired epoch. No new library
 // submission from the invalidated session can occur once this returns;
