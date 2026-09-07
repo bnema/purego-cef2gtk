@@ -150,14 +150,44 @@ func TestScrollOptionsConvertsToGTKGL(t *testing.T) {
 		HorizontalMultiplier: 0.75,
 		VerticalMultiplier:   1.25,
 		MaxDelta:             120,
+		TouchpadInertia:      true,
+		WheelSmoothing:       true,
 	})
 
 	if got.WheelMultiplier != 1.5 ||
 		got.PreciseMultiplier != 2.5 ||
 		got.HorizontalMultiplier != 0.75 ||
 		got.VerticalMultiplier != 1.25 ||
-		got.MaxDelta != 120 {
+		got.MaxDelta != 120 ||
+		!got.TouchpadInertia ||
+		!got.WheelSmoothing {
 		t.Fatalf("converted scroll options = %+v", got)
+	}
+}
+
+func TestScrollAnimationOptionsDefaultDisabled(t *testing.T) {
+	got := toGTKGLScrollOptions(ScrollOptions{})
+	if got.TouchpadInertia || got.WheelSmoothing {
+		t.Fatalf("zero-value options enable animation: %+v", got)
+	}
+}
+
+func TestViewScrollCancelAbsentInputIsSafe(t *testing.T) {
+	v := &View{}
+	if epoch := v.InvalidateScroll(); epoch != 0 {
+		t.Fatalf("absent invalidate epoch = %d, want 0", epoch)
+	}
+	v.CancelScroll()
+	if v.CancelScrollEpoch(7) {
+		t.Fatal("absent epoch cleanup reported success")
+	}
+	var nilView *View
+	if epoch := nilView.InvalidateScroll(); epoch != 0 {
+		t.Fatalf("nil-view invalidate epoch = %d, want 0", epoch)
+	}
+	nilView.CancelScroll()
+	if nilView.CancelScrollEpoch(7) {
+		t.Fatal("nil-view epoch cleanup reported success")
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gio"
+	"github.com/bnema/puregotk/v4/glib"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
@@ -160,6 +161,36 @@ func (ib *InputBridge) SetClipboardShortcutHandler(selectionText func() string, 
 	ib.mu.Unlock()
 }
 
+// InvalidateScroll immediately retires animated scroll motion and release
+// eligibility from any thread, returning the retired epoch. Pass that epoch
+// to CancelScrollEpoch for GTK cleanup of the old tick and session state;
+// absent bridges report zero.
+func (ib *InputBridge) InvalidateScroll() uint64 {
+	if ib == nil || ib.scroll == nil {
+		return 0
+	}
+	return ib.scroll.invalidate()
+}
+
+// CancelScroll synchronously invalidates and cleans up scroll motion.
+// Call only on the GTK thread; off-thread paths use InvalidateScroll plus
+// queued CancelScrollEpoch.
+func (ib *InputBridge) CancelScroll() {
+	if ib == nil || ib.scroll == nil {
+		return
+	}
+	ib.scroll.cancelNow()
+}
+
+// CancelScrollEpoch performs GTK-only cleanup for a retired epoch. It
+// never clears a newer session and reports whether cleanup ran.
+func (ib *InputBridge) CancelScrollEpoch(epoch uint64) bool {
+	if ib == nil || ib.scroll == nil {
+		return false
+	}
+	return ib.scroll.cleanupEpoch(epoch)
+}
+
 // SetVisible records view visibility and notifies CEF once per transition.
 func (ib *InputBridge) SetVisible(visible bool) {
 	if ib == nil {
@@ -178,6 +209,9 @@ func (ib *InputBridge) SetVisible(visible bool) {
 	}
 	ib.visibilityDelivered = true
 	ib.mu.Unlock()
+	if !visible {
+		ib.scroll.cancelNow()
+	}
 	wasHidden(host, visible)
 }
 
@@ -188,13 +222,17 @@ func (ib *InputBridge) SetHost(host cef.BrowserHost) {
 		return
 	}
 	ib.mu.Lock()
-	if !sameBrowserHost(ib.host, host) {
+	hostChanged := !sameBrowserHost(ib.host, host)
+	if hostChanged {
 		ib.host = host
 		ib.visibilityDelivered = false
 		ib.focusDelivered = false
 	}
 	if host == nil {
 		ib.mu.Unlock()
+		if hostChanged {
+			ib.scroll.cancelNow()
+		}
 		return
 	}
 
@@ -216,6 +254,9 @@ func (ib *InputBridge) SetHost(host cef.BrowserHost) {
 		ib.focusDelivered = true
 	}
 	ib.mu.Unlock()
+	if hostChanged {
+		ib.scroll.cancelNow()
+	}
 
 	if deliverVisibility {
 		wasHidden(host, visible)
@@ -377,7 +418,26 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 
 	widget.SetFocusable(true)
 	widget.SetCanFocus(true)
+	ib.wireScrollTick(widget)
 	ib.syncWidgetVisibility(widget.GetMapped(), widget.GetVisible())
+}
+
+// wireScrollTick installs frame-clock scheduling for animated scroll motion.
+// Engine timestamps and frame ticks then share the widget clock domain.
+func (ib *InputBridge) wireScrollTick(widget *gtk.Widget) {
+	if ib == nil || ib.scroll == nil || widget == nil {
+		return
+	}
+	ib.scroll.now = ib.frameClockSeconds
+	ib.scroll.tickBackend = &scrollTickBackend{
+		registrar: func(cb *gtk.TickCallback) uint {
+			return widget.AddTickCallback(cb, 0, nil)
+		},
+		remover: widget.RemoveTickCallback,
+		unrefer: func(cb *gtk.TickCallback) {
+			_ = glib.UnrefCallback(cb)
+		},
+	}
 }
 
 func (ib *InputBridge) syncWidgetVisibility(mapped, visible bool) {
@@ -413,6 +473,8 @@ func (ib *InputBridge) Detach() {
 		ib.pointerTracker.detach()
 	}
 	ib.mu.Unlock()
+	ib.scroll.cancelNow()
+	ib.scroll.teardownTick()
 	if imContext != nil && imContextCommitHandler != 0 {
 		gobject.SignalHandlerDisconnect(&imContext.Object, imContextCommitHandler)
 	}
@@ -493,6 +555,7 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 	if claimGesture != nil {
 		claimGesture()
 	}
+	ib.scroll.notePointer(x, y)
 	if host == nil {
 		return
 	}
@@ -505,6 +568,8 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 }
 
 func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount int) {
+	// A press grabs the pointer: retire animated motion before handling it.
+	ib.scroll.cancelNow()
 	ib.mu.Lock()
 	ib.lastX, ib.lastY = x, y
 	if ib.pointerTracker != nil {
@@ -549,6 +614,7 @@ func (ib *InputBridge) onMouseCancel() {
 	if ib == nil {
 		return
 	}
+	ib.scroll.cancelNow()
 	ib.mu.Lock()
 	tracker := ib.pointerTracker
 	if tracker == nil {
@@ -627,6 +693,7 @@ func (ib *InputBridge) onFocusIn() {
 }
 
 func (ib *InputBridge) onFocusOut() {
+	ib.scroll.cancelNow()
 	ib.mu.Lock()
 	if !ib.focusKnown || ib.focused {
 		ib.focused = false
@@ -688,6 +755,7 @@ func syncWindowlessBrowserFocus(host cef.BrowserHost, reveal bool) {
 }
 
 func (ib *InputBridge) onKeyPress(keyval, keycode, mods uint) {
+	ib.scroll.noteModifiers(mods)
 	host := ib.currentHost()
 	if host == nil {
 		return
@@ -735,6 +803,7 @@ func (ib *InputBridge) sendChar(host cef.BrowserHost, ch uint16) {
 }
 
 func (ib *InputBridge) onKeyRelease(keyval, keycode, mods uint) {
+	ib.scroll.noteModifiers(mods)
 	host := ib.currentHost()
 	if host == nil {
 		return

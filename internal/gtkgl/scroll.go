@@ -3,6 +3,7 @@ package gtkgl
 import (
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bnema/purego-cef/cef"
 	"github.com/bnema/puregotk/v4/gdk"
@@ -36,6 +37,12 @@ type ScrollOptions struct {
 	HorizontalMultiplier float64
 	VerticalMultiplier   float64
 	MaxDelta             int32
+	// TouchpadInertia enables direct touchpad tracking with exponential
+	// release decay on valid release. Zero value keeps direct behavior.
+	TouchpadInertia bool
+	// WheelSmoothing interpolates accepted wheel impulses across frames
+	// without a long coast. Zero value keeps direct behavior.
+	WheelSmoothing bool
 }
 
 // ScrollEvent describes a GTK scroll event after CEF delta translation.
@@ -87,6 +94,26 @@ type scrollController struct {
 	options    ScrollOptions
 	onScroll   func(ScrollEvent) ScrollDecision
 	navigation navigationSwipeState
+	// epoch retires animated motion: every session captures the epoch at
+	// creation and the submission gate rejects submissions from older
+	// epochs. invalidate() bumps it lock-free; cleanup is epoch-scoped.
+	epoch atomic.Uint64
+	// session owns the current gesture/burst motion and its residuals.
+	session scrollSession
+	// sender submits wheel events; production uses the CEF host call
+	// directly, tests stub it to observe gated output.
+	sender func(host cef.BrowserHost, evt *cef.MouseEvent, dx, dy int32)
+	// now reports engine-clock seconds; the bridge installs a
+	// frame-clock reader, tests inject a manual clock.
+	now func() float64
+	// overloadCompletions tallies explicit overload discards. It lives on
+	// the controller (not the session) so the record survives session
+	// clearing.
+	overloadCompletions uint64
+	// tickBackend wires frame scheduling to the owning widget. Nil
+	// without a widget (unit tests drive step manually).
+	tickBackend *scrollTickBackend
+	tickState   scrollTickState
 }
 
 func newScrollController() *scrollController {
@@ -201,6 +228,18 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 	if ib.handleNavigationSwipe(event) {
 		return
 	}
+	if class := ib.scroll.animatedClass(opts, unit, unitKnown, mods); class != scrollClassNone {
+		epochBefore := ib.scroll.epoch.Load()
+		consumed := handler != nil && handler(event) == ScrollConsume
+		if ib.scroll.epoch.Load() != epochBefore {
+			// The application invalidated from inside its callback:
+			// drop this update without delivery or session writes.
+			// Later physical input starts a fresh gesture.
+			return
+		}
+		ib.routeAnimatedUpdate(class, host, x, y, scale, mods, unit, unitKnown, dx, dy, opts, consumed, deltaX, deltaY)
+		return
+	}
 	if handler != nil && handler(event) == ScrollConsume {
 		return
 	}
@@ -214,14 +253,61 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 	host.SendMouseWheelEvent(&evt, deltaX, deltaY)
 }
 
+// routeAnimatedUpdate handles one update after the application callback ran
+// without locks. A handler that invalidates (then returns Forward) still
+// suppresses the stale update: every submission below revalidates the epoch
+// (and, for synthetic output, host identity) through the gate, so no new
+// submission from the invalidated session can occur. Synthetic output never
+// passes through OnScroll or navigation recognition.
+func (ib *InputBridge) routeAnimatedUpdate(class animatedScrollClass, host cef.BrowserHost, x, y, scale float64, mods uint, unit gdk.ScrollUnit, unitKnown bool, dx, dy float64, opts ScrollOptions, consumed bool, deltaX, deltaY int32) {
+	now := ib.scrollNow()
+	c := ib.scroll
+	switch class {
+	case scrollClassTouchpad:
+		if consumed {
+			c.updateTouch(unit, unitKnown, true, mods, x, y)
+			return
+		}
+		c.ensureTouchSession(x, y, scale, mods, host)
+		if !c.updateTouch(unit, unitKnown, false, mods, x, y) {
+			// Modifier change or class race lost the session: deliver
+			// directly without arming release.
+			ib.submitAnimatedDirect(host, x, y, mods, scale, unit, unitKnown, deltaX, deltaY, now)
+			return
+		}
+		ib.submitAnimatedDirect(host, x, y, mods, scale, unit, unitKnown, deltaX, deltaY, now)
+	case scrollClassWheel:
+		c.abandonTouch()
+		if consumed {
+			return
+		}
+		fx, fy := translateScrollFloat(dx, dy, unit, opts)
+		c.impulseWheel(now, x, y, scale, mods, host, fx, fy)
+	}
+}
+
+func (ib *InputBridge) submitAnimatedDirect(host cef.BrowserHost, x, y float64, mods uint, scale float64, unit gdk.ScrollUnit, unitKnown bool, deltaX, deltaY int32, now float64) {
+	evt := BuildMouseEvent(x, y, mods, scale)
+	if unitKnown && unit == gdk.ScrollUnitSurfaceValue {
+		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
+	}
+	ib.scroll.submitPhysical(ib.scroll.epoch.Load(), host, &evt, deltaX, deltaY, now)
+}
+
 func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
-	_, x, y, _, _, handler := ib.currentScrollState()
+	host, x, y, scale, opts, handler := ib.currentScrollState()
 	switch phase {
 	case ScrollPhaseBegin:
 		ib.resetNavigationSwipe()
+		if opts.TouchpadInertia {
+			// A fresh begin invalidates previous motion before the
+			// application is notified below.
+			ib.scroll.beginTouch(x, y, scale, mods, host)
+		}
 	case ScrollPhaseEnd:
 		ib.finishNavigationSwipe()
 		ib.resetNavigationSwipe()
+		ib.scroll.endTouch()
 	}
 	if handler == nil {
 		return
@@ -237,7 +323,10 @@ func (ib *InputBridge) onScrollBoundary(phase ScrollPhase, unit gdk.ScrollUnit, 
 }
 
 func (ib *InputBridge) onScrollDecelerate(velocityX, velocityY float64, unit gdk.ScrollUnit, unitKnown bool, mods uint) {
-	_, x, y, _, _, handler := ib.currentScrollState()
+	host, x, y, scale, opts, handler := ib.currentScrollState()
+	if opts.TouchpadInertia {
+		ib.scroll.releaseFromDecelerate(ib.scrollNow(), x, y, scale, mods, host, velocityX, velocityY, opts)
+	}
 	if handler == nil {
 		return
 	}
@@ -251,6 +340,45 @@ func (ib *InputBridge) onScrollDecelerate(velocityX, velocityY float64, unit gdk
 		VelocityX: velocityX,
 		VelocityY: velocityY,
 	})
+}
+
+// suppressRelease poisons touchpad release eligibility without retiring
+// the session epoch; see scrollController.suppressRelease.
+func (ib *InputBridge) suppressRelease() {
+	ib.scroll.suppressRelease()
+}
+
+// scrollNow reports engine-clock seconds for session timestamps. The
+// bridge installs a frame-clock reader on attach so physical events and
+// frame ticks share one clock domain; tests inject a manual clock.
+func (ib *InputBridge) scrollNow() float64 {
+	if ib == nil || ib.scroll == nil {
+		return wallClockSeconds()
+	}
+	if now := ib.scroll.now; now != nil {
+		return now()
+	}
+	return ib.frameClockSeconds()
+}
+
+// frameClockSeconds reads the widget frame clock in seconds, falling back
+// to the wall clock outside frames or without a widget. GetFrameTime
+// returns microseconds.
+func (ib *InputBridge) frameClockSeconds() float64 {
+	if ib == nil {
+		return wallClockSeconds()
+	}
+	ib.mu.Lock()
+	widget := ib.widget
+	ib.mu.Unlock()
+	if widget != nil {
+		if clock := widget.GetFrameClock(); clock != nil {
+			if us := clock.GetFrameTime(); us > 0 {
+				return float64(us) / 1e6
+			}
+		}
+	}
+	return wallClockSeconds()
 }
 
 func (ib *InputBridge) handleNavigationSwipe(event ScrollEvent) bool {
@@ -295,6 +423,9 @@ func (ib *InputBridge) finishNavigationSwipe() {
 	}
 	state.recognized = true
 	ib.setNavigationSwipeState(state)
+	// Release eligibility dies before the navigation action runs: synthetic
+	// motion must never continue into the newly navigated page.
+	ib.suppressRelease()
 	state.onNavigate(action)
 }
 
@@ -343,19 +474,28 @@ func TranslateScrollDeltas(dx, dy float64) (int32, int32) {
 }
 
 func TranslateScrollDeltasWithOptions(dx, dy float64, unit gdk.ScrollUnit, opts ScrollOptions) (int32, int32) {
+	fx, fy := translateScrollFloat(dx, dy, unit, opts)
+	if unit == gdk.ScrollUnitSurfaceValue {
+		return int32(math.Round(fx)), int32(math.Round(fy))
+	}
+	return int32(fx), int32(fy)
+}
+
+// translateScrollFloat applies multipliers and the one-time MaxDelta clamp
+// in float64 output units. Integer conversion (truncation for wheels,
+// rounding for precise surfaces) happens at delivery so animated sessions
+// can retain fractions across updates and frames.
+func translateScrollFloat(dx, dy float64, unit gdk.ScrollUnit, opts ScrollOptions) (float64, float64) {
 	multiplier := normalizeMultiplier(opts.WheelMultiplier)
 	unitScale := float64(cefScrollUnitsPerNotch)
-	round := false
 	if unit == gdk.ScrollUnitSurfaceValue {
 		multiplier = normalizePreciseMultiplier(opts.PreciseMultiplier)
 		unitScale = 1
-		round = true
 	}
 	horizontal := normalizeMultiplier(opts.HorizontalMultiplier)
 	vertical := normalizeMultiplier(opts.VerticalMultiplier)
-	deltaX := clampScrollDelta(dx*unitScale*multiplier*horizontal, opts.MaxDelta, round)
-	deltaY := clampScrollDelta(-dy*unitScale*multiplier*vertical, opts.MaxDelta, round)
-	return deltaX, deltaY
+	return clampScrollFloat(dx*unitScale*multiplier*horizontal, opts.MaxDelta),
+		clampScrollFloat(-dy*unitScale*multiplier*vertical, opts.MaxDelta)
 }
 
 func normalizeMultiplier(value float64) float64 {
@@ -372,7 +512,7 @@ func normalizePreciseMultiplier(value float64) float64 {
 	return value
 }
 
-func clampScrollDelta(value float64, maxAbs int32, round bool) int32 {
+func clampScrollFloat(value float64, maxAbs int32) float64 {
 	limit := maxInt32Float
 	if maxAbs > 0 {
 		limit = float64(maxAbs)
@@ -383,10 +523,7 @@ func clampScrollDelta(value float64, maxAbs int32, round bool) int32 {
 	if value < -limit {
 		value = -limit
 	}
-	if round {
-		value = math.Round(value)
-	}
-	return int32(value)
+	return value
 }
 
 func currentScrollUnit(controller gtk.EventControllerScroll) (gdk.ScrollUnit, bool) {

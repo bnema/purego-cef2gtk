@@ -74,6 +74,12 @@ type ScrollOptions struct {
 	HorizontalMultiplier float64
 	VerticalMultiplier   float64
 	MaxDelta             int32
+	// TouchpadInertia enables direct touchpad tracking with exponential
+	// release decay on valid release. Zero value keeps direct behavior.
+	TouchpadInertia bool
+	// WheelSmoothing interpolates accepted wheel impulses across frames
+	// without a long coast. Zero value keeps direct behavior.
+	WheelSmoothing bool
 }
 
 // ScrollEvent describes a GTK scroll event after CEF delta translation.
@@ -215,6 +221,8 @@ func toGTKGLScrollOptions(opts ScrollOptions) gtkgl.ScrollOptions {
 		HorizontalMultiplier: opts.HorizontalMultiplier,
 		VerticalMultiplier:   opts.VerticalMultiplier,
 		MaxDelta:             opts.MaxDelta,
+		TouchpadInertia:      opts.TouchpadInertia,
+		WheelSmoothing:       opts.WheelSmoothing,
 	}
 }
 
@@ -321,4 +329,36 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 		v.drag.SetHost(host)
 	}
 	return nil
+}
+
+// InvalidateScroll immediately retires animated scroll motion and release
+// eligibility from any thread, returning the retired epoch. No new library
+// submission from the invalidated session can occur once this returns;
+// already-submitted CEF events cannot be retracted. Pass the retired epoch
+// to CancelScrollEpoch for GTK cleanup of the old tick and session state.
+// Absent input reports zero.
+func (v *View) InvalidateScroll() uint64 {
+	if v == nil || v.input == nil {
+		return 0
+	}
+	return v.input.InvalidateScroll()
+}
+
+// CancelScroll synchronously invalidates and cleans up scroll motion.
+// Call only on the GTK/main thread; off-thread paths use InvalidateScroll
+// plus queued CancelScrollEpoch.
+func (v *View) CancelScroll() {
+	if v == nil || v.input == nil {
+		return
+	}
+	v.input.CancelScroll()
+}
+
+// CancelScrollEpoch performs GTK-only cleanup for a retired epoch. It
+// never clears a newer session and reports whether cleanup ran.
+func (v *View) CancelScrollEpoch(epoch uint64) bool {
+	if v == nil || v.input == nil {
+		return false
+	}
+	return v.input.CancelScrollEpoch(epoch)
 }

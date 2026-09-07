@@ -24,6 +24,15 @@ func (h *scrollWheelCapture) SendMouseWheelEvent(event *cef.MouseEvent, dx, dy i
 	h.events = append(h.events, scrollWheelSubmission{event: *event, dx: dx, dy: dy})
 }
 
+func (h *scrollWheelCapture) SendMouseClickEvent(_ *cef.MouseEvent, _ cef.MouseButtonType, _, _ int32) {
+}
+
+func (h *scrollWheelCapture) SendMouseMoveEvent(_ *cef.MouseEvent, _ int32) {
+}
+
+func (h *scrollWheelCapture) SendCaptureLostEvent() {
+}
+
 func TestScrollCharacterizationCallbackOrdering(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
 	var phases []ScrollPhase
