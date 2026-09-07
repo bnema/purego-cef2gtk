@@ -207,8 +207,14 @@ func (ib *InputBridge) SetVisible(visible bool) {
 		ib.visibilityDelivered = false
 	}
 	host := ib.host
+	hide := !visible
 	if host == nil || ib.visibilityDelivered {
 		ib.mu.Unlock()
+		// Hiding always retires motion, even with no host attached to
+		// notify: a hidden view must not keep animating scroll.
+		if hide {
+			ib.scroll.cancelNow()
+		}
 		return
 	}
 	ib.visibilityDelivered = true
@@ -433,7 +439,7 @@ func (ib *InputBridge) wireScrollTick(widget *gtk.Widget) {
 	if ib == nil || ib.scroll == nil || widget == nil {
 		return
 	}
-	ib.scroll.tickBackend = &scrollTickBackend{
+	ib.scroll.setTickBackend(&scrollTickBackend{
 		registrar: func(cb *gtk.TickCallback) uint {
 			return widget.AddTickCallback(cb, 0, nil)
 		},
@@ -441,7 +447,7 @@ func (ib *InputBridge) wireScrollTick(widget *gtk.Widget) {
 		unrefer: func(cb *gtk.TickCallback) {
 			_ = glib.UnrefCallback(cb)
 		},
-	}
+	})
 }
 
 func (ib *InputBridge) syncWidgetVisibility(mapped, visible bool) {

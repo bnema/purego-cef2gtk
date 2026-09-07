@@ -58,12 +58,12 @@ func TestBridgeUnknownUnitUsesWheelTranslation(t *testing.T) {
 func TestBridgeBeginPreservesWheelBurst(t *testing.T) {
 	ib, _, _ := newAnimatedTestBridge(forwardCounter(map[ScrollPhase]int{}), ScrollOptions{TouchpadInertia: true, WheelSmoothing: true})
 	ib.onScrollUpdate(0, -1, gdk.ScrollUnitWheelValue, true, 0)
-	pendingBefore := ib.scroll.session.pendingX
+	pendingBeforeX, pendingBeforeY := ib.scroll.session.pendingX, ib.scroll.session.pendingY
 	ib.onScrollBoundary(ScrollPhaseBegin, gdk.ScrollUnitWheelValue, true, 0)
 	if ib.scroll.session.kind != scrollSessionWheel || !ib.scroll.session.burstActive {
 		t.Fatalf("begin discarded wheel burst: %+v", ib.scroll.session)
 	}
-	if ib.scroll.session.pendingX != pendingBefore {
-		t.Fatalf("burst pending changed across begin: %v -> %v", pendingBefore, ib.scroll.session.pendingX)
+	if ib.scroll.session.pendingX != pendingBeforeX || ib.scroll.session.pendingY != pendingBeforeY {
+		t.Fatalf("burst pending changed across begin: (%v,%v) -> (%v,%v)", pendingBeforeX, pendingBeforeY, ib.scroll.session.pendingX, ib.scroll.session.pendingY)
 	}
 }

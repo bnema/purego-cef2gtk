@@ -62,6 +62,7 @@ type View struct {
 	renderer                    renderer
 	signalObject                *gobject.Object
 	input                       *gtkgl.InputBridge
+	inputMu                     sync.RWMutex
 	attachInputToWidget         func(*gtkgl.InputBridge, *gtk.Widget)
 	dragMu                      sync.RWMutex
 	drag                        *gtkgl.DragBridge
@@ -261,10 +262,11 @@ func (v *View) connectRenderSignal() {
 }
 
 func (v *View) handleVisibilitySignal(visible bool) {
-	if v == nil || v.input == nil {
+	bridge := v.inputBridge()
+	if bridge == nil {
 		return
 	}
-	v.input.SetVisible(visible)
+	bridge.SetVisible(visible)
 }
 
 func (v *View) handleObservationSignal() {
@@ -1130,10 +1132,12 @@ func (v *View) Destroy() error {
 		v.drag = nil
 	}
 	v.dragMu.Unlock()
+	v.inputMu.Lock()
 	if v.input != nil {
 		v.input.Detach()
 		v.input = nil
 	}
+	v.inputMu.Unlock()
 	v.inputWidget = nil
 	if v.widget != nil && v.sizeTickID != 0 {
 		v.widget.RemoveTickCallback(v.sizeTickID)

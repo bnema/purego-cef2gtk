@@ -598,13 +598,17 @@ func TestEngineConcurrentInvalidateVsSubmit(t *testing.T) {
 	done := make(chan struct{})
 	for i := 0; i < 4; i++ {
 		go func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("worker panicked: %v", r)
+				}
+				done <- struct{}{}
+			}()
 			for j := 0; j < 50; j++ {
 				evt := cef.MouseEvent{}
 				c.submitGated(c.epoch.Load(), host, &evt, 1, 1, 300.0)
 				c.invalidate()
 			}
-			done <- struct{}{}
 		}()
 	}
 	for i := 0; i < 4; i++ {

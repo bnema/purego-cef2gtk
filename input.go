@@ -165,8 +165,8 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 		v.drag = nil
 	}
 	v.dragMu.Unlock()
-	if v.input != nil {
-		v.input.Detach()
+	if old := v.inputBridge(); old != nil {
+		old.Detach()
 	}
 	v.setInputScaleOverride(opts.Scale)
 	scale := v.inputScaleForObservedScale(float64(v.DeviceScaleFactor()))
@@ -177,18 +177,18 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	if targetWidget == nil {
 		return ErrViewNotInitialized
 	}
-	v.input = gtkgl.NewInputBridge(host, scale)
-	v.input.SetProfiler(v.profileRecorder())
-	v.input.SetMiddleClickHandler(opts.OnMiddleClick)
-	v.input.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
-	v.input.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
-	v.input.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
+	bridge := gtkgl.NewInputBridge(host, scale)
+	bridge.SetProfiler(v.profileRecorder())
+	bridge.SetMiddleClickHandler(opts.OnMiddleClick)
+	bridge.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
+	bridge.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
+	bridge.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
 	if v.attachInputToWidget != nil {
-		v.attachInputToWidget(v.input, targetWidget)
+		v.attachInputToWidget(bridge, targetWidget)
 	} else {
-		v.input.AttachToWidget(targetWidget)
+		bridge.AttachToWidget(targetWidget)
 	}
-	drag := gtkgl.NewDragBridge(targetWidget, v.input, host)
+	drag := gtkgl.NewDragBridge(targetWidget, bridge, host)
 	drag.SetFileDropHandler(viewFileDropPolicy(v))
 	attached := false
 	if v.attachDrag != nil {
@@ -197,9 +197,13 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 		attached = drag.Attach()
 	}
 	if !attached {
-		v.cleanupInputAttachment()
+		bridge.Detach()
+		v.setInputBridge(nil)
+		v.inputWidget = nil
+		v.setInputScaleOverride(0)
 		return errors.New("failed to attach GTK drag target")
 	}
+	v.setInputBridge(bridge)
 	v.dragMu.Lock()
 	v.drag = drag
 	v.dragMu.Unlock()
@@ -289,12 +293,34 @@ func toGTKGLNavigationSwipeHandler(fn func(NavigationSwipeAction)) func(gtkgl.Na
 }
 
 func (v *View) cleanupInputAttachment() {
-	if v.input != nil {
-		v.input.Detach()
-		v.input = nil
+	if bridge := v.inputBridge(); bridge != nil {
+		bridge.Detach()
 	}
+	v.setInputBridge(nil)
 	v.inputWidget = nil
 	v.setInputScaleOverride(0)
+}
+
+// inputBridge loads the attached input bridge. It is safe for off-thread
+// use: only the pointer is guarded while bridge internals own their locks.
+func (v *View) inputBridge() *gtkgl.InputBridge {
+	if v == nil {
+		return nil
+	}
+	v.inputMu.RLock()
+	defer v.inputMu.RUnlock()
+	return v.input
+}
+
+// setInputBridge swaps the attached input bridge. Callers operate on the
+// bridge outside the lock; only the pointer swap is guarded.
+func (v *View) setInputBridge(bridge *gtkgl.InputBridge) {
+	if v == nil {
+		return
+	}
+	v.inputMu.Lock()
+	defer v.inputMu.Unlock()
+	v.input = bridge
 }
 
 // DetachInput removes input controllers attached by AttachInput.
@@ -319,10 +345,11 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 	if v == nil {
 		return ErrNilView
 	}
-	if v.input == nil {
+	bridge := v.inputBridge()
+	if bridge == nil {
 		return ErrInputNotAttached
 	}
-	v.input.SetHost(host)
+	bridge.SetHost(host)
 	v.dragMu.RLock()
 	defer v.dragMu.RUnlock()
 	if v.drag != nil {
@@ -342,27 +369,30 @@ func (v *View) SetInputHost(host cef.BrowserHost) error {
 // target instead of finishing at the old coordinates.
 // Absent input reports zero.
 func (v *View) InvalidateScroll() uint64 {
-	if v == nil || v.input == nil {
+	bridge := v.inputBridge()
+	if bridge == nil {
 		return 0
 	}
-	return v.input.InvalidateScroll()
+	return bridge.InvalidateScroll()
 }
 
 // CancelScroll synchronously invalidates and cleans up scroll motion.
 // Call only on the GTK/main thread; off-thread paths use InvalidateScroll
 // plus queued CancelScrollEpoch.
 func (v *View) CancelScroll() {
-	if v == nil || v.input == nil {
+	bridge := v.inputBridge()
+	if bridge == nil {
 		return
 	}
-	v.input.CancelScroll()
+	bridge.CancelScroll()
 }
 
 // CancelScrollEpoch performs GTK-only cleanup for a retired epoch. It
 // never clears a newer session and reports whether cleanup ran.
 func (v *View) CancelScrollEpoch(epoch uint64) bool {
-	if v == nil || v.input == nil {
+	bridge := v.inputBridge()
+	if bridge == nil {
 		return false
 	}
-	return v.input.CancelScrollEpoch(epoch)
+	return bridge.CancelScrollEpoch(epoch)
 }

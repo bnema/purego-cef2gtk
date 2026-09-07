@@ -22,9 +22,11 @@ func TestTouchpadReleaseTrajectoriesMatchAcrossRefreshRates(t *testing.T) {
 	dx120, dy120 := integrateRelease(900, -450, 1.0/120)
 	dx144, dy144 := integrateRelease(900, -450, 1.0/144)
 
-	// Analytic total minus the sub-threshold tail: v0*tau per axis.
-	wantX := 900 * touchpadReleaseTau
-	wantY := -450 * touchpadReleaseTau
+	// Analytic total over [0, stop], excluding the discarded post-stop
+	// tail: v0*tau*(1-exp(-stop/tau)) per axis.
+	stop := touchpadReleaseStop(900, -450)
+	wantX := 900 * touchpadReleaseTau * (1 - math.Exp(-stop/touchpadReleaseTau))
+	wantY := -450 * touchpadReleaseTau * (1 - math.Exp(-stop/touchpadReleaseTau))
 	trajectories := map[string][2]float64{
 		"60Hz": {dx60, dy60}, "120Hz": {dx120, dy120}, "144Hz": {dx144, dy144},
 	}

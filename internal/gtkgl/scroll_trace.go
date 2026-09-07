@@ -33,6 +33,14 @@ func scrollTraceEnabled() bool {
 	return os.Getenv(scrollTraceEnv) == "1"
 }
 
+// tracing reports whether trace output is live: a cheap check for call
+// sites with expensive trace arguments (clocks, FFI) so they are skipped
+// unless the tracer is installed. The tracer is assigned once at bridge
+// construction, before the controller is shared.
+func (c *scrollController) tracing() bool {
+	return c != nil && c.tracer != nil
+}
+
 func (c *scrollController) tracef(format string, args ...any) {
 	if c == nil {
 		return

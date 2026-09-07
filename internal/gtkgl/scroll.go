@@ -233,7 +233,9 @@ func (ib *InputBridge) onScrollUpdate(dx, dy float64, unit gdk.ScrollUnit, unitK
 	if class := ib.scroll.animatedClass(opts, unit, unitKnown, mods); class != scrollClassNone {
 		epochBefore := ib.scroll.epoch.Load()
 		consumed := handler != nil && handler(event) == ScrollConsume
-		ib.scroll.tracef("input update class=%d unit=%v known=%v dx=%.2f dy=%.2f ix=%d iy=%d mods=%x xy=(%.1f,%.1f) consumed=%v epoch=%d mono=%.3f gdk_us=%d", class, unit, unitKnown, dx, dy, deltaX, deltaY, mods, x, y, consumed, epochBefore, ib.scrollNow(), ib.frameClockMicro())
+		if ib.scroll.tracing() {
+			ib.scroll.tracef("input update class=%d unit=%v known=%v dx=%.2f dy=%.2f ix=%d iy=%d mods=%x xy=(%.1f,%.1f) consumed=%v epoch=%d mono=%.3f gdk_us=%d", class, unit, unitKnown, dx, dy, deltaX, deltaY, mods, x, y, consumed, epochBefore, ib.scrollNow(), ib.frameClockMicro())
+		}
 		if ib.scroll.epoch.Load() != epochBefore {
 			// The application invalidated from inside its callback:
 			// drop this update without delivery or session writes.
@@ -519,6 +521,11 @@ func normalizePreciseMultiplier(value float64) float64 {
 }
 
 func clampScrollFloat(value float64, maxAbs int32) float64 {
+	// Non-finite input never becomes a scroll delta: int32(NaN) is
+	// platform-defined and would otherwise inject a garbage jump.
+	if !isFinite(value) {
+		return 0
+	}
 	limit := maxInt32Float
 	if maxAbs > 0 {
 		limit = float64(maxAbs)

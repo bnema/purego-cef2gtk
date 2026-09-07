@@ -703,6 +703,19 @@ func (c *scrollController) noteModifiers(mods uint) {
 
 // (removed: physical deliveries record through the submission gate)
 
+// setTickBackend swaps frame scheduling, retiring any tick registered on
+// the previous backend first so a re-attach cannot orphan a live tick on
+// the old widget (whose id would then alias an unrelated new-widget tick).
+func (c *scrollController) setTickBackend(backend *scrollTickBackend) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopTickLocked()
+	c.tickBackend = backend
+}
+
 // ensureTickLocked registers the retained tick callback when animation needs
 // frame scheduling. Without a backend (unit tests) stepping is manual.
 func (c *scrollController) ensureTickLocked() {
