@@ -597,53 +597,7 @@ func TestInputBridgeDndSuspendsCancelAndRestoresRecoveryAfterDisarm(t *testing.T
 	}
 }
 
-func TestTranslateScrollDeltas(t *testing.T) {
-	x, y := TranslateScrollDeltas(1.5, -2)
-	if x != 360 || y != 480 {
-		t.Fatalf("TranslateScrollDeltas = (%d,%d), want (360,480)", x, y)
-	}
-}
-
-func TestTranslateScrollDeltasWithOptionsDefaultsToLegacyBehavior(t *testing.T) {
-	x, y := TranslateScrollDeltasWithOptions(1.5, -2, gdk.ScrollUnitWheelValue, ScrollOptions{})
-	if x != 360 || y != 480 {
-		t.Fatalf("TranslateScrollDeltasWithOptions = (%d,%d), want (360,480)", x, y)
-	}
-}
-
-func TestTranslateScrollDeltasWithOptionsKeepsLegacyWheelTruncation(t *testing.T) {
-	x, y := TranslateScrollDeltasWithOptions(0.003, -0.003, gdk.ScrollUnitWheelValue, ScrollOptions{})
-	if x != 0 || y != 0 {
-		t.Fatalf("fractional wheel deltas = (%d,%d), want legacy truncation (0,0)", x, y)
-	}
-}
-
-func TestTranslateScrollDeltasWithOptionsUsesPreciseMultiplierForSurfaceUnits(t *testing.T) {
-	x, y := TranslateScrollDeltasWithOptions(123, -40, gdk.ScrollUnitSurfaceValue, ScrollOptions{
-		PreciseMultiplier: 2.5,
-	})
-	if x != 308 || y != 100 {
-		t.Fatalf("precise deltas = (%d,%d), want scaled surface pixels (308,100)", x, y)
-	}
-}
-
-func TestTranslateScrollDeltasWithOptionsDefaultsSurfaceUnitsToWebKitGTKScale(t *testing.T) {
-	x, y := TranslateScrollDeltasWithOptions(1.6, -1.6, gdk.ScrollUnitSurfaceValue, ScrollOptions{})
-	if x != 4 || y != 4 {
-		t.Fatalf("surface pixel deltas = (%d,%d), want WebKitGTK-like scale (4,4)", x, y)
-	}
-}
-
-func TestTranslateScrollDeltasWithOptionsAppliesAxisMultipliersAndClamp(t *testing.T) {
-	x, y := TranslateScrollDeltasWithOptions(2, -2, gdk.ScrollUnitWheelValue, ScrollOptions{
-		HorizontalMultiplier: 0.5,
-		VerticalMultiplier:   2,
-		MaxDelta:             300,
-	})
-	if x != 240 || y != 300 {
-		t.Fatalf("scaled/clamped deltas = (%d,%d), want (240,300)", x, y)
-	}
-}
+// Translation tests live in scroll_test.go.
 
 func TestInputBridgeScrollHandlerCanConsumeUpdate(t *testing.T) {
 	ib := NewInputBridge(nil, 1)
