@@ -1,7 +1,6 @@
 package gtkgl
 
 import (
-	"math"
 	"time"
 
 	"github.com/bnema/purego-cef/cef"
@@ -59,31 +58,13 @@ type scrollSession struct {
 	lastDeliveryT      float64
 	hasDelivery        bool
 	hasClock           bool
-	// anchorX/anchorY freeze the burst origin: synthetic delivery uses the
-	// frozen (x, y) coords, while the tolerance radius is measured from the
-	// origin so slow drift cannot walk the anchor across targets.
+	// anchorX/anchorY record the burst origin: synthetic delivery uses the
+	// frozen (x, y) coords for the whole burst. Pointer motion never
+	// retargets or cancels a wheel burst; only idle/stall, modifiers,
+	// host replacement, and lifecycle invalidation end it.
 	anchorX, anchorY float64
 	// sentX/sentY tally dispatched integers for the trace.
 	sentX, sentY int64
-}
-
-// scrollAnchorEpsilon is the burst-anchor tolerance radius in logical
-// pixels, measured from the burst origin. Pointer jitter inside the radius
-// never terminates a burst; leaving it does. Sized from trace data: 97.4%
-// of observed anchor kills were within 8px micro-jitter, a single genuine
-// target change measured 2272px.
-const scrollAnchorEpsilon = 8.0
-
-// anchorLeft reports whether (x, y) left the tolerance radius around the
-// burst origin (ax, ay).
-func anchorLeft(ax, ay, x, y float64) bool {
-	dx, dy := x-ax, y-ay
-	return dx*dx+dy*dy > scrollAnchorEpsilon*scrollAnchorEpsilon
-}
-
-// anchorDist is the Euclidean distance used by anchorLeft, for the trace.
-func anchorDist(ax, ay, x, y float64) float64 {
-	return math.Hypot(x-ax, y-ay)
 }
 
 // scrollTickBackend wires frame scheduling to the owning widget. Tests leave
@@ -459,9 +440,10 @@ func (c *scrollController) abandonTouch() {
 
 // wheelFreshLocked reports whether an impulse starts a new burst and why:
 // new (no live wheel burst), idle (past the idle deadline on a live burst),
-// mods, anchor, or host mismatch. An idle burst retires through
+// mods, or host mismatch. An idle burst retires through
 // endBurstLocked so overload accounting applies; other switches discard
-// pending intentionally.
+// pending intentionally. Pointer position never starts a fresh burst:
+// delivery stays at the frozen burst origin while the burst is live.
 func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, x, y float64, mods uint, host cef.BrowserHost) (bool, string) {
 	if s.kind != scrollSessionWheel || s.epoch != c.epoch.Load() || !s.burstActive {
 		return true, "new"
@@ -471,10 +453,6 @@ func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, x, y 
 	}
 	if mods != s.mods {
 		return true, "mods"
-	}
-	if anchorLeft(s.anchorX, s.anchorY, x, y) {
-		c.tracef("burst-anchor-left dist=%.1f origin=(%.1f,%.1f) at=(%.1f,%.1f)", anchorDist(s.anchorX, s.anchorY, x, y), s.anchorX, s.anchorY, x, y)
-		return true, "anchor"
 	}
 	if !sameBrowserHost(s.host, host) {
 		return true, "host"
@@ -486,7 +464,9 @@ func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, x, y 
 // clock to the event time and emitting the accrued share before adding the
 // impulse. Same-session reversal nets against pending displacement through
 // plain addition. Bursts end (discarding pending intentionally) on session
-// changes, stalls, modifier or anchor mismatch, and the idle deadline.
+// changes, stalls, modifier or host mismatch, and the idle deadline.
+// Pointer motion never splits a burst: every impulse joins the live burst
+// and delivery stays at the frozen origin.
 func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64, mods uint, host cef.BrowserHost, fx, fy float64) {
 	if c == nil {
 		return
@@ -523,7 +503,7 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 		s = &c.session
 	} else if s.hasClock && now-s.lastStepT > scrollFrameStallThreshold {
 		// A long stall cancels without catch-up: discard, then treat this
-		// impulse as the start of fresh motion within the same burst anchor.
+		// impulse as the start of fresh motion within the same burst origin.
 		s.pendingX, s.pendingY = 0, 0
 		s.resX, s.resY = 0, 0
 		s.lastStepT = now
@@ -726,27 +706,11 @@ func (c *scrollController) noteModifiers(mods uint) {
 	c.stopTickLocked()
 }
 
-// notePointer terminates a wheel burst when the pointer leaves the burst
-// origin's tolerance radius. Jitter inside the radius is ignored and the
-// frozen delivery anchor is kept. Touchpad direct tracking keeps live
-// coordinates instead.
-func (c *scrollController) notePointer(x, y float64) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	s := &c.session
-	if s.kind != scrollSessionWheel || s.epoch != c.epoch.Load() || !s.burstActive {
-		return
-	}
-	if !anchorLeft(s.anchorX, s.anchorY, x, y) {
-		return
-	}
-	c.tracef("session-kill anchor dist=%.1f origin=(%.1f,%.1f) at=(%.1f,%.1f) discarded=(%.1f,%.1f) sent=(%d,%d)", anchorDist(s.anchorX, s.anchorY, x, y), s.anchorX, s.anchorY, x, y, s.pendingX, s.pendingY, s.sentX, s.sentY)
-	s.burstActive = false
-	s.pendingX, s.pendingY = 0, 0
-	c.stopTickLocked()
+// notePointer observes pointer motion without touching wheel bursts.
+// Wheel delivery stays at the frozen burst origin; only idle/stall,
+// modifiers, host replacement, and lifecycle invalidation end a burst.
+// Touchpad direct tracking keeps live coordinates instead.
+func (c *scrollController) notePointer(_, _ float64) {
 }
 
 // (removed: physical deliveries record through the submission gate)

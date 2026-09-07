@@ -326,7 +326,7 @@ func TestEngineWheelSettledRemainderResumes(t *testing.T) {
 	if c.session.kind != scrollSessionWheel || !c.session.burstActive {
 		t.Fatalf("settled burst not retained: %+v", c.session)
 	}
-	// A same-anchor impulse inside the idle window resumes the burst and
+	// A same-position impulse inside the idle window resumes the burst and
 	// reuses the retained fractional remainder.
 	c.impulseWheel(100.15, 10, 20, 1, 0, host, 5, 0)
 	stepUntilDone(c, 100.15, 1.0/60)
@@ -367,68 +367,51 @@ func TestEngineModifierInterruption(t *testing.T) {
 	}
 }
 
-func TestAnchorEpsilonBoundary(t *testing.T) {
-	if anchorLeft(0, 0, 8, 0) {
-		t.Fatal("exactly-epsilon distance terminates")
+func TestEngineFiveNotchBurstSurvivesPointerDrift(t *testing.T) {
+	// Replay of scroll-trace.log 14:28 (5x dy=1 -> 5x -240 with pointer
+	// drift 946,1472 -> 944,1484): the old anchor kill discarded -737
+	// of -1200 after the last tick. Pointer motion must no longer
+	// discard anything.
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	t0 := 13.866
+	pts := [][2]float64{{946.6, 1472.6}, {946.0, 1476.0}, {945.2, 1479.0}, {944.6, 1482.0}, {944.2, 1484.6}}
+	for i, pt := range pts {
+		now := t0 + float64(i)*0.004
+		c.impulseWheel(now, pt[0], pt[1], 1, 0, host, 0, -240)
+		c.notePointer(pt[0]+1, pt[1]+2)
 	}
-	if anchorLeft(0, 0, 5.65, 5.65) {
-		t.Fatal("inside-diagonal terminates")
+	if !c.session.burstActive {
+		t.Fatalf("drift killed 5-notch burst: %+v", c.session)
 	}
-	if !anchorLeft(0, 0, 8.1, 0) {
-		t.Fatal("beyond-epsilon survives")
-	}
-	if !anchorLeft(0, 0, 6, 6) {
-		t.Fatal("outside-diagonal survives")
+	stepUntilDone(c, t0+0.02, 1.0/165)
+	_, ty := rec.total()
+	// The tail keeps emitting after the last notch; only the sub-unit
+	// remainder and the documented idle-deadline overload cut (<1% here)
+	// may remain. Before the fix only -463 of -1200 survived.
+	if ty > -1100 {
+		t.Fatalf("5-notch total = %d, want at most -1100 of -1200", ty)
 	}
 }
 
-func TestEnginePointerJitterSurvives(t *testing.T) {
+func TestEnginePointerMotionPreservesBurst(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
 	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	c.notePointer(11.2, 21.2)
-	if c.session.kind != scrollSessionWheel || !c.session.burstActive {
-		t.Fatalf("jitter killed burst: %+v", c.session)
+	// Jitter, drift, and teleports never split a burst: pointer motion
+	// does not retarget or cancel wheel delivery, which stays frozen
+	// at the burst origin.
+	for _, pt := range [][2]float64{{11.2, 21.2}, {13, 20}, {16, 20}, {19, 20}, {30, 20}, {40, 20}} {
+		c.notePointer(pt[0], pt[1])
+		if c.session.kind != scrollSessionWheel || !c.session.burstActive {
+			t.Fatalf("pointer (%v,%v) killed burst: %+v", pt[0], pt[1], c.session)
+		}
 	}
 	if c.session.anchorX != 10 || c.session.anchorY != 20 {
 		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.anchorX, c.session.anchorY)
 	}
-	c.notePointer(30, 20)
-	if c.session.burstActive {
-		t.Fatal("teleport preserves burst")
-	}
-}
-
-func TestEngineCumulativeDriftTerminates(t *testing.T) {
-	c, host := newEngineController(nil)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	// Small steps accumulate against the fixed origin: the third step
-	// leaves the radius even though each step is small.
-	c.notePointer(13, 20)
-	c.notePointer(16, 20)
-	if !c.session.burstActive {
-		t.Fatal("burst died inside radius")
-	}
-	c.notePointer(19, 20)
-	if c.session.burstActive {
-		t.Fatal("cumulative drift past radius preserves burst")
-	}
-}
-
-func TestEnginePointerAnchorChangeEndsBurst(t *testing.T) {
-	rec := &gateRecorder{}
-	c, host := newEngineController(rec)
-	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	c.notePointer(10, 20)
-	if c.session.kind != scrollSessionWheel || !c.session.burstActive {
-		t.Fatal("burst died on identical anchor")
-	}
-	c.notePointer(40, 20)
-	if c.session.burstActive {
-		t.Fatal("burst survives pointer A-to-B movement")
-	}
-	if c.session.pendingX != 0 {
-		t.Fatalf("pending = %v, want discarded", c.session.pendingX)
+	if c.session.pendingX != 30 {
+		t.Fatalf("pending = %v, want 30", c.session.pendingX)
 	}
 }
 
@@ -541,22 +524,19 @@ func TestEngineOldCleanupKeepsNewSession(t *testing.T) {
 	}
 }
 
-func TestEngineImpulseWithinEpsilonJoinsBurst(t *testing.T) {
+func TestEngineImpulseAcrossPointerPositionsJoinsBurst(t *testing.T) {
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
 	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
-	// Same burst: jittered impulse accumulates instead of restarting.
+	// Jittered and teleported impulses all join the live burst instead
+	// of restarting it; delivery stays at the frozen origin.
 	c.impulseWheel(100.05, 12, 21, 1, 0, host, 30, 0)
+	c.impulseWheel(100.1, 40, 20, 1, 0, host, 30, 0)
 	if c.session.pendingX <= 30 {
-		t.Fatalf("jittered impulse did not join burst: %v", c.session.pendingX)
+		t.Fatalf("displaced impulses did not join burst: %v", c.session.pendingX)
 	}
 	if c.session.anchorX != 10 || c.session.anchorY != 20 {
 		t.Fatalf("origin moved to (%v,%v), want frozen (10,20)", c.session.anchorX, c.session.anchorY)
-	}
-	// Beyond the radius: fresh burst, old pending intentionally dropped.
-	c.impulseWheel(100.1, 40, 20, 1, 0, host, 30, 0)
-	if c.session.anchorX != 40 || c.session.pendingX != 30 {
-		t.Fatalf("teleport did not restart burst: %+v", c.session)
 	}
 }
 
@@ -565,6 +545,8 @@ func TestEngineSyntheticDeliveryUsesFrozenAnchor(t *testing.T) {
 	c, host := newEngineController(rec)
 	c.impulseWheel(100.0, 10, 20, 1, 0, host, 30, 0)
 	c.notePointer(12, 21)
+	// Even a far teleport keeps delivery at the frozen origin.
+	c.notePointer(400, 900)
 	c.step(100.05)
 	if len(rec.subs) == 0 {
 		t.Fatal("burst submitted nothing")
@@ -585,9 +567,9 @@ func TestEngineMirroredSignReplay(t *testing.T) {
 	if tx >= 0 || ty <= 0 {
 		t.Fatalf("mirrored total = (%d,%d), want (-,+)", tx, ty)
 	}
-	c.notePointer(10+scrollAnchorEpsilon+1, 20)
-	if c.session.burstActive {
-		t.Fatal("negative burst survives teleport")
+	c.notePointer(400, 900)
+	if !c.session.burstActive {
+		t.Fatal("pointer teleport killed burst")
 	}
 }
 
