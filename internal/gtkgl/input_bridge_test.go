@@ -113,6 +113,20 @@ func TestInputBridgeDeadKeyPressRunsFilterWithoutSendingKeys(t *testing.T) {
 	}
 }
 
+func TestInputBridgeNonBMPCommitSendsSurrogatePair(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.onIMCommit("\U0001F600")
+	if len(host.keys) != 2 {
+		t.Fatalf("non-BMP commit events = %d, want 2 (surrogate pair)", len(host.keys))
+	}
+	for i, want := range []uint16{0xD83D, 0xDE00} {
+		if host.keys[i].Type != cef.KeyEventTypeKeyeventChar || host.keys[i].Character != want {
+			t.Fatalf("surrogate %d = %+v, want char %#x", i, host.keys[i], want)
+		}
+	}
+}
+
 func TestInputBridgeReleaseAlwaysSendsKeyUp(t *testing.T) {
 	host := &recordingBrowserHost{}
 	ib := NewInputBridge(host, 1)
