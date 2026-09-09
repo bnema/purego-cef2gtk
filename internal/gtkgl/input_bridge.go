@@ -423,19 +423,27 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 	if ib.imContext != nil {
 		commitCb := func(_ gtk.IMContext, text string) { ib.onIMCommit(text) }
 		commitHandlerID := ib.imContext.ConnectCommit(&commitCb)
-		key.SetImContext(&ib.imContext.IMContext)
+		// Do not call key.SetImContext: automatic controller filtering
+		// consumes printable presses (Space, letters) before key-pressed
+		// fires, so CEF would receive CHAR without RAWKEYDOWN and pages
+		// that cancel keydown (e.g. YouTube Space handling) misbehave.
+		// The bridge filters explicitly per press instead, preserving the
+		// physical RAWKEYDOWN while committed text still arrives once via
+		// the commit signal.
 		ib.imContext.SetClientWidget(widget)
 		ib.callbacks = append(ib.callbacks, &commitCb)
 		ib.imContextCommitHandler = commitHandlerID
 	}
-	keyPressCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) bool {
+	keyPressCb := func(controller gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) bool {
 		mods := uint(state)
 		ib.mirrorClipboardShortcut(keyval, mods)
 		if mods&(uint(gdk.ControlMaskValue)|uint(gdk.MetaMaskValue)) != 0 && (keyval == gdkKeyLowercaseV || keyval == gdkKeyUppercaseV) {
 			ib.pasteFromClipboard()
 			return true
 		}
-		ib.onKeyPress(keyval, keycode, mods)
+		ib.forwardKeyPress(keyval, keycode, mods, func() bool {
+			return ib.filterKeyPress(&controller, keycode, state)
+		})
 		if mods&uint(gdk.ControlMaskValue) != 0 || mods&uint(gdk.AltMaskValue) != 0 {
 			return false
 		}
@@ -445,7 +453,10 @@ func (ib *InputBridge) AttachToWidget(widget *gtk.Widget) {
 		return true
 	}
 	keyPressHandlerID := key.ConnectKeyPressed(&keyPressCb)
-	keyReleaseCb := func(_ gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) {
+	keyReleaseCb := func(controller gtk.EventControllerKey, keyval, keycode uint, state gdk.ModifierType) {
+		// Feed releases through the IM context for state coherence; the
+		// result is ignored and KEYUP is always forwarded.
+		ib.filterKeyRelease(&controller, keycode, state)
 		ib.onKeyRelease(keyval, keycode, uint(state))
 	}
 	keyReleaseHandlerID := key.ConnectKeyReleased(&keyReleaseCb)
@@ -934,16 +945,35 @@ func syncWindowlessBrowserFocus(host cef.BrowserHost, reveal bool) {
 	host.Invalidate(cef.PaintElementTypePetView)
 }
 
-func (ib *InputBridge) onKeyPress(keyval, keycode, mods uint) {
+// forwardKeyPress delivers a physical press to CEF, preserving RAWKEYDOWN
+// before explicit IM filtering. filter decides consumption and may
+// synchronously emit commit -> CHAR for consumed keys; the KeyvalToChar
+// fallback only fires when the filter reports unconsumed. Dead keys carry
+// no Windows VK mapping so they send nothing themselves, but the filter
+// still runs to drive composition state.
+func (ib *InputBridge) forwardKeyPress(keyval, keycode, mods uint, filter func() bool) {
 	host := ib.currentHost()
 	if host == nil {
 		return
 	}
-	if keyval >= gdkDeadKeyStart && keyval <= gdkDeadKeyEnd {
+	dead := keyval >= gdkDeadKeyStart && keyval <= gdkDeadKeyEnd
+	if !dead {
+		ib.sendRawKeyDown(host, keyval, keycode, mods)
+	}
+	if filter() {
 		return
 	}
+	if !dead {
+		ib.sendFallbackChar(host, keyval, keycode, mods)
+	}
+}
+
+func (ib *InputBridge) sendRawKeyDown(host cef.BrowserHost, keyval, keycode, mods uint) {
 	evt := BuildKeyEvent(keyval, keycode, mods, cef.KeyEventTypeKeyeventRawkeydown)
 	host.SendKeyEvent(&evt)
+}
+
+func (ib *InputBridge) sendFallbackChar(host cef.BrowserHost, keyval, keycode, mods uint) {
 	if ch := KeyvalToChar(keyval); ch != 0 {
 		charEvt := BuildKeyEvent(keyval, keycode, mods, cef.KeyEventTypeKeyeventChar)
 		charEvt.WindowsKeyCode = int32(ch)
@@ -951,6 +981,50 @@ func (ib *InputBridge) onKeyPress(keyval, keycode, mods uint) {
 		charEvt.UnmodifiedCharacter = ch
 		host.SendKeyEvent(&charEvt)
 	}
+}
+
+// filterKeyPress runs the owned IM context explicitly on a physical press
+// and reports whether it consumed the key. The caller must forward the
+// physical RAWKEYDOWN before consulting this result; consumed text arrives
+// separately through onIMCommit, unconsumed keys use the KeyvalToChar
+// fallback. A missing IM context, widget, surface, or device means no
+// filtering can run, which is reported as unconsumed.
+func (ib *InputBridge) filterKeyPress(controller *gtk.EventControllerKey, keycode uint, state gdk.ModifierType) bool {
+	return ib.filterKey(controller, true, keycode, state)
+}
+
+func (ib *InputBridge) filterKeyRelease(controller *gtk.EventControllerKey, keycode uint, state gdk.ModifierType) {
+	ib.filterKey(controller, false, keycode, state)
+}
+
+func (ib *InputBridge) filterKey(controller *gtk.EventControllerKey, press bool, keycode uint, state gdk.ModifierType) bool {
+	if ib == nil || controller == nil {
+		return false
+	}
+	ib.mu.Lock()
+	imContext := ib.imContext
+	widget := ib.widget
+	detached := ib.detached
+	ib.mu.Unlock()
+	if detached || imContext == nil || widget == nil {
+		return false
+	}
+	native := widget.GetNative()
+	if native == nil {
+		return false
+	}
+	defer gobject.ObjectNewFromInternalPtr(native.GoPointer()).Unref()
+	surface := native.GetSurface()
+	if surface == nil {
+		return false
+	}
+	defer surface.Unref()
+	device := controller.GetCurrentEventDevice()
+	if device == nil {
+		return false
+	}
+	defer device.Unref()
+	return imContext.FilterKey(press, surface, device, controller.GetCurrentEventTime(), keycode, state, int(controller.GetGroup()))
 }
 
 func (ib *InputBridge) onIMCommit(text string) {

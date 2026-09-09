@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CEF OSR keyboard playground</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111827; color: #e5e7eb; }
+    body { max-width: 880px; margin: 0 auto; padding: 24px; }
+    section { margin: 18px 0; padding: 18px; border: 1px solid #374151; border-radius: 12px; background: #1f2937; }
+    h1, h2 { margin-top: 0; }
+    output, pre { font-family: ui-monospace, monospace; }
+    pre { min-height: 120px; max-height: 260px; overflow: auto; padding: 12px; background: #030712; white-space: pre-wrap; }
+    #tall { height: 1600px; }
+    input[type="text"] { width: 320px; padding: 8px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>CEF OSR keyboard playground</h1>
+  <p>Regression fixture for physical key-down delivery. No network dependency; results are readable in <code>#result</code> without DevTools.</p>
+
+  <section>
+    <h2>Space handling</h2>
+    <p>Mode is selected with <code>?cancel=1</code> (keydown canceled, playback toggles) or <code>?cancel=0</code> (control: normal scrolling).</p>
+    <p>Playback state: <output id="playback">paused=false</output></p>
+    <p>Toggle count: <output id="toggles">0</output></p>
+    <p>Scroll position: <output id="scrollpos">0</output></p>
+  </section>
+
+  <section>
+    <h2>Text input</h2>
+    <label for="plain">Plain input</label>
+    <input id="plain" type="text" autocomplete="off" value="">
+    <p>Value: <output id="plain-value"></output></p>
+  </section>
+
+  <section>
+    <h2>Event order</h2>
+    <button id="clear-log" type="button">Clear log</button>
+    <pre id="event-log" aria-live="polite"></pre>
+  </section>
+
+  <div id="tall" aria-hidden="true"></div>
+
+  <p>Result: <output id="result">pending</output></p>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const cancelSpace = params.get('cancel') !== '0';
+    const playback = document.querySelector('#playback');
+    const toggles = document.querySelector('#toggles');
+    const scrollpos = document.querySelector('#scrollpos');
+    const result = document.querySelector('#result');
+    const eventLog = document.querySelector('#event-log');
+    const entries = [];
+    let toggleCount = 0;
+    let paused = false;
+
+    const log = (line) => {
+      entries.unshift(`${new Date().toISOString()} ${line}`);
+      if (entries.length > 120) entries.length = 120;
+      eventLog.textContent = entries.join('\n');
+    };
+    document.querySelector('#clear-log').addEventListener('click', () => {
+      entries.length = 0;
+      eventLog.textContent = '';
+    });
+
+    document.addEventListener('keydown', (event) => {
+      log(`keydown key=${event.key} code=${event.code} cancel=${cancelSpace}`);
+      if (event.code === 'Space' && cancelSpace && event.target === document.body) {
+        event.preventDefault();
+      }
+    }, { capture: true });
+    document.addEventListener('keypress', (event) => {
+      log(`keypress key=${event.key} code=${event.code}`);
+    }, { capture: true });
+    document.addEventListener('keyup', (event) => {
+      log(`keyup key=${event.key} code=${event.code}`);
+      if (event.code === 'Space' && cancelSpace && event.target === document.body) {
+        paused = !paused;
+        toggleCount += 1;
+        playback.value = `paused=${paused}`;
+        toggles.value = String(toggleCount);
+      }
+    }, { capture: true });
+    addEventListener('scroll', () => {
+      scrollpos.value = String(Math.round(scrollY));
+    }, { passive: true });
+
+    const plain = document.querySelector('#plain');
+    const plainValue = document.querySelector('#plain-value');
+    plain.addEventListener('input', () => {
+      plainValue.value = plain.value;
+    });
+
+    const refresh = () => {
+      result.value = `cancel=${cancelSpace} toggles=${toggleCount} paused=${paused} scrollY=${Math.round(scrollY)} plain=${JSON.stringify(plain.value)} events=${entries.length}`;
+    };
+    setInterval(refresh, 250);
+    refresh();
+  </script>
+</body>
+</html>
