@@ -105,3 +105,17 @@ func TestInjectScrollDirectWithoutSmoothing(t *testing.T) {
 		t.Fatalf("direct inject events = %+v, want one (10,-80)", host.events)
 	}
 }
+
+func TestInjectScrollRejectsAfterDetach(t *testing.T) {
+	ib, host, rec := newAnimatedTestBridge(forwardCounter(map[ScrollPhase]int{}), ScrollOptions{WheelSmoothing: true})
+	ib.Detach()
+	if ib.InjectScroll(0, -80) {
+		t.Fatal("inject accepted after detach")
+	}
+	if ib.scroll.session.kind != scrollSessionNone {
+		t.Fatalf("inject after detach opened session: %+v", ib.scroll.session)
+	}
+	if len(rec.subs) != 0 || len(host.events) != 0 {
+		t.Fatalf("inject after detach delivered %d animated + %d direct events", len(rec.subs), len(host.events))
+	}
+}
