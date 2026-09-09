@@ -20,6 +20,7 @@ type recordingBrowserHost struct {
 	focusStates   []int32
 	invalidations []cef.PaintElementType
 	wheels        []cef.MouseEvent
+	keys          []cef.KeyEvent
 }
 
 type recordedMouseMove struct {
@@ -70,6 +71,10 @@ func (h *recordingBrowserHost) SendMouseWheelEvent(event *cef.MouseEvent, _, _ i
 	h.wheels = append(h.wheels, *event)
 }
 
+func (h *recordingBrowserHost) SendKeyEvent(event *cef.KeyEvent) {
+	h.keys = append(h.keys, *event)
+}
+
 func (h *recordingBrowserHost) WasHidden(hidden int32) {
 	h.hiddenStates = append(h.hiddenStates, hidden)
 }
@@ -80,6 +85,119 @@ func (h *recordingBrowserHost) SetFocus(focused int32) {
 
 func (h *recordingBrowserHost) Invalidate(element cef.PaintElementType) {
 	h.invalidations = append(h.invalidations, element)
+}
+
+func TestInputBridgeDeadKeyPressRunsFilterWithoutSendingKeys(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	// Dead keys start composition: no RAWKEYDOWN, no fallback CHAR, in both
+	// consumed and unconsumed filter outcomes — but the filter still runs to
+	// drive composition state. The composed text arrives once via onIMCommit.
+	for _, consumed := range []bool{false, true} {
+		host.keys = nil
+		filterRan := false
+		ib.forwardKeyPress(gdkDeadKeyStart, 48, 0, func() bool {
+			filterRan = true
+			return consumed
+		})
+		if !filterRan {
+			t.Fatalf("dead-key consumed=%v filter did not run", consumed)
+		}
+		if len(host.keys) != 0 {
+			t.Fatalf("dead-key consumed=%v events = %+v, want none", consumed, host.keys)
+		}
+	}
+	ib.onIMCommit("\u00e9")
+	if len(host.keys) != 1 || host.keys[0].Type != cef.KeyEventTypeKeyeventChar || host.keys[0].Character != 0xe9 {
+		t.Fatalf("dead-key commit = %+v, want single char U+00E9", host.keys)
+	}
+}
+
+func TestInputBridgeReleaseAlwaysSendsKeyUp(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.onKeyRelease(gdkKeySpace, 65, 0)
+	if len(host.keys) != 1 || host.keys[0].Type != cef.KeyEventTypeKeyeventKeyup {
+		t.Fatalf("release keys = %+v, want single keyup", host.keys)
+	}
+}
+
+func TestInputBridgeKeyDispatchWithNilHostSendsNothing(t *testing.T) {
+	ib := NewInputBridge(nil, 1)
+	// Must not panic, must not run the filter, and must not dispatch.
+	ib.forwardKeyPress(gdkKeySpace, 65, 0, func() bool {
+		t.Fatal("filter ran without a host")
+		return false
+	})
+	ib.onIMCommit(" ")
+	ib.onKeyRelease(gdkKeySpace, 65, 0)
+}
+
+func TestInputBridgeDetachedFilterReportsUnconsumed(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	// Without a widget there is no surface to filter against, so both nil
+	// and detached bridges report unconsumed without touching GTK.
+	if got := ib.filterKeyPress(nil, 65, 0); got {
+		t.Fatalf("filter without widget = true, want false")
+	}
+	ib.Detach()
+	if got := ib.filterKeyPress(nil, 65, 0); got {
+		t.Fatalf("filter after detach = true, want false")
+	}
+}
+
+func TestInputBridgeConsumedPressKeepsRawKeyDownBeforeCommitChar(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	// IM-consumed press (e.g. Space under IMContextSimple): the filter runs
+	// after RAWKEYDOWN and emits commit synchronously, so CHAR still lands
+	// after the raw key-down. No fallback CHAR follows.
+	ib.forwardKeyPress(gdkKeySpace, 65, 0, func() bool {
+		if len(host.keys) != 1 || host.keys[0].Type != cef.KeyEventTypeKeyeventRawkeydown {
+			t.Fatalf("filter ran with keys = %+v, want single rawkeydown first", host.keys)
+		}
+		ib.onIMCommit(" ")
+		return true
+	})
+
+	if len(host.keys) != 2 {
+		t.Fatalf("consumed press key events = %d, want 2 (rawkeydown+commit char)", len(host.keys))
+	}
+	if host.keys[0].Type != cef.KeyEventTypeKeyeventRawkeydown {
+		t.Fatalf("first event type = %v, want rawkeydown", host.keys[0].Type)
+	}
+	if host.keys[1].Type != cef.KeyEventTypeKeyeventChar || host.keys[1].Character != ' ' {
+		t.Fatalf("second event = %+v, want single commit char ' '", host.keys[1])
+	}
+}
+
+func TestInputBridgeUnconsumedPressSendsRawKeyDownThenFallbackChar(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	// Unconsumed press (e.g. Enter, or no IM context): RAWKEYDOWN first,
+	// filter runs, then the KeyvalToChar fallback CHAR.
+	filterRan := false
+	ib.forwardKeyPress(gdkKeySpace, 65, 0, func() bool {
+		filterRan = true
+		if len(host.keys) != 1 || host.keys[0].Type != cef.KeyEventTypeKeyeventRawkeydown {
+			t.Fatalf("filter ran with keys = %+v, want single rawkeydown first", host.keys)
+		}
+		return false
+	})
+	if !filterRan {
+		t.Fatal("filter did not run for unconsumed press")
+	}
+
+	if len(host.keys) != 2 {
+		t.Fatalf("unconsumed press key events = %d, want 2 (rawkeydown+char)", len(host.keys))
+	}
+	if host.keys[0].Type != cef.KeyEventTypeKeyeventRawkeydown {
+		t.Fatalf("first event type = %v, want rawkeydown", host.keys[0].Type)
+	}
+	if host.keys[1].Type != cef.KeyEventTypeKeyeventChar || host.keys[1].Character != ' ' {
+		t.Fatalf("second event = %+v, want char ' '", host.keys[1])
+	}
 }
 
 func TestInputBridgeDetachReleasesPointerTrackerCallbacksAndInteraction(t *testing.T) {
