@@ -93,12 +93,13 @@ type Loader struct {
 	framebufferTexture2D   func(target uint32, attachment uint32, textarget uint32, texture uint32, level int32)
 	checkFramebufferStatus func(target uint32) uint32
 
-	clear      func(mask uint32)
-	clearColor func(red, green, blue, alpha float32)
-	viewport   func(x, y, width, height int32)
-	drawArrays func(mode uint32, first, count int32)
-	getError   func() uint32
-	readPixels func(x, y, width, height int32, format, xtype uint32, pixels unsafe.Pointer)
+	clear       func(mask uint32)
+	clearColor  func(red, green, blue, alpha float32)
+	viewport    func(x, y, width, height int32)
+	drawArrays  func(mode uint32, first, count int32)
+	getError    func() uint32
+	readPixels  func(x, y, width, height int32, format, xtype uint32, pixels unsafe.Pointer)
+	getIntegerv func(pname uint32, params *int32)
 
 	genQueries          func(n int32, ids *uint32)
 	deleteQueries       func(n int32, ids *uint32)
@@ -206,6 +207,7 @@ func (l *Loader) registerAll() (retErr error) {
 	register(&l.drawArrays, "glDrawArrays")
 	register(&l.getError, "glGetError")
 	register(&l.readPixels, "glReadPixels")
+	register(&l.getIntegerv, "glGetIntegerv")
 
 	l.registerOptional("glGenQueries", &l.genQueries)
 	l.registerOptional("glDeleteQueries", &l.deleteQueries)

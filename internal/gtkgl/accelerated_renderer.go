@@ -55,17 +55,18 @@ type QueuedFrame struct {
 // methods must be called from the GTK main thread because it owns GtkGLArea and
 // current-context GL/EGL state.
 type AcceleratedRenderer struct {
-	area        *gtk.GLArea
-	egl         eglImporter
-	gl          glImporter
-	copier      textureCopier
-	queued      QueuedFrame
-	contextPtr  uintptr
-	initFunc    func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
-	profiler    atomic.Pointer[internalprofile.Recorder]
-	copyTimer   *gl.TimerQueryRecorder
-	drawTimer   *gl.TimerQueryRecorder
-	frameTraces atomic.Uint64
+	area           *gtk.GLArea
+	egl            eglImporter
+	gl             glImporter
+	copier         textureCopier
+	queued         QueuedFrame
+	contextPtr     uintptr
+	initFunc       func(*gtk.GLArea) (eglImporter, glImporter, textureCopier, error)
+	profiler       atomic.Pointer[internalprofile.Recorder]
+	copyTimer      *gl.TimerQueryRecorder
+	drawTimer      *gl.TimerQueryRecorder
+	frameTraces    atomic.Uint64
+	geometryTraces atomic.Uint64
 }
 
 func NewAcceleratedRenderer(area *gtk.GLArea) *AcceleratedRenderer {
@@ -281,6 +282,53 @@ func (r *AcceleratedRenderer) QueueRender() {
 }
 
 // RenderQueuedOnGTKThread draws the current owned texture into the GtkGLArea framebuffer.
+// glViewportQuery reports the viewport the GL context was initialized with,
+// which is the framebuffer size GTK gave us. It is only called from the trace.
+type viewportQuerier interface {
+	GetIntegerv(pname uint32, params *int32)
+}
+
+const glViewportPname = 0x0BA2
+
+// traceGeometry prints, a bounded number of times, the numbers that decide
+// whether the frame we draw can cover the widget: the framebuffer GL thinks it
+// has, the widget allocation and scale GTK reports, and the frame we are about
+// to draw. Gated by the same environment variable as the other OSR traces.
+func (r *AcceleratedRenderer) traceGeometry(frame dmabuf.Size) {
+	if r == nil || r.area == nil || os.Getenv("PUREGO_CEF2GTK_TRACE_OSR") == "" {
+		return
+	}
+	if r.geometryTraces.Add(1) > 16 {
+		return
+	}
+	frameWidth, frameHeight := -1, -1
+	if querier, ok := any(r.gl).(viewportQuerier); ok && querier != nil {
+		var viewport [4]int32
+		querier.GetIntegerv(glViewportPname, &viewport[0])
+		frameWidth, frameHeight = int(viewport[2]), int(viewport[3])
+	}
+	allocWidth, allocHeight := r.area.GetAllocatedWidth(), r.area.GetAllocatedHeight()
+	surfaceScale, surfaceScaleFactor := 0.0, 0
+	if native := r.area.GetNative(); native != nil {
+		if surface := native.GetSurface(); surface != nil {
+			surfaceScale = surface.GetScale()
+			surfaceScaleFactor = surface.GetScaleFactor()
+		}
+	}
+	fmt.Fprintf(os.Stderr,
+		"cef2gtk-glarea-geometry gl_viewport_framebuffer=%dx%d widget_alloc_logical=%dx%d widget_scale_factor=%d surface_scale=%.3f surface_scale_factor=%d frame_coded=%dx%d coverage_x=%.3f coverage_y=%.3f\n",
+		frameWidth, frameHeight, allocWidth, allocHeight, r.area.GetScaleFactor(), surfaceScale, surfaceScaleFactor,
+		frame.Width, frame.Height,
+		ratio(float64(frame.Width), float64(frameWidth)), ratio(float64(frame.Height), float64(frameHeight)))
+}
+
+func ratio(numerator, denominator float64) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return numerator / denominator
+}
+
 func (r *AcceleratedRenderer) RenderQueuedOnGTKThread() error {
 	if r == nil {
 		return ErrNilAcceleratedRenderer
@@ -301,6 +349,7 @@ func (r *AcceleratedRenderer) RenderQueuedOnGTKThread() error {
 	if r.copier == nil {
 		return ErrRendererNotInitialized
 	}
+	r.traceGeometry(queued.Size)
 	drawStart := time.Now()
 	drawQuery, drawQueryOK := r.beginTimer(r.drawTimer)
 	err := r.copier.DrawTextureToCurrentFramebuffer(queued.Texture, queued.Size)
