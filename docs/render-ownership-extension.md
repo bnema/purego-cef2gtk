@@ -285,7 +285,51 @@ D3 must be answered before variant B can be called approvable: options 1 and 2
 are assumptions that must be written into the acceptance wording, and option 3 is
 a bounded investigation like §9.
 
-## 13. Risks, exclusions, sign-off
+## 14. Measured on this machine: the dma-buf fence mechanism
+
+Measured 2026-09-11 with `cmd/probe-import-copy` on kernel 7.1.8-cachyos, which
+exposes `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` and `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`
+alongside `sync_file`. The probe allocates a DMA-BUF, imports it, copies from it
+on the GPU, and queries the fence mechanism before and after the copy.
+
+| Step | Result |
+| --- | --- |
+| `EXPORT_SYNC_FILE(DMA_BUF_SYNC_READ)` | supported; returns a real sync-file descriptor |
+| `EXPORT_SYNC_FILE(DMA_BUF_SYNC_WRITE)` | supported; returns a real sync-file descriptor |
+| Waiting on the exported fence (`poll`) | signaled immediately, 0 ms, both before and after the GPU copy |
+| `IMPORT_SYNC_FILE` with that fence | `EINVAL`, both into the same buffer and into a separate scratch buffer |
+
+Honest reading:
+
+- The export path is implemented on this kernel and driver, which means a
+  consumer **can** read a completion fence from a DMA-BUF without any CEF change.
+- No pending producer fence was observed in this synthetic path. That is expected:
+  the buffer was written on the CPU side and only read by the GPU, so there was
+  nothing outstanding to wait for.
+- The import rejection is most likely "nothing to import": the exported sync file
+  carried no fence, and the kernel rejects an empty fence with `EINVAL`. The
+  probe cannot distinguish that from "driver does not implement import" yet,
+  because it had no real pending fence to publish. Publishing a fence of our own
+  requires a native-fence sync object (`EGL_ANDROID_native_fence_sync` +
+  `eglDupNativeFenceFDANDROID`, both advertised by the driver here) to turn our
+  copy completion into a sync-file descriptor.
+
+What this changes: §4 and §12 are no longer purely about assumptions. A live
+frame measurement can decide them, and it needs no CEF change and no new
+dependency:
+
+1. Read the fence off a **CEF-provided** descriptor during real accelerated
+   frames. If a pending producer fence exists there, producer-visibility is
+   measurable rather than assumed, and it can be *waited on* before we sample.
+2. After a real GSK present of our own exported buffer, export again with
+   `DMA_BUF_SYNC_WRITE` ("wait for all users, read or write"). If a pending reader
+   fence exists, the pool release rule becomes completion-based with a real
+   signal instead of finalization-as-a-proxy.
+
+Both measurements belong to the instrumentation scope and would be reported as
+evidence, not as a rendered claim.
+
+## 15. Risks, exclusions, sign-off
 
 Risks: a perfectly copied wrong generation (missing producer dependency);
 callback or thread blocking on a GPU wait, with no safe return on timeout;
@@ -296,4 +340,5 @@ Excluded: CEF patches or forks, native Vulkan bindings, CPU readback in a
 production path, silent render-stack changes, packaging or release changes.
 
 Sign-off required on: D2, D3, the §4 wording if accepted, the §7 timeout policy,
-and the §11 acceptance criteria.
+the §11 acceptance criteria, and — if §14 is to be pursued first — the go-ahead
+for the live frame measurement.

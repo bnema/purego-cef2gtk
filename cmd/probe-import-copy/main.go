@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"os"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
@@ -15,6 +17,9 @@ import (
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gtk"
 )
+
+// fenceWait bounds how long the dma-buf fence probe waits for one fence.
+const fenceWait = 2 * time.Second
 
 const (
 	texWidth  = 4
@@ -37,6 +42,9 @@ type probeResult struct {
 	CopyPipelineValid  bool `json:"copy_pipeline_valid"`
 	DrawPipelineValid  bool `json:"draw_pipeline_valid"`
 	ReadbackMatch      bool `json:"readback_match"`
+
+	// DMABUFFences reports the dma-buf fence mechanism at each measured stage.
+	DMABUFFences []dmaBufFenceResult `json:"dmabuf_fences,omitempty"`
 }
 
 // knownRGBA returns a 4×4 RGBA pattern where every pixel has a unique RGBA
@@ -125,7 +133,12 @@ func runProbe(area *gtk.GLArea) probeOutput {
 
 	pixels := knownRGBA()
 	size := dmabuf.Size{Width: texWidth, Height: texHeight}
-	srcTex, dmabufUsed := pipeline.sourceTexture(pixels, size, allowSyntheticFallback)
+	srcTex, dmabufUsed, keepFD := pipeline.sourceTexture(pixels, size, allowSyntheticFallback)
+	if keepFD >= 0 {
+		defer func() { _ = unix.Close(keepFD) }()
+	}
+	// Mechanism check before any GPU work touches the buffer.
+	result.DMABUFFences = append(result.DMABUFFences, probeDMABUFFence(keepFD, "after-import", fenceWait))
 	if srcTex == 0 {
 		return probeOutput{
 			Status: "error",
@@ -139,6 +152,8 @@ func runProbe(area *gtk.GLArea) probeOutput {
 	result.DMABUFImported = dmabufUsed
 
 	owned, err := pipeline.copyAndVerify(srcTex, size, pixels, result)
+	// After a GPU read of the buffer: was a completion fence published for it?
+	result.DMABUFFences = append(result.DMABUFFences, probeDMABUFFence(keepFD, "after-copy", fenceWait))
 	if err != nil {
 		return probeOutput{Status: "error", Error: err.Error(), Probe: result, ProbeC: &ctxProbe}
 	}
@@ -192,19 +207,19 @@ func (p *probePipeline) close() {
 	}
 }
 
-func (p *probePipeline) sourceTexture(pixels []byte, size dmabuf.Size, allowSyntheticFallback bool) (uint32, bool) {
+func (p *probePipeline) sourceTexture(pixels []byte, size dmabuf.Size, allowSyntheticFallback bool) (uint32, bool, int) {
 	if p.importer != nil {
-		if tex, ok := importDMABUFSource(p.importer, p.gl, pixels, size); ok {
-			return tex, true
+		if tex, keepFD, ok := importDMABUFSource(p.importer, p.gl, pixels, size); ok {
+			return tex, true, keepFD
 		}
 		if !allowSyntheticFallback {
-			return 0, false
+			return 0, false, -1
 		}
 	}
 	if !allowSyntheticFallback {
-		return 0, false
+		return 0, false, -1
 	}
-	return createSyntheticTexture(p.gl, pixels, size.Width, size.Height), false
+	return createSyntheticTexture(p.gl, pixels, size.Width, size.Height), false, -1
 }
 
 func (p *probePipeline) copyAndVerify(srcTex uint32, size dmabuf.Size, pixels []byte, result *probeResult) (gl.Texture, error) {
@@ -231,10 +246,10 @@ func (p *probePipeline) deleteTexture(tex uint32) {
 // importDMABUFSource allocates a real DMABUF, fills it with known pixel data,
 // imports it via EGL, and creates a GL texture. Returns (texture, true) on
 // success, or (0, false) if DMABUF allocation or import fails.
-func importDMABUFSource(imp *egl.Importer, glBackend *gl.Loader, pixels []byte, size dmabuf.Size) (tex uint32, ok bool) {
+func importDMABUFSource(imp *egl.Importer, glBackend *gl.Loader, pixels []byte, size dmabuf.Size) (tex uint32, keepFD int, ok bool) {
 	dmaBufFD, pitch, bufSize, drmFD, err := allocateDMABUF(int32(size.Width), int32(size.Height), 32, pixels)
 	if err != nil {
-		return 0, false
+		return 0, -1, false
 	}
 
 	// Cleanup both FDs on failure; on success we close them after GL adoption.
@@ -262,27 +277,31 @@ func importDMABUFSource(imp *egl.Importer, glBackend *gl.Loader, pixels []byte, 
 	// Import via EGL.
 	eglImage, err := imp.ImportDMABUF(frame)
 	if err != nil {
-		return 0, false
+		return 0, -1, false
 	}
 
 	// Create GL texture from the EGLImage.
 	glTex, err := glBackend.ImportEGLImageToTexture(uintptr(eglImage))
 	if err != nil {
 		_ = imp.Destroy(eglImage)
-		return 0, false
+		return 0, -1, false
 	}
 	tex = uint32(glTex)
 
 	// Destroy the EGLImage — the GL texture now owns the backing memory.
 	if err := imp.Destroy(eglImage); err != nil {
 		glBackend.DeleteTextures(1, &tex)
-		return 0, false
+		return 0, -1, false
 	}
+
+	// Keep a duplicate so the fence probe can query the buffer after the GL
+	// texture adopted the original descriptor.
+	keepFD = dupDMABUFFD(dmaBufFD)
 
 	// Close both FDs; the GL texture + driver keep a reference to the buffer.
 	releaseDMABUF(dmaBufFD, drmFD)
 
-	return tex, true
+	return tex, keepFD, true
 }
 
 func createSyntheticTexture(glBackend *gl.Loader, pixels []byte, width, height int32) uint32 {
