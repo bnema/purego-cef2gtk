@@ -679,10 +679,11 @@ func expectedDeviceSize(width, height int32, scale float64) (int32, int32) {
 }
 
 // AddSizeObserver registers a callback invoked on the GTK thread when the view
-// observes a positive size change. It returns a function that unregisters the
-// observer. If a real positive size has already been observed, the callback is
-// invoked immediately with that size; the synthetic Size() fallback is not
-// emitted as an observer event. Register and unregister from the GTK thread.
+// observes a positive size or effective-scale change. It returns a function
+// that unregisters the observer. If a real positive size has already been
+// observed, the callback is invoked immediately with that size; the synthetic
+// Size() fallback is not emitted as an observer event. Register and unregister
+// from the GTK thread.
 func (v *View) AddSizeObserver(fn func(width, height int32)) func() {
 	if v == nil || fn == nil {
 		return func() {}

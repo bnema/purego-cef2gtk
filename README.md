@@ -44,11 +44,16 @@ PUREGO_CEF2GTK_OSR_BACKING_SCALE=auto|on|off
 HiDPI compatibility path only when the GTK surface scale is greater than 1. In
 that mode CEF receives a device-sized OSR view rect with a 1x screen scale,
 because current CEF shared-texture OSR builds can otherwise report a fractional
-`device_scale_factor` while still emitting 1x/logical DMABUF frames. Applications
-that call `BrowserHost.SetZoomLevel` should divide their page zoom by
-`cef2gtk.OSRBackingScaleFactorForScale(float64(view.DeviceScaleFactor()))` before
-converting it to CEF's logarithmic zoom level; this keeps the page's CSS viewport
-at the GTK logical size while the OSR backing remains device-sized.
+`device_scale_factor` while still emitting 1x/logical DMABUF frames.
+
+Applications that expose page zoom must scale their user-facing zoom by
+`(*View).PageZoomCompensation()` (one CSS pixel per logical pixel) before
+converting it to CEF's logarithmic zoom level, and divide CEF zoom readback by
+the same factor. The method returns 1 when CEF's normal logical OSR contract is
+in effect. User zoom itself stays a user-facing value: the compensation changes
+with the observed output scale and must not be persisted. Recompute it and
+reapply the page zoom from an `AddSizeObserver` callback, which also runs when
+the effective scale changes without a logical-size change.
 
 Recommended local checks:
 
