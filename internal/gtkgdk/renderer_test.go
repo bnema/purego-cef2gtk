@@ -2,6 +2,7 @@ package gtkgdk
 
 import (
 	"errors"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -9,8 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/bnema/purego-cef2gtk/internal/dmabuf"
+	internalprofile "github.com/bnema/purego-cef2gtk/internal/profile"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/glib"
+	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
 
@@ -199,7 +202,7 @@ func TestFirstDMABUFTextureSwapFiresOnceAfterSetPaintable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("duplicateFrame: %v", err)
 		}
-		if err := r.importAndSwapOwnedFrame(owned); err != nil {
+		if err := r.importAndSwapOwnedFrame(owned, time.Now()); err != nil {
 			t.Fatalf("importAndSwapOwnedFrame: %v", err)
 		}
 	}
@@ -237,7 +240,7 @@ func TestFirstDMABUFTextureSwapDoesNotFireWhenBuildFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicateFrame: %v", err)
 	}
-	if err := r.importAndSwapOwnedFrame(owned); !errors.Is(err, ErrTextureBuildFailed) {
+	if err := r.importAndSwapOwnedFrame(owned, time.Now()); !errors.Is(err, ErrTextureBuildFailed) {
 		t.Fatalf("importAndSwapOwnedFrame error = %v, want texture build failure", err)
 	}
 	if called != 0 {
@@ -535,5 +538,288 @@ func assertFDClosed(t *testing.T, fd int) {
 	t.Helper()
 	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("fd %d should be closed, F_GETFD error = %v", fd, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bounded GDK present-pipeline instrumentation
+// ---------------------------------------------------------------------------
+
+// profiledRenderer builds a renderer whose idle scheduler runs the pending
+// import synchronously, so one enqueue exercises the whole async import path.
+func profiledRenderer(t *testing.T, recorder *internalprofile.Recorder) *Renderer {
+	t.Helper()
+	r := &Renderer{
+		display:             &gdk.Display{},
+		formats:             &fakeFormats{allowed: true},
+		builder:             &fakeBuilder{texture: fakeTexture()},
+		picture:             &gtk.Picture{},
+		dupFD:               dupFDClOExec,
+		closeFD:             unix.Close,
+		pictureSetPaintable: func(*gdk.Texture) {},
+		idleAddOnce: func(callback *glib.SourceOnceFunc, _ uintptr) uint {
+			(*callback)(0)
+			return 1
+		},
+	}
+	r.SetProfiler(recorder)
+	// Unit fakes are not native GObjects, so drop their sentinel pointers before
+	// the renderer would unref them during teardown.
+	t.Cleanup(func() {
+		if r.current != nil {
+			r.current.texture = nil
+		}
+		for index := 0; index < r.retiredCount; index++ {
+			if retired := r.retiredAt(index); retired != nil {
+				retired.texture = nil
+			}
+		}
+		r.InvalidateOnGTKThread()
+	})
+	return r
+}
+
+func enqueueProfiledFrame(t *testing.T, r *Renderer, file *os.File) {
+	t.Helper()
+	owned, err := r.duplicateFrame(validFrame(int(file.Fd())))
+	if err != nil {
+		t.Fatalf("duplicateFrame: %v", err)
+	}
+	r.stampFrameReceived(owned)
+	r.enqueueOwnedFrame(owned)
+}
+
+func newPipelineRecorder() *internalprofile.Recorder {
+	recorder := internalprofile.NewRecorder()
+	recorder.SetBackend("gdk-dmabuf")
+	recorder.EnableFrameTimeline()
+	recorder.Start(time.Now())
+	return recorder
+}
+
+func pipelineWindow(t *testing.T, recorder *internalprofile.Recorder) internalprofile.FrameTimelineSnapshot {
+	t.Helper()
+	report, ok := recorder.PipelineSnapshot()
+	if !ok {
+		t.Fatal("frame timeline is not enabled")
+	}
+	return report.FrameTimelineSnapshot()
+}
+
+func openDevNull(t *testing.T) *os.File {
+	t.Helper()
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeTestFile(t, file) })
+	return file
+}
+
+// nativeTextureStub returns a texture-shaped pointer backed by a real GObject,
+// so a release path can unref it safely. Ownership transfers to the caller.
+func nativeTextureStub(t *testing.T) *gdk.Texture {
+	t.Helper()
+	object := gobject.NewObjectWithProperties(gobject.TypeFromName("GObject"), 0, nil, nil)
+	if object == nil || object.GoPointer() == 0 {
+		t.Skip("GObject type system unavailable in this environment")
+	}
+	texture := &gdk.Texture{}
+	texture.SetGoPointer(object.GoPointer())
+	return texture
+}
+
+func TestProfiledAsyncImportRecordsOneOrderedSample(t *testing.T) {
+	file := openDevNull(t)
+	recorder := newPipelineRecorder()
+	r := profiledRenderer(t, recorder)
+
+	enqueueProfiledFrame(t, r, file)
+
+	window := pipelineWindow(t, recorder)
+	if window.Received != 1 || window.Imported != 1 || window.Swapped != 1 || window.Replaced != 0 {
+		t.Fatalf("unexpected counters: %+v", window)
+	}
+	receivedToImport := window.SeriesFor(internalprofile.SeriesReceivedToImport)
+	queueWait := window.SeriesFor(internalprofile.SeriesQueueWait)
+	importElapsed := window.SeriesFor(internalprofile.SeriesImportElapsed)
+	receivedToSwap := window.SeriesFor(internalprofile.SeriesReceivedToSwap)
+	for name, series := range map[string]internalprofile.FrameTimelineSeriesSnapshot{
+		"received_to_import": receivedToImport,
+		"queue_wait":         queueWait,
+		"import_elapsed":     importElapsed,
+		"received_to_swap":   receivedToSwap,
+	} {
+		if series.Total != 1 || len(series.Values) != 1 {
+			t.Fatalf("%s series = %+v, want exactly one sample", name, series)
+		}
+		if series.Values[0] < 0 {
+			t.Fatalf("%s sample = %v, want a non-negative elapsed time", name, series.Values[0])
+		}
+	}
+	// The durations decompose: queue wait happens inside receipt-to-import, and
+	// the swap completes after the import started.
+	if queueWait.Values[0] > receivedToImport.Values[0] {
+		t.Fatalf("queue wait %v exceeds receipt-to-import %v", queueWait.Values[0], receivedToImport.Values[0])
+	}
+	const tolerance = 1e-9
+	if got, want := receivedToSwap.Values[0], receivedToImport.Values[0]+importElapsed.Values[0]; math.Abs(got-want) > tolerance {
+		t.Fatalf("received_to_swap = %v, want received_to_import + import_elapsed = %v", got, want)
+	}
+}
+
+func TestProfiledImportCountsReplacedPendingFrameWithoutSamplingIt(t *testing.T) {
+	file := openDevNull(t)
+	recorder := newPipelineRecorder()
+	r := profiledRenderer(t, recorder)
+	// Block the scheduled import so the second frame can replace the first.
+	r.idleAddOnce = func(*glib.SourceOnceFunc, uintptr) uint { return 7 }
+
+	enqueueProfiledFrame(t, r, file)
+	enqueueProfiledFrame(t, r, file)
+	r.importPendingFrameOnGTKThread()
+
+	window := pipelineWindow(t, recorder)
+	if window.Received != 2 {
+		t.Fatalf("received = %d, want 2", window.Received)
+	}
+	if window.Replaced != 1 {
+		t.Fatalf("pending_replaced = %d, want 1", window.Replaced)
+	}
+	if window.Swapped != 1 || window.Imported != 1 {
+		t.Fatalf("replaced frame was counted as a swap: %+v", window)
+	}
+	for _, series := range []internalprofile.FrameTimelineSeries{
+		internalprofile.SeriesReceivedToImport,
+		internalprofile.SeriesQueueWait,
+		internalprofile.SeriesImportElapsed,
+		internalprofile.SeriesReceivedToSwap,
+	} {
+		if total := window.SeriesFor(series).Total; total != 1 {
+			t.Fatalf("%s sampled %d frames, want only the surviving frame", series, total)
+		}
+	}
+}
+
+func TestProfiledImportFailureIsNotSampledAsSwap(t *testing.T) {
+	file := openDevNull(t)
+	recorder := newPipelineRecorder()
+	r := profiledRenderer(t, recorder)
+	r.builder = &fakeBuilder{buildErr: errors.New("build failed")}
+
+	enqueueProfiledFrame(t, r, file)
+
+	window := pipelineWindow(t, recorder)
+	if window.Received != 1 {
+		t.Fatalf("received = %d, want 1", window.Received)
+	}
+	if window.Swapped != 0 || window.Imported != 0 {
+		t.Fatalf("failed import counted as a swap: %+v", window)
+	}
+	for _, series := range []internalprofile.FrameTimelineSeries{
+		internalprofile.SeriesReceivedToImport,
+		internalprofile.SeriesQueueWait,
+		internalprofile.SeriesImportElapsed,
+		internalprofile.SeriesReceivedToSwap,
+	} {
+		if total := window.SeriesFor(series).Total; total != 0 {
+			t.Fatalf("%s sampled a failed import", series)
+		}
+	}
+}
+
+func TestProfiledImportWithoutPresenterCountsImportNotSwap(t *testing.T) {
+	file := openDevNull(t)
+	recorder := newPipelineRecorder()
+	r := profiledRenderer(t, recorder)
+	r.picture = nil
+	// The missing-presenter path releases the built texture, so use a stub whose
+	// unref is real.
+	r.builder = &fakeBuilder{texture: nativeTextureStub(t)}
+
+	enqueueProfiledFrame(t, r, file)
+
+	window := pipelineWindow(t, recorder)
+	if window.Imported != 1 || window.Swapped != 0 {
+		t.Fatalf("missing presenter should count an import without a swap: %+v", window)
+	}
+}
+
+func TestProfilingDisabledRecordsNoPipelineData(t *testing.T) {
+	file := openDevNull(t)
+	recorder := internalprofile.NewRecorder()
+	recorder.Start(time.Now())
+	r := profiledRenderer(t, recorder)
+
+	enqueueProfiledFrame(t, r, file)
+
+	if _, ok := recorder.PipelineSnapshot(); ok {
+		t.Fatal("pipeline data present while the timeline was disabled")
+	}
+	snapshot, ok := recorder.MaybeSnapshot(time.Now().Add(time.Hour), time.Second)
+	if !ok {
+		t.Fatal("expected a snapshot")
+	}
+	if snapshot.GDKPipeline != nil {
+		t.Fatal("disabled profiling produced a gdk_pipeline object")
+	}
+	// The renderer still counts its own swap; only the profiling timeline is off.
+	if got := r.SwapSequence(); got != 1 {
+		t.Fatalf("SwapSequence = %d, want 1", got)
+	}
+}
+
+func TestStampFrameReceivedAssignsMonotonicSequence(t *testing.T) {
+	file := openDevNull(t)
+	recorder := newPipelineRecorder()
+	r := profiledRenderer(t, recorder)
+
+	first, err := r.duplicateFrame(validFrame(int(file.Fd())))
+	if err != nil {
+		t.Fatalf("duplicateFrame: %v", err)
+	}
+	second, err := r.duplicateFrame(validFrame(int(file.Fd())))
+	if err != nil {
+		t.Fatalf("duplicateFrame: %v", err)
+	}
+	r.stampFrameReceived(first)
+	r.stampFrameReceived(second)
+	if first.Sequence != 1 || second.Sequence != 2 {
+		t.Fatalf("sequences = %d,%d want 1,2", first.Sequence, second.Sequence)
+	}
+	if first.ReceivedAt.IsZero() || second.ReceivedAt.Before(first.ReceivedAt) {
+		t.Fatalf("receipt timestamps are not monotonic: %v then %v", first.ReceivedAt, second.ReceivedAt)
+	}
+	r.releaseOwnedFrame(first)
+	r.releaseOwnedFrame(second)
+}
+
+func TestStampFrameReceivedIsNoOpWithoutProfiler(t *testing.T) {
+	file := openDevNull(t)
+	r := &Renderer{dupFD: dupFDClOExec, closeFD: unix.Close}
+	owned, err := r.duplicateFrame(validFrame(int(file.Fd())))
+	if err != nil {
+		t.Fatalf("duplicateFrame: %v", err)
+	}
+	r.stampFrameReceived(owned)
+	if owned.Sequence != 0 || !owned.ReceivedAt.IsZero() {
+		t.Fatalf("disabled profiling stamped a frame: %+v", owned)
+	}
+	r.releaseOwnedFrame(owned)
+}
+
+func TestSwapSequenceTracksCompletedSwaps(t *testing.T) {
+	r := &Renderer{}
+	if got := r.SwapSequence(); got != 0 {
+		t.Fatalf("initial SwapSequence = %d, want 0", got)
+	}
+	r.recordPaintableSwap()
+	r.recordPaintableSwap()
+	if got := r.SwapSequence(); got != 2 {
+		t.Fatalf("SwapSequence = %d, want 2", got)
+	}
+	var nilRenderer *Renderer
+	if got := nilRenderer.SwapSequence(); got != 0 {
+		t.Fatalf("nil SwapSequence = %d, want 0", got)
 	}
 }

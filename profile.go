@@ -17,6 +17,17 @@ type DurationStats = internalprofile.DurationStats
 // GCStats summarizes Go runtime GC state for one profiling window.
 type GCStats = internalprofile.GCStats
 
+// GDKPipelineSnapshot reports one bounded window of GDK present-pipeline data.
+//
+// The four duration series are wall-clock elapsed times on one Go monotonic
+// clock, not CPU execution times. Quantiles are nearest-rank values over the
+// retained samples of that window and are labelled `sampled` in the JSON;
+// missing data is absent rather than zero.
+type GDKPipelineSnapshot = internalprofile.GDKPipelineSnapshot
+
+// FrameTimelineSchemaVersion versions the public `gdk_pipeline` object.
+const FrameTimelineSchemaVersion = internalprofile.FrameTimelineSchemaVersion
+
 // ProfileSnapshot contains one profiling window of render-pipeline metrics.
 type ProfileSnapshot = internalprofile.Snapshot
 

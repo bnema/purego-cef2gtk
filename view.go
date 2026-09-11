@@ -85,6 +85,11 @@ type View struct {
 	afterPaintHandlerID         uint
 	afterPaintDisconnect        func()
 	frameClockAfterPaintConnect func(func()) func()
+	frameObserver               frameClockObserver
+	frameObserverConnect        func(*gdk.FrameClock, *func(gdk.FrameClock)) uint
+	frameObserverDisconnect     func(*gdk.FrameClock, uint)
+	frameObserverSwapSeq        func() uint64
+	frameObserverClock          func() (frameClockSource, bool)
 	renderFunc                  func(gtk.GLArea, uintptr) bool
 	resizeFunc                  func(gtk.GLArea, int, int)
 	mapFunc                     func(gtk.Widget)
@@ -225,19 +230,31 @@ func (v *View) connectRenderSignal() {
 	v.mapFunc = func(gtk.Widget) {
 		v.handleVisibilitySignal(true)
 		v.handleObservationSignal()
+		v.syncFrameObserver()
 	}
-	v.unmapFunc = func(gtk.Widget) { v.handleVisibilitySignal(false) }
+	v.unmapFunc = func(gtk.Widget) {
+		v.handleVisibilitySignal(false)
+		v.detachFrameObserver()
+	}
 	v.showFunc = func(gtk.Widget) {
 		v.handleVisibilitySignal(true)
 		v.handleObservationSignal()
+		v.syncFrameObserver()
 	}
-	v.hideFunc = func(gtk.Widget) { v.handleVisibilitySignal(false) }
-	v.realizeFunc = func(gtk.Widget) { v.handleObservationSignal() }
+	v.hideFunc = func(gtk.Widget) {
+		v.handleVisibilitySignal(false)
+		v.detachFrameObserver()
+	}
+	v.realizeFunc = func(gtk.Widget) {
+		v.handleObservationSignal()
+		v.syncFrameObserver()
+	}
 	v.unrealizeFunc = func(gtk.Widget) {
 		// Keep surface signal connections across transient unrealize/realize churn.
 		// Reconnecting on every tab switch/map cycle allocates purego callback
 		// trampolines until the process aborts under stress. Destroy() still
 		// disconnects the signals when the view lifetime ends.
+		v.detachFrameObserver()
 		if v.renderer != nil {
 			v.renderer.InvalidateOnGTKThread()
 		}
@@ -901,6 +918,255 @@ func (v *View) disconnectFirstPresentationAfterPaint() {
 	}
 }
 
+// gtkFrameAssociationLimit bounds how many paint cycles may await surface
+// feedback. Associations that expire are reported as unavailable, never as zero
+// latency.
+const gtkFrameAssociationLimit = 64
+
+// gtkFrameAssociation tracks one GTK frame-clock paint cycle whose surface
+// feedback may still be outstanding.
+type gtkFrameAssociation struct {
+	frameCounter int64
+}
+
+// frameClockSource is the subset of GdkFrameClock the observer reads. It exists
+// so paint-cycle lifecycle behaviour is testable without a live GTK clock.
+type frameClockSource interface {
+	// Identity identifies the clock; a different identity starts a new generation.
+	Identity() uintptr
+	// FrameCounter returns the clock's current paint-cycle counter.
+	FrameCounter() int64
+	// Feedback reports surface feedback for one cycle. resolved=false means the
+	// cycle is still outstanding and must stay pending.
+	Feedback(frameCounter int64) (available bool, resolved bool)
+}
+
+type gdkFrameClockSource struct{ clock *gdk.FrameClock }
+
+func (s gdkFrameClockSource) Identity() uintptr { return s.clock.GoPointer() }
+
+func (s gdkFrameClockSource) FrameCounter() int64 { return s.clock.GetFrameCounter() }
+
+func (s gdkFrameClockSource) Feedback(frameCounter int64) (bool, bool) {
+	timings := s.clock.GetTimings(frameCounter)
+	if timings == nil {
+		// Expired from the clock's history or never recorded: unavailable.
+		return false, true
+	}
+	if !timings.GetComplete() {
+		return false, false
+	}
+	// A complete cycle with a zero presentation time carries no usable feedback.
+	return timings.GetPresentationTime() > 0, true
+}
+
+// frameClockObserver associates GTK paint cycles with paintable swaps.
+//
+// Every field is only touched on the GTK main thread, so no lock is needed and
+// a CEF-thread snapshot can never call GTK through it.
+type frameClockObserver struct {
+	profiler   *internalprofile.Recorder
+	clock      *gdk.FrameClock
+	source     frameClockSource
+	handlerID  uint
+	callback   func(gdk.FrameClock)
+	generation uint64
+	attached   bool
+	pending    []gtkFrameAssociation
+	lastSwaps  uint64
+}
+
+// frameObserverClockHandle resolves the frame clock to observe, honouring the
+// test seam when it is set.
+func (v *View) frameObserverClockHandle() (*gdk.FrameClock, frameClockSource, bool) {
+	if v.frameObserverClock != nil {
+		source, ok := v.frameObserverClock()
+		if !ok || source == nil {
+			return nil, nil, false
+		}
+		return nil, source, true
+	}
+	if v.widget == nil {
+		return nil, nil, false
+	}
+	clock := v.widget.GetFrameClock()
+	if clock == nil {
+		return nil, nil, false
+	}
+	return clock, gdkFrameClockSource{clock: clock}, true
+}
+
+// syncFrameObserver attaches exactly one ongoing after-paint observer for the
+// widget's current frame clock. It must only run on the GTK main thread.
+func (v *View) syncFrameObserver() {
+	if v == nil {
+		return
+	}
+	profiler := v.profileRecorder()
+	if profiler == nil || v.destroyed.Load() {
+		v.detachFrameObserver()
+		return
+	}
+	clock, source, ok := v.frameObserverClockHandle()
+	if !ok {
+		v.detachFrameObserver()
+		return
+	}
+	observer := &v.frameObserver
+	if observer.attached && observer.source != nil && observer.source.Identity() == source.Identity() {
+		// Remap on the same frame clock keeps the existing observer; a new clock
+		// identity starts a new generation with no inherited associations.
+		observer.profiler = profiler
+		return
+	}
+	v.detachFrameObserver()
+	observer.profiler = profiler
+	observer.generation++
+	generation := observer.generation
+	observer.callback = func(gdk.FrameClock) { v.onFramePaintCycle(generation) }
+	connect := v.frameObserverConnect
+	if connect == nil {
+		connect = func(clock *gdk.FrameClock, callback *func(gdk.FrameClock)) uint {
+			return clock.ConnectAfterPaint(callback)
+		}
+	}
+	handlerID := connect(clock, &observer.callback)
+	if handlerID == 0 {
+		observer.profiler = nil
+		observer.callback = nil
+		return
+	}
+	observer.clock = clock
+	observer.source = source
+	observer.handlerID = handlerID
+	observer.attached = true
+	// The renderer's swap sequence is a lifetime counter, so baseline it at attach
+	// time. Comparing it against zero would report every swap since process start
+	// as an overwritten opportunity on the first observed cycle.
+	observer.lastSwaps = v.frameObserverSwapSequence()
+}
+
+// detachFrameObserver disconnects the observer and retires every outstanding
+// association as unavailable. It must only run on the GTK main thread.
+func (v *View) detachFrameObserver() {
+	if v == nil {
+		return
+	}
+	observer := &v.frameObserver
+	for range observer.pending {
+		if observer.profiler != nil {
+			observer.profiler.ObserveGDKFeedback(false)
+		}
+	}
+	observer.pending = observer.pending[:0]
+	if observer.attached && observer.handlerID != 0 {
+		disconnect := v.frameObserverDisconnect
+		if disconnect == nil {
+			disconnect = func(clock *gdk.FrameClock, handlerID uint) {
+				if clock == nil || handlerID == 0 {
+					return
+				}
+				gobject.SignalHandlerDisconnect(&clock.Object, handlerID)
+			}
+		}
+		disconnect(observer.clock, observer.handlerID)
+	}
+	observer.attached = false
+	observer.handlerID = 0
+	observer.clock = nil
+	observer.source = nil
+	observer.profiler = nil
+	observer.generation++
+}
+
+// onFramePaintCycle records one paint cycle and associates it with the paintable
+// swaps seen since the previous cycle. It never requests a phase, so observing
+// telemetry cannot drive extra repaints.
+func (v *View) onFramePaintCycle(generation uint64) {
+	if v == nil {
+		return
+	}
+	observer := &v.frameObserver
+	if !observer.attached || observer.source == nil || observer.generation != generation {
+		return
+	}
+	if v.destroyed.Load() {
+		v.detachFrameObserver()
+		return
+	}
+	profiler := v.profileRecorder()
+	if profiler == nil {
+		v.detachFrameObserver()
+		return
+	}
+	observer.profiler = profiler
+	source := observer.source
+	counter := source.FrameCounter()
+
+	// Resolve outstanding associations on a real GTK callback only. An
+	// association that is neither complete nor expired stays pending.
+	kept := observer.pending[:0]
+	for _, association := range observer.pending {
+		if association.frameCounter >= counter {
+			kept = append(kept, association)
+			continue
+		}
+		available, resolved := source.Feedback(association.frameCounter)
+		switch {
+		case resolved:
+			profiler.ObserveGDKFeedback(available)
+		case counter-association.frameCounter > gtkFrameAssociationLimit:
+			profiler.ObserveGDKFeedback(false)
+		default:
+			kept = append(kept, association)
+		}
+	}
+	observer.pending = kept
+
+	swaps := v.frameObserverSwapSequence()
+	var overwrittenBeforePaint uint64
+	if swaps > observer.lastSwaps {
+		// Several swaps before one cycle are overwritten opportunities, not proof
+		// that any of them was dropped from the screen.
+		overwrittenBeforePaint = swaps - observer.lastSwaps - 1
+	}
+	observer.lastSwaps = swaps
+	profiler.ObserveGDKPaintCycle()
+	profiler.ObserveGDKSwapsOverwrittenBeforePaint(overwrittenBeforePaint)
+
+	for len(observer.pending) >= gtkFrameAssociationLimit {
+		profiler.ObserveGDKFeedback(false)
+		observer.pending = observer.pending[1:]
+	}
+	observer.pending = append(observer.pending, gtkFrameAssociation{frameCounter: counter})
+}
+
+// frameObserverSwapSequence reports how many paintable swaps the active renderer
+// has completed. A renderer without that capability contributes no associations.
+func (v *View) frameObserverSwapSequence() uint64 {
+	if v == nil {
+		return 0
+	}
+	if v.frameObserverSwapSeq != nil {
+		return v.frameObserverSwapSeq()
+	}
+	source, ok := v.renderer.(interface{ SwapSequence() uint64 })
+	if !ok || source == nil {
+		return 0
+	}
+	return source.SwapSequence()
+}
+
+// scheduleFrameObserverSync arms the GTK-thread observer from a caller that may
+// not be on the GTK main thread yet.
+func (v *View) scheduleFrameObserverSync() {
+	if v == nil {
+		return
+	}
+	cb := glib.SourceOnceFunc(func(uintptr) { v.syncFrameObserver() })
+	glib.IdleAddOnce(&cb, 0)
+}
+
 func (v *View) renderOnGTKThread() bool {
 	if v == nil || v.renderer == nil {
 		return false
@@ -1006,10 +1272,14 @@ func (v *View) ConfigureProfiling(opts ProfileOptions) error {
 		if bridge := v.inputBridge(); bridge != nil {
 			bridge.SetProfiler(nil)
 		}
+		// Releasing the recorder makes every later observation a no-op; the GTK
+		// observer detaches on the GTK thread when it next runs.
+		v.scheduleFrameObserverSync()
 		return nil
 	}
 	recorder := internalprofile.NewRecorder()
 	recorder.SetBackend(v.backend.String())
+	recorder.EnableFrameTimeline()
 	recorder.Start(time.Now())
 	v.profile = recorder
 	v.profilePtr.Store(recorder)
@@ -1019,6 +1289,7 @@ func (v *View) ConfigureProfiling(opts ProfileOptions) error {
 	if bridge := v.inputBridge(); bridge != nil {
 		bridge.SetProfiler(recorder)
 	}
+	v.scheduleFrameObserverSync()
 	return nil
 }
 
@@ -1129,6 +1400,7 @@ func (v *View) Destroy() error {
 	defer v.renderLifecycleMu.Unlock()
 	v.destroyed.Store(true)
 	v.disconnectFirstPresentationAfterPaint()
+	v.detachFrameObserver()
 	v.dragMu.Lock()
 	if v.drag != nil {
 		v.drag.Detach()

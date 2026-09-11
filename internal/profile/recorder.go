@@ -75,11 +75,10 @@ type Snapshot struct {
 	Window  time.Duration `json:"-"`
 	Backend string        `json:"backend,omitempty"`
 
-	FramesReceived uint64 `json:"frames_received"`
-	FramesQueued   uint64 `json:"frames_queued"`
-	FramesRendered uint64 `json:"frames_rendered"`
-	ImportFailures uint64 `json:"import_failures"`
-
+	FramesReceived               uint64  `json:"frames_received"`
+	FramesQueued                 uint64  `json:"frames_queued"`
+	FramesRendered               uint64  `json:"frames_rendered"`
+	ImportFailures               uint64  `json:"import_failures"`
 	ScrollEvents                 uint64  `json:"scroll_events,omitempty"`
 	ScrollDXSum                  float64 `json:"scroll_dx_sum,omitempty"`
 	ScrollDYSum                  float64 `json:"scroll_dy_sum,omitempty"`
@@ -105,41 +104,46 @@ type Snapshot struct {
 	CopyGPU       DurationStats `json:"copy_gpu"`
 	DrawGPU       DurationStats `json:"draw_gpu"`
 
+	// GDKPipeline is only present while the GDK present-pipeline timeline is
+	// enabled. A nil value means the data is unavailable, not zero.
+	GDKPipeline *GDKPipelineSnapshot `json:"gdk_pipeline,omitempty"`
+
 	GC GCStats `json:"gc"`
 }
 
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type snapshotJSON struct {
-		Time                         time.Time     `json:"time"`
-		WindowMS                     float64       `json:"window_ms"`
-		Backend                      string        `json:"backend,omitempty"`
-		FramesReceived               uint64        `json:"frames_received"`
-		FramesQueued                 uint64        `json:"frames_queued"`
-		FramesRendered               uint64        `json:"frames_rendered"`
-		ImportFailures               uint64        `json:"import_failures"`
-		RenderFailures               uint64        `json:"render_failures"`
-		UnsupportedPaints            uint64        `json:"unsupported_paints"`
-		ScrollEvents                 uint64        `json:"scroll_events,omitempty"`
-		ScrollDXSum                  float64       `json:"scroll_dx_sum,omitempty"`
-		ScrollDYSum                  float64       `json:"scroll_dy_sum,omitempty"`
-		ScrollAbsDXSum               float64       `json:"scroll_abs_dx_sum,omitempty"`
-		ScrollAbsDYSum               float64       `json:"scroll_abs_dy_sum,omitempty"`
-		ExternalBeginFramesSent      uint64        `json:"external_begin_frames_sent,omitempty"`
-		SuppressedLeavesDuringDrag   uint64        `json:"suppressed_leaves_during_drag,omitempty"`
-		PressesWithoutMatchedRelease uint64        `json:"presses_without_matched_release,omitempty"`
-		TexturesBuilt                uint64        `json:"textures_built,omitempty"`
-		TextureBuildFailures         uint64        `json:"texture_build_failures,omitempty"`
-		FDDupFailures                uint64        `json:"fd_dup_failures,omitempty"`
-		UnsupportedFormats           uint64        `json:"unsupported_formats,omitempty"`
-		PaintableSwaps               uint64        `json:"paintable_swaps,omitempty"`
-		GTKWaitCPU                   DurationStats `json:"gtk_wait_cpu"`
-		ImportCopyCPU                DurationStats `json:"import_copy_cpu"`
-		ImportCPU                    DurationStats `json:"import_cpu"`
-		CopyCPU                      DurationStats `json:"copy_cpu"`
-		RenderCPU                    DurationStats `json:"render_cpu"`
-		CopyGPU                      DurationStats `json:"copy_gpu"`
-		DrawGPU                      DurationStats `json:"draw_gpu"`
-		GC                           GCStats       `json:"gc"`
+		Time                         time.Time            `json:"time"`
+		WindowMS                     float64              `json:"window_ms"`
+		Backend                      string               `json:"backend,omitempty"`
+		FramesReceived               uint64               `json:"frames_received"`
+		FramesQueued                 uint64               `json:"frames_queued"`
+		FramesRendered               uint64               `json:"frames_rendered"`
+		ImportFailures               uint64               `json:"import_failures"`
+		RenderFailures               uint64               `json:"render_failures"`
+		UnsupportedPaints            uint64               `json:"unsupported_paints"`
+		ScrollEvents                 uint64               `json:"scroll_events,omitempty"`
+		ScrollDXSum                  float64              `json:"scroll_dx_sum,omitempty"`
+		ScrollDYSum                  float64              `json:"scroll_dy_sum,omitempty"`
+		ScrollAbsDXSum               float64              `json:"scroll_abs_dx_sum,omitempty"`
+		ScrollAbsDYSum               float64              `json:"scroll_abs_dy_sum,omitempty"`
+		ExternalBeginFramesSent      uint64               `json:"external_begin_frames_sent,omitempty"`
+		SuppressedLeavesDuringDrag   uint64               `json:"suppressed_leaves_during_drag,omitempty"`
+		PressesWithoutMatchedRelease uint64               `json:"presses_without_matched_release,omitempty"`
+		TexturesBuilt                uint64               `json:"textures_built,omitempty"`
+		TextureBuildFailures         uint64               `json:"texture_build_failures,omitempty"`
+		FDDupFailures                uint64               `json:"fd_dup_failures,omitempty"`
+		UnsupportedFormats           uint64               `json:"unsupported_formats,omitempty"`
+		PaintableSwaps               uint64               `json:"paintable_swaps,omitempty"`
+		GTKWaitCPU                   DurationStats        `json:"gtk_wait_cpu"`
+		ImportCopyCPU                DurationStats        `json:"import_copy_cpu"`
+		ImportCPU                    DurationStats        `json:"import_cpu"`
+		CopyCPU                      DurationStats        `json:"copy_cpu"`
+		RenderCPU                    DurationStats        `json:"render_cpu"`
+		CopyGPU                      DurationStats        `json:"copy_gpu"`
+		DrawGPU                      DurationStats        `json:"draw_gpu"`
+		GDKPipeline                  *GDKPipelineSnapshot `json:"gdk_pipeline,omitempty"`
+		GC                           GCStats              `json:"gc"`
 	}
 	return json.Marshal(snapshotJSON{
 		Time:                         s.Time,
@@ -171,8 +175,101 @@ func (s Snapshot) MarshalJSON() ([]byte, error) {
 		RenderCPU:                    s.RenderCPU,
 		CopyGPU:                      s.CopyGPU,
 		DrawGPU:                      s.DrawGPU,
+		GDKPipeline:                  s.GDKPipeline,
 		GC:                           s.GC,
 	})
+}
+
+// GDKPipelineSnapshot reports one bounded window of GDK present-pipeline data.
+//
+// Duration values are wall-clock elapsed times on one monotonic clock, not CPU
+// execution times. Quantiles are computed when the value is marshaled, which
+// happens outside renderer and lifecycle locks, and are labelled `sampled`
+// because they describe only the retained ring contents.
+type GDKPipelineSnapshot struct {
+	raw FrameTimelineSnapshot
+}
+
+// NewGDKPipelineSnapshot wraps one drained timeline window.
+func NewGDKPipelineSnapshot(raw FrameTimelineSnapshot) GDKPipelineSnapshot {
+	return GDKPipelineSnapshot{raw: raw}
+}
+
+// FrameTimelineSnapshot returns the bounded copy this report was built from, so
+// callers can inspect counters and quantiles without parsing JSON.
+func (p GDKPipelineSnapshot) FrameTimelineSnapshot() FrameTimelineSnapshot { return p.raw }
+
+type gdkPipelineSeriesJSON struct {
+	Samples      uint64  `json:"samples"`
+	Retained     int     `json:"retained"`
+	Overwritten  uint64  `json:"overwritten"`
+	Available    bool    `json:"available"`
+	P50MS        float64 `json:"p50"`
+	P95MS        float64 `json:"p95"`
+	P99MS        float64 `json:"p99"`
+	Sampled      bool    `json:"sampled"`
+	SampleLimit  int     `json:"sample_limit"`
+	RetainedRank string  `json:"quantile_note"`
+}
+
+type gdkPipelineJSON struct {
+	SchemaVersion               int                   `json:"schema_version"`
+	FramesReceived              uint64                `json:"frames_received"`
+	PendingReplaced             uint64                `json:"pending_replaced"`
+	FramesImported              uint64                `json:"frames_imported"`
+	FramesSwapped               uint64                `json:"frames_swapped"`
+	GTKPaintCycles              uint64                `json:"gtk_paint_cycles"`
+	SwapsOverwrittenBeforePaint uint64                `json:"swaps_overwritten_before_paint"`
+	FeedbackAvailable           uint64                `json:"feedback_available"`
+	FeedbackUnavailable         uint64                `json:"feedback_unavailable"`
+	ReceivedToImport            gdkPipelineSeriesJSON `json:"received_to_import_ms"`
+	QueueWait                   gdkPipelineSeriesJSON `json:"queue_wait_ms"`
+	ImportElapsed               gdkPipelineSeriesJSON `json:"import_elapsed_ms"`
+	ReceivedToSwap              gdkPipelineSeriesJSON `json:"received_to_swap_ms"`
+}
+
+// MarshalJSON computes nearest-rank quantiles over the retained samples.
+func (p GDKPipelineSnapshot) MarshalJSON() ([]byte, error) {
+	return json.Marshal(gdkPipelineJSON{
+		SchemaVersion:               FrameTimelineSchemaVersion,
+		FramesReceived:              p.raw.Received,
+		PendingReplaced:             p.raw.Replaced,
+		FramesImported:              p.raw.Imported,
+		FramesSwapped:               p.raw.Swapped,
+		GTKPaintCycles:              p.raw.PaintCycles,
+		SwapsOverwrittenBeforePaint: p.raw.OverwrittenBeforePaint,
+		FeedbackAvailable:           p.raw.FeedbackAvailable,
+		FeedbackUnavailable:         p.raw.FeedbackUnavailable,
+		ReceivedToImport:            p.seriesJSON(SeriesReceivedToImport),
+		QueueWait:                   p.seriesJSON(SeriesQueueWait),
+		ImportElapsed:               p.seriesJSON(SeriesImportElapsed),
+		ReceivedToSwap:              p.seriesJSON(SeriesReceivedToSwap),
+	})
+}
+
+func (p GDKPipelineSnapshot) seriesJSON(series FrameTimelineSeries) gdkPipelineSeriesJSON {
+	p50, p95, p99, retained := p.raw.Quantiles(series)
+	index := seriesIndex(series)
+	var total, overwritten uint64
+	if index >= 0 {
+		total = p.raw.Series[index].Total
+		overwritten = p.raw.Series[index].Overwritten
+	}
+	return gdkPipelineSeriesJSON{
+		Samples:     total,
+		Retained:    retained,
+		Overwritten: overwritten,
+		// A window that retained nothing has no measured duration: its quantiles
+		// are 0 because the type is numeric, and `available` is what callers must
+		// read. Zero is never a measured latency here.
+		Available:    retained > 0,
+		P50MS:        p50,
+		P95MS:        p95,
+		P99MS:        p99,
+		Sampled:      true,
+		SampleLimit:  FrameTimelineSampleLimit,
+		RetainedRank: "nearest-rank over retained samples",
+	}
 }
 
 // Recorder aggregates render profiling metrics. The zero value is usable after Start.
@@ -184,6 +281,8 @@ type Recorder struct {
 	lastGCNum      uint32
 	lastPauseTotal uint64
 	current        Snapshot
+
+	timeline atomic.Pointer[FrameTimeline]
 
 	scrollMu         sync.Mutex
 	scrollEvents     uint64
@@ -197,7 +296,118 @@ type Recorder struct {
 	pressesWithoutMatchedRelease atomic.Uint64
 }
 
+// NewRecorder returns a recorder with profiling enabled no further than its caller requires.
 func NewRecorder() *Recorder { return &Recorder{} }
+
+// EnableFrameTimeline allocates the bounded GDK present-pipeline timeline. Until
+// it is called, every Observe call is a no-op and no rings exist.
+func (r *Recorder) EnableFrameTimeline() {
+	if r == nil {
+		return
+	}
+	r.timeline.Store(NewFrameTimeline())
+}
+
+// DisableFrameTimeline releases the timeline; later Observe calls do nothing.
+func (r *Recorder) DisableFrameTimeline() {
+	if r == nil {
+		return
+	}
+	r.timeline.Store(nil)
+}
+
+// FrameTimelineEnabled reports whether the bounded timeline is installed.
+func (r *Recorder) FrameTimelineEnabled() bool {
+	if r == nil {
+		return false
+	}
+	return r.timeline.Load() != nil
+}
+
+// PipelineSnapshot copies the current bounded pipeline window without draining
+// it. MaybeSnapshot owns the window rollover.
+func (r *Recorder) PipelineSnapshot() (GDKPipelineSnapshot, bool) {
+	if r == nil {
+		return GDKPipelineSnapshot{}, false
+	}
+	timeline := r.timeline.Load()
+	if timeline == nil {
+		return GDKPipelineSnapshot{}, false
+	}
+	return NewGDKPipelineSnapshot(timeline.Snapshot()), true
+}
+
+// ObserveGDKFrameReceived counts one accelerated frame accepted for import.
+func (r *Recorder) ObserveGDKFrameReceived() {
+	if r == nil {
+		return
+	}
+	r.timeline.Load().ObserveFrameReceived()
+}
+
+// ObserveGDKPendingReplaced counts one accepted frame that replaced a pending one.
+func (r *Recorder) ObserveGDKPendingReplaced() {
+	if r == nil {
+		return
+	}
+	r.timeline.Load().ObserveFrameReplaced()
+}
+
+// ObserveGDKImport records one imported frame that reached the presenter. The
+// four timestamps must come from the same monotonic clock; any negative elapsed
+// duration is rejected rather than clamped. Failed imports never reach here.
+func (r *Recorder) ObserveGDKImport(receivedAt, enqueuedAt, importStartedAt, swappedAt time.Time) {
+	if r == nil {
+		return
+	}
+	timeline := r.timeline.Load()
+	if timeline == nil {
+		return
+	}
+	if receivedAt.IsZero() || enqueuedAt.IsZero() || importStartedAt.IsZero() || swappedAt.IsZero() {
+		return
+	}
+	receivedToImport := importStartedAt.Sub(receivedAt)
+	queueWait := importStartedAt.Sub(enqueuedAt)
+	importElapsed := swappedAt.Sub(importStartedAt)
+	receivedToSwap := swappedAt.Sub(receivedAt)
+	if receivedToImport < 0 || queueWait < 0 || importElapsed < 0 || receivedToSwap < 0 {
+		return
+	}
+	timeline.ObserveFrameImported(receivedToImport, queueWait, importElapsed, receivedToSwap)
+}
+
+// ObserveGDKImportWithoutSwap counts an import that never reached the presenter.
+func (r *Recorder) ObserveGDKImportWithoutSwap() {
+	if r == nil {
+		return
+	}
+	r.timeline.Load().ObserveImportWithoutSwap()
+}
+
+// ObserveGDKPaintCycle records one GTK frame-clock paint cycle association.
+func (r *Recorder) ObserveGDKPaintCycle() {
+	if r == nil {
+		return
+	}
+	r.timeline.Load().ObservePaintCycle()
+}
+
+// ObserveGDKSwapsOverwrittenBeforePaint records swaps superseded before a cycle.
+func (r *Recorder) ObserveGDKSwapsOverwrittenBeforePaint(count uint64) {
+	if r == nil {
+		return
+	}
+	r.timeline.Load().ObserveSwapsOverwrittenBeforePaint(count)
+}
+
+// ObserveGDKFeedback records whether a paint cycle's surface feedback arrived.
+func (r *Recorder) ObserveGDKFeedback(available bool) {
+	if r == nil {
+		return
+	}
+	r.timeline.Load().ObserveFrameFeedback(available)
+}
 
 func (r *Recorder) Start(now time.Time) {
 	if r == nil {
@@ -323,6 +533,10 @@ func (r *Recorder) MaybeSnapshot(now time.Time, interval time.Duration) (Snapsho
 	runtime.ReadMemStats(&ms)
 	snap := r.current
 	r.drainHotPathCounters(&snap)
+	if timeline := r.timeline.Load(); timeline != nil {
+		pipeline := NewGDKPipelineSnapshot(timeline.Drain())
+		snap.GDKPipeline = &pipeline
+	}
 	snap.Time = now
 	if snap.Backend == "" {
 		snap.Backend = r.backend

@@ -98,6 +98,13 @@ type ownedFrame struct {
 	Modifier    uint64
 	Plane       ownedPlane
 	onError     func(error)
+
+	// Timing metadata is only populated while profiling is enabled. All three
+	// fields live in one Go monotonic clock domain and are never mixed with GTK
+	// microsecond timestamps.
+	Sequence   uint64
+	ReceivedAt time.Time
+	EnqueuedAt time.Time
 }
 
 // Renderer owns a GtkPicture presenter and imports callback-scoped CEF DMABUFs
@@ -127,6 +134,8 @@ type Renderer struct {
 	pendingScheduledAt time.Time
 	pendingSourceID    uint
 	pendingGeneration  uint64
+
+	frameSequence atomic.Uint64
 
 	dupFD       func(int) (int, error)
 	closeFD     func(int) error
@@ -359,8 +368,25 @@ func (r *Renderer) ImportAndQueueAsync(info *cef.AcceleratedPaintInfo, onError f
 		return err
 	}
 	owned.onError = onError
+	r.stampFrameReceived(owned)
 	r.enqueueOwnedFrame(owned)
 	return nil
+}
+
+// stampFrameReceived records the receipt instant and per-view sequence for one
+// accepted frame. It is a no-op while profiling is disabled, so the hot path
+// pays no clock read for data nobody collects.
+func (r *Renderer) stampFrameReceived(frame *ownedFrame) {
+	if r == nil || frame == nil {
+		return
+	}
+	profiler := r.profileRecorder()
+	if profiler == nil {
+		return
+	}
+	frame.Sequence = r.frameSequence.Add(1)
+	frame.ReceivedAt = time.Now()
+	profiler.ObserveGDKFrameReceived()
 }
 
 // ImportAndQueueOnGTKThread is kept for the GLArea backend contract and tests.
@@ -383,7 +409,7 @@ func (r *Renderer) ImportAndQueueOnGTKThread(info *cef.AcceleratedPaintInfo) (qu
 		}
 		r.recordGTKWait(time.Since(start))
 		defer func(begin time.Time) { r.recordImportCopyCPU(time.Since(begin)) }(time.Now())
-		retErr = r.importAndSwapOwnedFrame(owned)
+		retErr = r.importAndSwapOwnedFrame(owned, time.Now())
 	}); err != nil {
 		retErr = err
 	}
@@ -402,9 +428,14 @@ func (r *Renderer) enqueueOwnedFrame(frame *ownedFrame) {
 		return
 	}
 	now := time.Now()
+	if !frame.ReceivedAt.IsZero() {
+		frame.EnqueuedAt = now
+	}
+	replaced := false
 	r.pendingMu.Lock()
 	if r.pendingFrame != nil {
 		r.releaseOwnedFrame(r.pendingFrame)
+		replaced = true
 	}
 	r.pendingFrame = frame
 	schedule := !r.pendingScheduled
@@ -421,6 +452,10 @@ func (r *Renderer) enqueueOwnedFrame(frame *ownedFrame) {
 		generation = r.pendingGeneration
 	}
 	r.pendingMu.Unlock()
+	if replaced {
+		// The superseded frame is counted, never sampled as a swap.
+		r.recordPendingReplaced()
+	}
 	if !schedule {
 		return
 	}
@@ -471,9 +506,10 @@ func (r *Renderer) importPendingFrameOnGTKThread() {
 	if frame == nil {
 		return
 	}
-	start := time.Now()
+	importStartedAt := time.Now()
+	start := importStartedAt
 	defer func(begin time.Time) { r.recordImportCopyCPU(time.Since(begin)) }(start)
-	if err := r.importAndSwapOwnedFrame(frame); err != nil {
+	if err := r.importAndSwapOwnedFrame(frame, importStartedAt); err != nil {
 		r.releaseOwnedFrame(frame)
 		if frame.onError != nil {
 			frame.onError(err)
@@ -481,7 +517,7 @@ func (r *Renderer) importPendingFrameOnGTKThread() {
 	}
 }
 
-func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame) error {
+func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame, importStartedAt time.Time) error {
 	if r == nil {
 		return ErrNilRenderer
 	}
@@ -503,6 +539,7 @@ func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame) error {
 		r.releaseOwnedTexture(r.current)
 		r.current = nil
 		r.releaseOwnedTexture(built)
+		r.observeImportWithoutSwap()
 		return ErrMissingPicture
 	}
 	old := r.current
@@ -513,6 +550,7 @@ func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame) error {
 	}
 	r.current = built
 	r.recordPaintableSwap()
+	r.observeImport(frame, importStartedAt, time.Now())
 	r.recordFirstDMABUFTextureSwap()
 	r.retireOwnedTexture(old)
 	return nil
@@ -976,5 +1014,38 @@ func (r *Renderer) recordPaintableSwap() {
 	r.paintableSwaps.Add(1)
 	if p := r.profileRecorder(); p != nil {
 		p.RecordPaintableSwap()
+	}
+}
+
+// SwapSequence reports how many paintable swaps this renderer has completed. The
+// GTK frame-clock observer uses it to associate paint cycles with swaps without
+// reading renderer internals from another thread.
+func (r *Renderer) SwapSequence() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.paintableSwaps.Load()
+}
+
+func (r *Renderer) recordPendingReplaced() {
+	if p := r.profileRecorder(); p != nil {
+		p.ObserveGDKPendingReplaced()
+	}
+}
+
+// observeImport records the four monotonic durations of one completed swap.
+func (r *Renderer) observeImport(frame *ownedFrame, importStartedAt, swappedAt time.Time) {
+	if frame == nil {
+		return
+	}
+	if p := r.profileRecorder(); p != nil {
+		p.ObserveGDKImport(frame.ReceivedAt, frame.EnqueuedAt, importStartedAt, swappedAt)
+	}
+}
+
+// observeImportWithoutSwap counts an import that never reached the presenter.
+func (r *Renderer) observeImportWithoutSwap() {
+	if p := r.profileRecorder(); p != nil {
+		p.ObserveGDKImportWithoutSwap()
 	}
 }
