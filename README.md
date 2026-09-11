@@ -51,7 +51,9 @@ Applications that expose page zoom must scale their user-facing zoom by
 converting it to CEF's logarithmic zoom level, and divide CEF zoom readback by
 the same factor. The method returns 1 when CEF's normal logical OSR contract is
 in effect. User zoom itself stays a user-facing value: the compensation changes
-with the observed output scale and must not be persisted.
+with the observed output scale and must not be persisted. Recompute it and
+reapply the page zoom from an `AddSizeObserver` callback, which also runs when
+the effective scale changes without a logical-size change.
 
 Recommended local checks:
 

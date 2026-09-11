@@ -74,6 +74,7 @@ func TestOSRScaleContractModesAndScales(t *testing.T) {
 		{name: "off_at_fractional", mode: "off", surfaceScale: 1.25, wantBackingScale: 1, wantScreenScale: 1.25, wantCompensation: 1},
 		{name: "off_at_seven_quarters", mode: "off", surfaceScale: 1.75, wantBackingScale: 1, wantScreenScale: 1.75, wantCompensation: 1},
 		{name: "off_at_two", mode: "off", surfaceScale: 2, wantBackingScale: 1, wantScreenScale: 2, wantCompensation: 1},
+		{name: "on_below_one_uses_unscaled_geometry", mode: "1", surfaceScale: 0.75, wantBackingScale: 1, wantScreenScale: 1, wantCompensation: 1},
 		{name: "on_at_one", mode: "1", surfaceScale: 1, wantBackingScale: 1, wantScreenScale: 1, wantCompensation: 1},
 		{name: "on_at_fractional", mode: "1", surfaceScale: 1.25, wantBackingScale: 1.25, wantScreenScale: 1, wantCompensation: 1.25},
 		{name: "on_at_seven_quarters", mode: "1", surfaceScale: 1.75, wantBackingScale: 1.75, wantScreenScale: 1, wantCompensation: 1.75},
@@ -96,22 +97,38 @@ func TestOSRScaleContractModesAndScales(t *testing.T) {
 			v.setScaleMultiplier(tt.scaleMultiplier)
 
 			contract := v.osrScaleContract()
-			if contract.backingScale != tt.wantBackingScale {
+			if math.Abs(contract.backingScale-tt.wantBackingScale) > 1e-9 {
 				t.Fatalf("backing scale=%v, want %v", contract.backingScale, tt.wantBackingScale)
 			}
 			if contract.screenDeviceScale != tt.wantScreenScale {
 				t.Fatalf("screen device scale=%v, want %v", contract.screenDeviceScale, tt.wantScreenScale)
 			}
-			if contract.pageZoomCompensation != tt.wantCompensation {
-				t.Fatalf("page zoom compensation=%v, want %v", contract.pageZoomCompensation, tt.wantCompensation)
-			}
-			if got := v.PageZoomCompensation(); got != tt.wantCompensation {
+			if got := v.PageZoomCompensation(); math.Abs(got-tt.wantCompensation) > 1e-9 {
 				t.Fatalf("PageZoomCompensation()=%v, want %v", got, tt.wantCompensation)
 			}
 			if got := v.osrScreenInfoScale(); got != tt.wantScreenScale {
 				t.Fatalf("osrScreenInfoScale()=%v, want %v", got, tt.wantScreenScale)
 			}
 		})
+	}
+}
+
+func TestOSRScaleContractForcedBelowOneMatchesGeometry(t *testing.T) {
+	setOSRBackingScaleEnv(t, "1")
+	v := &View{}
+	v.storeObservedScale(0.75)
+	v.cachedWidth.Store(641)
+	v.cachedHeight.Store(481)
+
+	width, height := v.osrViewRectSize()
+	if width != 641 || height != 481 {
+		t.Fatalf("view rect=%dx%d, want unscaled 641x481", width, height)
+	}
+	if got := v.PageZoomCompensation(); got != 1 {
+		t.Fatalf("PageZoomCompensation()=%v, want 1", got)
+	}
+	if got := inputScaleForOSRBacking(0.75); got != 1 {
+		t.Fatalf("input scale=%v, want 1", got)
 	}
 }
 

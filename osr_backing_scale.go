@@ -63,22 +63,21 @@ func parseOSRBackingScaleMode(value string) osrBackingScaleMode {
 // user zoom: user zoom stays a user-facing multiplier that survives output and
 // density changes unchanged.
 type osrScaleContract struct {
-	backingScale         float64
-	screenDeviceScale    float32
-	pageZoomCompensation float64
+	backingScale      float64
+	screenDeviceScale float32
 }
 
 func osrScaleContractForScale(scale float64) osrScaleContract {
 	scale = normalizeDeviceScale(scale)
 	if !osrBackingScaleEnabledForScale(scale) {
-		return osrScaleContract{backingScale: 1, screenDeviceScale: float32(scale), pageZoomCompensation: 1}
+		return osrScaleContract{backingScale: 1, screenDeviceScale: float32(scale)}
 	}
-	return osrScaleContract{backingScale: scale, screenDeviceScale: 1, pageZoomCompensation: scale}
+	return osrScaleContract{backingScale: math.Max(scale, 1), screenDeviceScale: 1}
 }
 
 func (v *View) osrScaleContract() osrScaleContract {
 	if v == nil {
-		return osrScaleContract{backingScale: 1, screenDeviceScale: 1, pageZoomCompensation: 1}
+		return osrScaleContract{backingScale: 1, screenDeviceScale: 1}
 	}
 	return osrScaleContractForScale(float64(v.DeviceScaleFactor()))
 }
@@ -103,7 +102,8 @@ func osrBackingScaleEnabledForScale(scale float64) bool {
 
 // OSRBackingScaleFactorForScale returns the backing scale that should be used
 // for CEF OSR view/input coordinates. It returns 1 when compatibility scaling
-// is disabled for the provided surface scale.
+// is disabled for the provided surface scale. Applications implementing page
+// zoom should use [View.PageZoomCompensation] instead.
 func OSRBackingScaleFactorForScale(scale float64) float64 {
 	return osrScaleContractForScale(scale).backingScale
 }
@@ -115,16 +115,16 @@ func OSRBackingScaleFactorForScale(scale float64) float64 {
 //
 // It returns 1 for a nil view and whenever CEF's normal logical OSR contract is
 // in effect. The value follows the observed effective scale, so it changes when
-// the view moves to an output with a different scale.
+// the view moves to an output with a different scale. Recompute and reapply page
+// zoom from an [View.AddSizeObserver] callback, which also runs for scale-only
+// changes.
 func (v *View) PageZoomCompensation() float64 {
-	return v.osrScaleContract().pageZoomCompensation
+	return v.osrScaleContract().backingScale
 }
 
 func (v *View) osrBackingScaleEnabled() bool {
-	if v == nil {
-		return false
-	}
-	return osrBackingScaleEnabledForScale(float64(v.DeviceScaleFactor()))
+	contract := v.osrScaleContract()
+	return contract.backingScale > 1 && contract.screenDeviceScale == 1
 }
 
 func (v *View) osrBackingScale() float64 {
