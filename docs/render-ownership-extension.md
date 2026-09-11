@@ -9,15 +9,16 @@ options, upstream check).
 
 ## 1. Decision requested
 
-Two decisions, both the human's:
-
-- **D1 — Is the `vulkan` stack required to stay the production default?**
-  If yes, design variant **B** is the only route. If no, variant **A** is
-  preferred: lower risk, no interop work, uses a copy path that already exists.
-- **D2 — Accept the producer-visibility assumption (§4), or authorise a bounded
-  investigation to try to close it?** Accepting it means the GPU-correctness
-  criterion is amended, not satisfied: acceptance becomes *conditional
-  consumer-ownership acceptance*.
+- **D1 — answered: the `vulkan` stack stays the production default.** Owner:
+  human, 2026-09-11. EGL is a fallback, not a default. This selects **variant B**
+  (§6) and demotes variant A (§5) to the fallback path.
+- **D2 — still open: accept the producer-visibility assumption (§4), or authorise
+  a bounded investigation to try to close it?** Accepting it means the
+  GPU-correctness criterion is amended, not satisfied: acceptance becomes
+  *conditional consumer-ownership acceptance*.
+- **D3 — new, opened by D1: what is the release signal for the client-owned
+  destination?** §12 shows that GDK and GSK expose none. Variant B cannot state a
+  completion-based pool reuse rule without deciding this.
 
 Also confirmed by this artifact: the work is split into two sequential lots
 (§8), **ownership first**. Pacing-first is not approvable under the current
@@ -78,10 +79,12 @@ Supported configuration matrix (to be recorded by the human, per machine):
 runtime CEF build, driver, GPU, render stack, and whether the synthetic
 producer test in §11 passes there.
 
-## 5. Design variant A — qualified copy path on the `egl` stack as the default
+## 5. Design variant A — fallback path: qualified copy on the `egl` stack
 
-Chosen when D1 is "no". Lowest incremental risk: the import and copy pipeline
-already exists and is exercised.
+Not the default: D1 requires `vulkan` presentation. It remains the fallback if
+variant B proves unapprovable, and it is the smaller of the two changes because
+the import and copy pipeline already exists and is exercised. Kept in this
+artifact so the fallback is specified rather than improvised.
 
 Native APIs to add:
 
@@ -114,25 +117,43 @@ Explicitly out of scope for variant A: making `vulkan` safe. Under variant A the
 `vulkan` stack keeps its known contract violation and must say so
 (§7, unsupported-path behaviour).
 
-## 6. Design variant B — keep GSK Vulkan presentation with client-owned DMA-BUFs
+## 6. Design variant B — selected: keep GSK Vulkan presentation with client-owned DMA-BUFs
 
-Chosen when D1 is "yes" (Vulkan must stay the default). It is **not** a
-dominating option: it adds cross-API interop on top of variant A's work.
+Selected by D1. It is **not** a dominating option: it keeps the default stack and
+adds cross-API interop on top of variant A's work.
 
-Native APIs to add on top of variant A:
+### A copy and export engine is required, and it does not exist yet
+
+The `vulkan` stack presents through GtkPicture and GdkDmabufTexture; there is no
+GtkGLArea and therefore **no current GL context** to copy or export with. The
+bridge must own an offscreen EGL/GL context used only as a copy and export
+engine:
+
+- context creation from a render node, with `EGL_KHR_surfaceless_context` (the
+driver advertises it) and an explicit config/format negotiation;
+- extension validation at init (`EGL_EXT_image_dma_buf_import` and its modifier
+variant for the source, `EGL_MESA_image_dma_buf_export` for the destination),
+with an explicit unsupported error rather than a fallback;
+- GTK-thread affinity and teardown, alongside the existing widget lifecycle;
+- no presentation duties: it never draws to a window.
+
+This subsystem is new work and must appear in the file scope, not be discovered
+during implementation.
+
+Native APIs to add on top of variant A's fence work:
 
 - `eglCreateImageKHR` on an exportable allocation plus
   `eglExportDMABUFImageQueryMESA` / `eglExportDMABUFImageMESA` (driver advertises
-  `EGL_MESA_image_dma_buf_export`), or an equivalent export path.
-- The same fence completion as variant A before the exported buffer is handed on.
-- GDK side: an owned-DMA-BUF texture build path, plus a real downstream
-  release protocol for pool reuse.
+  `EGL_MESA_image_dma_buf_export`), or an equivalent export path;
+- the same fence completion as variant A before the exported buffer is handed on;
+- a GDK side owned-DMA-BUF texture build path plus the pool release rule from
+  §12, which is currently undecided.
 
 Additional proofs this variant owes, in order: exportable allocation path,
 format and modifier compatibility with the GSK import, visibility of our own
 writes to GSK, and bounded retirement of the owned pool after downstream
-consumption. The existing GDK destroy notification closes a descriptor; it is
-not a pool-release protocol.
+consumption. The existing GDK destroy notification closes a descriptor when GDK
+finalizes the texture; it is a reference drop, not a GPU completion.
 
 ## 7. Admission, drops, timeouts, unsupported paths
 
@@ -227,7 +248,44 @@ CPU consumption. Neither figure establishes that scheduling is the dominant
 cause of any user-visible symptom; pacing work is an experiment with a measured
 outcome, not a promised remedy.
 
-## 12. Risks, exclusions, sign-off
+## 12. Downstream consumption: the release signal does not exist (D3)
+
+Checked in the bindings available to this repository:
+
+- `GdkTexture` exposes **no signal at all** (`Connect*` count is zero) and no
+  fence, query, or completion API. Its only observable lifetime event is GObject
+  finalization.
+- `GtkGraphicsOffload` exposes only properties: child, enabled, black background,
+  accessible id. No buffer release.
+- The DMA-BUF builder's destroy notify is documented as running when GDK
+  releases the texture, which is a reference drop, not a guarantee that the GPU
+  finished reading the buffer.
+- `GdkDmabufTextureBuilder.GetUpdateTexture` exists and describes in-place
+  updates of an existing texture, which is the opposite of ownership.
+
+So a pool rule of the form "reuse the destination once the consumer is done" has
+no consumer-done signal to read. Three honest resolutions, to be decided:
+
+1. **Second assumption.** Finalization is treated as "downstream reads
+   completed", stated as an assumption with its residual risk, symmetric to §4.
+   Cheapest, and the weakest: a driver that defers a release internally does not
+   extend that guarantee to a buffer the bridge rewrites itself.
+2. **Never rewrite a referenced buffer.** A bounded pool of N destinations, a
+   buffer returns to the pool only after finalization, and if no buffer is free
+   the frame is dropped pre-submission (which §7 already defines as safe). This
+   respects "never recycle because a fixed number of frames elapsed" and adds an
+   explicit drop policy, but it reduces the race window rather than removing it:
+   the same residual read-after-release concern as (1) remains, because
+   finalization is still the only signal.
+3. **Find a real signal.** No such API was found in the bindings. This option
+   means investigating GTK/GSK internals or upstream for a usable release or
+   fence, and it may legitimately end in "cannot be closed here".
+
+D3 must be answered before variant B can be called approvable: options 1 and 2
+are assumptions that must be written into the acceptance wording, and option 3 is
+a bounded investigation like §9.
+
+## 13. Risks, exclusions, sign-off
 
 Risks: a perfectly copied wrong generation (missing producer dependency);
 callback or thread blocking on a GPU wait, with no safe return on timeout;
@@ -237,5 +295,5 @@ problem is fixed.
 Excluded: CEF patches or forks, native Vulkan bindings, CPU readback in a
 production path, silent render-stack changes, packaging or release changes.
 
-Sign-off required on: D1, D2, the §4 wording if accepted, the §7 timeout policy,
+Sign-off required on: D2, D3, the §4 wording if accepted, the §7 timeout policy,
 and the §11 acceptance criteria.
