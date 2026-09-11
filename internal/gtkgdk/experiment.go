@@ -13,9 +13,11 @@ import (
 // explicit opt-out. None of them is part of the supported configuration
 // surface, and none of them establishes buffer ownership.
 const (
-	// GraphicsOffloadEnvVar wraps the presenter picture in GtkGraphicsOffload so
-	// the compositor consumes the DMA-BUF directly instead of GSK compositing
-	// the picture contents. Set to "0"/"false"/"off" to wrap nothing.
+	// GraphicsOffloadEnvVar wraps the presenter picture in GtkGraphicsOffload to
+	// ask the compositor to consume the presented DMA-BUF instead of GSK
+	// compositing the picture contents. GTK may still fall back to compositing
+	// (clipping, transforms, formats), so this is a request, not a guarantee of
+	// direct scanout. Set to "0"/"false"/"off" to wrap nothing.
 	GraphicsOffloadEnvVar = "PUREGO_CEF2GTK_GDK_GRAPHICS_OFFLOAD"
 	// ImportPriorityEnvVar selects the GLib priority of the GTK-thread frame
 	// import. "default" runs it alongside ordinary main-loop work; "idle"
@@ -34,7 +36,8 @@ const (
 )
 
 // GraphicsOffloadEnabled reports whether the presenter should hand its texture
-// to the compositor through GtkGraphicsOffload. Default: enabled.
+// to the compositor through GtkGraphicsOffload. The wrapper is only installed
+// when the loaded GTK exposes the widget (4.14+). Default: enabled.
 func GraphicsOffloadEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(GraphicsOffloadEnvVar))) {
 	case "0", "false", "no", "off":
@@ -53,8 +56,9 @@ func importPriority() int {
 }
 
 // retiredTextureLimitFromEnv returns how many superseded textures the presenter
-// keeps referenced. Empty, unparsable and out-of-range values fall back to
-// defaultRetiredTextureLimit; the upper bound is the compile-time ring size.
+// keeps referenced. Empty and unparsable values fall back to
+// defaultRetiredTextureLimit; values above the compile-time ring size clamp to
+// the ring size rather than falling back, and values below 1 fall back.
 func retiredTextureLimitFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv(RetiredTexturesEnvVar))
 	if raw == "" {

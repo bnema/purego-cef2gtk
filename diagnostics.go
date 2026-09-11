@@ -36,6 +36,9 @@ type Diagnostics struct {
 	PendingReschedules      int
 	PendingScheduleFailures int
 	PendingIdleCallbacks    int
+	OffloadRequested        bool
+	ImportPriority          int
+	RetireLimit             int
 	Events                  []DiagnosticEvent
 }
 

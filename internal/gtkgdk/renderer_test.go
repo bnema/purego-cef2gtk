@@ -2,6 +2,7 @@ package gtkgdk
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -279,6 +280,42 @@ func TestRetiredTexturesDefaultLimitBoundsRetention(t *testing.T) {
 	}
 	if got := r.retiredAt(r.retiredCount); got != nil {
 		t.Fatalf("retiredAt past the limit = %p, want nil", got)
+	}
+}
+
+func TestRetiredTexturesHonorEffectiveLimits(t *testing.T) {
+	for _, limit := range []int{1, defaultRetiredTextureLimit, retiredTextureStorage} {
+		t.Run(fmt.Sprintf("limit-%d", limit), func(t *testing.T) {
+			r := &Renderer{retireLimit: limit}
+			textures := make([]*ownedTexture, limit*2+1)
+			for i := range textures {
+				textures[i] = &ownedTexture{}
+				r.retireOwnedTexture(textures[i])
+			}
+			if r.retiredCount != limit {
+				t.Fatalf("retired count = %d, want %d", r.retiredCount, limit)
+			}
+			// Wraparound keeps the newest limit textures in FIFO order.
+			for i := 0; i < limit; i++ {
+				want := textures[len(textures)-limit+i]
+				if got := r.retiredAt(i); got != want {
+					t.Fatalf("retiredAt(%d) = %p, want %p", i, got, want)
+				}
+			}
+			if got := r.retiredAt(limit); got != nil {
+				t.Fatalf("retiredAt(%d) = %p, want nil past the limit", limit, got)
+			}
+			// Destruction releases every referenced texture and resets the ring.
+			r.releaseRetiredTextures()
+			if r.retiredCount != 0 || r.retiredStart != 0 {
+				t.Fatalf("ring after release = (count %d, start %d), want (0, 0)", r.retiredCount, r.retiredStart)
+			}
+			for i, retired := range r.retired {
+				if retired != nil {
+					t.Fatalf("retired slot %d = %p after release, want nil", i, retired)
+				}
+			}
+		})
 	}
 }
 

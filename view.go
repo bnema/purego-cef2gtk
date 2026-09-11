@@ -1115,6 +1115,9 @@ func (v *View) Diagnostics() Diagnostics {
 		snap.PendingReschedules = int(d.PendingReschedules)
 		snap.PendingScheduleFailures = int(d.PendingScheduleFailures)
 		snap.PendingIdleCallbacks = int(d.PendingIdleCallbacks)
+		snap.OffloadRequested = d.OffloadRequested
+		snap.ImportPriority = d.ImportPriority
+		snap.RetireLimit = d.RetireLimit
 	}
 	return snap
 }

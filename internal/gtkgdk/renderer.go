@@ -48,7 +48,10 @@ type dmabufFormatSet interface {
 	Contains(uint32, uint64) bool
 }
 
-// Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters.
+// Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters. The
+// last three fields report the effective render-path configuration: whether the
+// offload wrapper was installed, the GLib priority used for frame imports, and
+// how many superseded textures stay referenced.
 type Diagnostics struct {
 	TexturesBuilt           uint64
 	TextureBuildFailures    uint64
@@ -62,6 +65,9 @@ type Diagnostics struct {
 	PendingReschedules      uint64
 	PendingScheduleFailures uint64
 	PendingIdleCallbacks    uint64
+	OffloadRequested        bool
+	ImportPriority          int
+	RetireLimit             int
 }
 
 type dmabufTextureBuilder interface {
@@ -83,8 +89,10 @@ type dmabufTextureBuilder interface {
 // smaller) priority has to go through an explicit idle source.
 type idleOnceScheduler func(priority int, callback *glib.SourceOnceFunc, data uintptr) uint
 
-// scheduleIdleOnce runs cb once at the given GLib priority. The adapter that
-// IdleAddFull keeps must outlive the schedule, so the renderer holds it.
+// scheduleIdleOnce runs cb once at the given GLib priority. It is safe to pass
+// the address of a local adapter: puregotk's glib source registration copies the
+// closure into its managed registry and keeps that copy alive until the source
+// is finalized.
 func (r *Renderer) scheduleIdleOnce(priority int, callback *glib.SourceOnceFunc, data uintptr) uint {
 	if priority == glibPriorityDefaultIdle {
 		return glib.IdleAddOnce(callback, data)
@@ -93,9 +101,6 @@ func (r *Renderer) scheduleIdleOnce(priority int, callback *glib.SourceOnceFunc,
 		(*callback)(d)
 		return false
 	})
-	r.pendingMu.Lock()
-	r.pendingSourceFunc = &once
-	r.pendingMu.Unlock()
 	return glib.IdleAddFull(priority, &once, data, nil)
 }
 
@@ -140,6 +145,7 @@ type Renderer struct {
 	retiredStart        int
 	retiredCount        int
 	retireLimit         int
+	offloadRequested    bool
 	pictureSetPaintable func(*gdk.Texture)
 	firstTextureSwapMu  sync.Mutex
 	firstTextureSwap    func()
@@ -151,7 +157,6 @@ type Renderer struct {
 	pendingScheduledAt time.Time
 	pendingSourceID    uint
 	pendingGeneration  uint64
-	pendingSourceFunc  *glib.SourceFunc
 	importPriority     int
 
 	dupFD       func(int) (int, error)
@@ -200,9 +205,71 @@ func configurePresenterPicture(picture presenterPicture) {
 	picture.SetSizeRequest(1, 1)
 }
 
+// graphicsOffloadSupported reports whether the loaded GTK exposes
+// GtkGraphicsOffload, which arrived in GTK 4.14. The probe runs before any
+// offload symbol is touched: the generated bindings panic on an unresolved
+// symbol instead of returning an error, so constructing the widget cannot be
+// used as the capability check.
+func graphicsOffloadSupported() bool {
+	return gtk.CheckVersion(4, 14, 0) == ""
+}
+
+// offloadConstructor builds the graphics-offload presenter wrapper for a child
+// widget, returning the wrapper and the widget to pack.
+type offloadConstructor func(child *gtk.Widget) (*gtk.GraphicsOffload, *gtk.Widget)
+
+// newConfiguredOffload constructs and configures the graphics-offload presenter
+// around child. A constructor that panics on a missing symbol and a constructor
+// that returns nothing both yield no wrapper, leaving the GtkPicture presenter in
+// place. The recover is a defence behind the version probe, not a substitute for
+// it: GTK may advertise 4.14 while a distributor is missing the symbol.
+func newConfiguredOffload(child *gtk.Widget, construct func(*gtk.Widget) *gtk.GraphicsOffload) (offload *gtk.GraphicsOffload, widget *gtk.Widget) {
+	defer func() {
+		if recover() != nil {
+			offload, widget = nil, nil
+		}
+	}()
+	created := construct(child)
+	if created == nil {
+		return nil, nil
+	}
+	created.SetEnabled(gtk.GraphicsOffloadEnabledValue)
+	created.SetHexpand(true)
+	created.SetVexpand(true)
+	created.SetSizeRequest(1, 1)
+	return created, &created.Widget
+}
+
+// newOffloadPresenter builds the configured offload wrapper from the real
+// binding.
+func newOffloadPresenter(child *gtk.Widget) (*gtk.GraphicsOffload, *gtk.Widget) {
+	return newConfiguredOffload(child, gtk.NewGraphicsOffload)
+}
+
+// selectPresenterWidget returns the graphics-offload wrapper when it should be
+// used, and the child widget to pack otherwise. Capability probing and
+// construction are parameters so the unsupported and failing-constructor paths
+// are testable without a GTK runtime.
+func selectPresenterWidget(picture *gtk.Picture, useOffload bool, supported func() bool, construct offloadConstructor) (*gtk.GraphicsOffload, *gtk.Widget) {
+	child := &picture.Widget
+	if !useOffload || !supported() {
+		return nil, child
+	}
+	offload, widget := construct(child)
+	if offload == nil || widget == nil {
+		return nil, child
+	}
+	return offload, widget
+}
+
 // NewRenderer creates a GtkPicture-backed GDK DMABUF renderer. When useOffload
-// is true and GtkGraphicsOffload can be constructed, Widget returns the offload
-// wrapper; otherwise it returns the picture widget directly.
+// is true and the loaded GTK supports GtkGraphicsOffload, Widget returns the
+// offload wrapper; otherwise it returns the picture widget directly.
+//
+// GtkGraphicsOffload asks the compositor to consume the presented DMA-BUF
+// directly, but GTK may still fall back to compositing the picture (clipping,
+// transforms, formats). It is a presentation request, not a guarantee of direct
+// scanout.
 func NewRenderer(useOffload bool) (*Renderer, error) {
 	picture := gtk.NewPicture()
 	if picture == nil {
@@ -210,18 +277,7 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	}
 	configurePresenterPicture(picture)
 
-	widget := &picture.Widget
-	var offload *gtk.GraphicsOffload
-	if useOffload {
-		offload = gtk.NewGraphicsOffload(widget)
-		if offload != nil {
-			offload.SetEnabled(gtk.GraphicsOffloadEnabledValue)
-			offload.SetHexpand(true)
-			offload.SetVexpand(true)
-			offload.SetSizeRequest(1, 1)
-			widget = &offload.Widget
-		}
-	}
+	offload, widget := selectPresenterWidget(picture, useOffload, graphicsOffloadSupported, newOffloadPresenter)
 
 	builder, err := newTextureBuilder()
 	if err != nil {
@@ -236,12 +292,13 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	}
 
 	r := &Renderer{
-		widget:  widget,
-		picture: picture,
-		offload: offload,
-		builder: builder,
-		dupFD:   dupFDClOExec,
-		closeFD: unix.Close,
+		widget:           widget,
+		picture:          picture,
+		offload:          offload,
+		builder:          builder,
+		dupFD:            dupFDClOExec,
+		closeFD:          unix.Close,
+		offloadRequested: offload != nil,
 	}
 	r.idleAddOnce = r.scheduleIdleOnce
 	r.importPriority = importPriority()
@@ -957,6 +1014,9 @@ func (r *Renderer) Diagnostics() Diagnostics {
 		PendingReschedules:      r.pendingReschedules.Load(),
 		PendingScheduleFailures: r.pendingScheduleFailures.Load(),
 		PendingIdleCallbacks:    r.pendingIdleCallbacks.Load(),
+		OffloadRequested:        r.offloadRequested,
+		ImportPriority:          r.importPriority,
+		RetireLimit:             r.retireLimitOrDefault(),
 	}
 }
 
