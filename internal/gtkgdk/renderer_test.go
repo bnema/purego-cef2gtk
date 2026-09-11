@@ -2,6 +2,7 @@ package gtkgdk
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -246,25 +247,75 @@ func TestFirstDMABUFTextureSwapDoesNotFireWhenBuildFails(t *testing.T) {
 }
 
 func TestRetireOwnedTextureLimitsRetiredTextures(t *testing.T) {
-	r := &Renderer{}
+	const limit = 3
+	r := &Renderer{retireLimit: limit}
 
 	// Push up to the limit.
-	for i := 0; i < retiredTextureLimit; i++ {
+	for i := 0; i < limit; i++ {
 		r.retireOwnedTexture(&ownedTexture{})
 	}
-	if got := r.retiredCount; got != retiredTextureLimit {
-		t.Fatalf("retired count after filling = %d, want %d", got, retiredTextureLimit)
+	if got := r.retiredCount; got != limit {
+		t.Fatalf("retired count after filling = %d, want %d", got, limit)
 	}
 
 	// Adding one more should release the oldest but stay at the limit.
 	r.retireOwnedTexture(&ownedTexture{})
-	if got := r.retiredCount; got != retiredTextureLimit {
-		t.Fatalf("retired count after overflow = %d, want %d", got, retiredTextureLimit)
+	if got := r.retiredCount; got != limit {
+		t.Fatalf("retired count after overflow = %d, want %d", got, limit)
 	}
 
 	r.releaseRetiredTextures()
 	if got := r.retiredCount; got != 0 {
 		t.Fatalf("retired count after release = %d, want 0", got)
+	}
+}
+
+func TestRetiredTexturesDefaultLimitBoundsRetention(t *testing.T) {
+	r := &Renderer{}
+	for i := 0; i < retiredTextureStorage; i++ {
+		r.retireOwnedTexture(&ownedTexture{})
+	}
+	if got, want := r.retiredCount, defaultRetiredTextureLimit; got != want {
+		t.Fatalf("retired count = %d, want the default limit %d", got, want)
+	}
+	if got := r.retiredAt(r.retiredCount); got != nil {
+		t.Fatalf("retiredAt past the limit = %p, want nil", got)
+	}
+}
+
+func TestRetiredTexturesHonorEffectiveLimits(t *testing.T) {
+	for _, limit := range []int{1, defaultRetiredTextureLimit, retiredTextureStorage} {
+		t.Run(fmt.Sprintf("limit-%d", limit), func(t *testing.T) {
+			r := &Renderer{retireLimit: limit}
+			textures := make([]*ownedTexture, limit*2+1)
+			for i := range textures {
+				textures[i] = &ownedTexture{}
+				r.retireOwnedTexture(textures[i])
+			}
+			if r.retiredCount != limit {
+				t.Fatalf("retired count = %d, want %d", r.retiredCount, limit)
+			}
+			// Wraparound keeps the newest limit textures in FIFO order.
+			for i := 0; i < limit; i++ {
+				want := textures[len(textures)-limit+i]
+				if got := r.retiredAt(i); got != want {
+					t.Fatalf("retiredAt(%d) = %p, want %p", i, got, want)
+				}
+			}
+			if got := r.retiredAt(limit); got != nil {
+				t.Fatalf("retiredAt(%d) = %p, want nil past the limit", limit, got)
+			}
+			// Destruction releases every referenced texture and resets the ring.
+			r.releaseRetiredTextures()
+			if r.retiredCount != 0 || r.retiredStart != 0 {
+				t.Fatalf("ring after release = (count %d, start %d), want (0, 0)", r.retiredCount, r.retiredStart)
+			}
+			for i, retired := range r.retired {
+				if retired != nil {
+					t.Fatalf("retired slot %d = %p after release, want nil", i, retired)
+				}
+			}
+		})
 	}
 }
 
@@ -334,7 +385,7 @@ func TestEnqueueOwnedFrameDoesNotDuplicateFreshPendingIdle(t *testing.T) {
 	calls := 0
 	r := &Renderer{
 		closeFD: unix.Close,
-		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+		idleAddOnce: func(int, *glib.SourceOnceFunc, uintptr) uint {
 			calls++
 			return uint(calls)
 		},
@@ -356,7 +407,7 @@ func TestEnqueueOwnedFrameReschedulesStalePendingIdle(t *testing.T) {
 	calls := 0
 	r := &Renderer{
 		closeFD: unix.Close,
-		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+		idleAddOnce: func(int, *glib.SourceOnceFunc, uintptr) uint {
 			calls++
 			return uint(calls)
 		},
@@ -380,7 +431,7 @@ func TestEnqueueOwnedFrameReschedulesStalePendingIdle(t *testing.T) {
 func TestEnqueueOwnedFrameClearsPendingScheduledWhenIdleScheduleFails(t *testing.T) {
 	r := &Renderer{
 		closeFD: unix.Close,
-		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+		idleAddOnce: func(int, *glib.SourceOnceFunc, uintptr) uint {
 			return 0
 		},
 	}

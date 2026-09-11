@@ -189,7 +189,7 @@ func newGLAreaView(profile ProfileOptions, scaleMultiplier float64) *View {
 }
 
 func newGDKDMABUFView(profile ProfileOptions, scaleMultiplier float64) *View {
-	renderer, err := gtkgdk.NewRenderer(false)
+	renderer, err := gtkgdk.NewRenderer(gtkgdk.GraphicsOffloadEnabled())
 	if err != nil || renderer == nil || renderer.Widget() == nil {
 		return nil
 	}
@@ -1115,6 +1115,10 @@ func (v *View) Diagnostics() Diagnostics {
 		snap.PendingReschedules = int(d.PendingReschedules)
 		snap.PendingScheduleFailures = int(d.PendingScheduleFailures)
 		snap.PendingIdleCallbacks = int(d.PendingIdleCallbacks)
+		snap.OffloadRequested = d.OffloadRequested
+		snap.OffloadInstalled = d.OffloadInstalled
+		snap.ImportPriority = d.ImportPriority
+		snap.RetireLimit = d.RetireLimit
 	}
 	return snap
 }

@@ -1,6 +1,7 @@
 package gtkgl
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -395,9 +396,9 @@ func TestEngineFiveNotchBurstSurvivesPointerDrift(t *testing.T) {
 	}
 }
 
-func TestEngineWheelEmitRejectsRacingInvalidation(t *testing.T) {
+func TestEngineWheelFlushRejectsRacingInvalidation(t *testing.T) {
 	// An off-thread invalidation landing after the step's epoch check
-	// but before emission must reject the wheel submission: the emit
+	// but before delivery must reject the wheel submission: the flush
 	// path validates the session epoch, never the reloaded current.
 	rec := &gateRecorder{}
 	c, host := newEngineController(rec)
@@ -409,7 +410,12 @@ func TestEngineWheelEmitRejectsRacingInvalidation(t *testing.T) {
 		c.mu.Unlock()
 		t.Fatalf("session not intact after invalidate: %+v", s)
 	}
-	c.emitWheelShareLocked(s, 100.05)
+	s.queuedX = 12
+	c.flushWheelQueueLocked(s, 100.05)
+	if s.queuedX != 0 {
+		c.mu.Unlock()
+		t.Fatalf("queued share = %d after a rejected flush, want 0", s.queuedX)
+	}
 	c.mu.Unlock()
 	if len(rec.subs) != 0 {
 		t.Fatalf("racing invalidation submitted %d events", len(rec.subs))
@@ -736,5 +742,462 @@ func TestEngineTickReplacementAndTeardown(t *testing.T) {
 	}
 	if c.tickBackend != nil {
 		t.Fatal("backend survives teardown")
+	}
+}
+
+// wheelTickRecorder attributes every sender call to the frame tick that was
+// current when it happened, so a replay can assert per-tick delivery counts.
+type wheelTickRecorder struct {
+	subs  []gateSubmission
+	seens []int
+	tick  int
+}
+
+func (r *wheelTickRecorder) send(_ cef.BrowserHost, evt *cef.MouseEvent, dx, dy int32) {
+	r.subs = append(r.subs, gateSubmission{evt: *evt, dx: dx, dy: dy})
+	r.seens = append(r.seens, r.tick)
+}
+
+func (r *wheelTickRecorder) total() (int64, int64) {
+	var x, y int64
+	for _, sub := range r.subs {
+		x += int64(sub.dx)
+		y += int64(sub.dy)
+	}
+	return x, y
+}
+
+func (r *wheelTickRecorder) maxCallsPerTick() int {
+	perTick := map[int]int{}
+	max := 0
+	for _, tick := range r.seens {
+		perTick[tick]++
+		if perTick[tick] > max {
+			max = perTick[tick]
+		}
+	}
+	return max
+}
+
+// Dense replay parameters: impulses arrive well above every tested frame rate,
+// so several impulses fall inside one frame tick.
+const denseImpulseRate = 240.0
+
+// denseReplay describes a wheel replay: impulses at denseImpulseRate and frame
+// ticks at tickRate, interleaved in timestamp order.
+type denseReplay struct {
+	tickRate int
+	seconds  float64
+	dx, dy   float64
+	// alternateEvery flips the sign of the impulse every n impulses, emulating a
+	// direction change at a frame boundary (n = impulses per tick) or inside one
+	// frame (n = 1). Zero keeps the direction constant.
+	alternateEvery int
+}
+
+// run drives the replay and returns the total input displacement it fed in.
+// After the impulses it drains ticks for less than the wheel idle deadline, so
+// no documented overload completion is involved.
+func (cfg denseReplay) run(c *scrollController, host cef.BrowserHost, rec *wheelTickRecorder) (inputX, inputY float64) {
+	const start = 100.0
+	impulseStep := 1.0 / denseImpulseRate
+	tickStep := 1.0 / float64(cfg.tickRate)
+	nextTick := start + tickStep
+	for i := 0; i <= int(cfg.seconds*denseImpulseRate); i++ {
+		now := start + float64(i)*impulseStep
+		dx, dy := cfg.dx, cfg.dy
+		if cfg.alternateEvery > 0 && (i/cfg.alternateEvery)%2 == 1 {
+			dx, dy = -dx, -dy
+		}
+		c.impulseWheel(now, 10, 20, 1, 0, host, dx, dy, c.epoch.Load())
+		inputX += dx
+		inputY += dy
+		for nextTick <= now {
+			rec.tick++
+			c.step(nextTick)
+			nextTick += tickStep
+		}
+	}
+	for drained := 0.0; drained < 0.2; drained += tickStep {
+		rec.tick++
+		if !c.step(nextTick) {
+			break
+		}
+		nextTick += tickStep
+	}
+	return inputX, inputY
+}
+
+// assertBatchedDelivery checks the shared acceptance criteria: synthetic
+// delivery stays at most one non-zero call per tick and every input unit is
+// either delivered or still pending. requireDelivery additionally asserts the
+// replay produced at least one synthetic call.
+func assertBatchedDelivery(t *testing.T, c *scrollController, rec *wheelTickRecorder, inputX, inputY float64, requireDelivery bool) {
+	t.Helper()
+	if requireDelivery && len(rec.subs) == 0 {
+		t.Fatal("dense burst delivered nothing")
+	}
+	if got := rec.maxCallsPerTick(); got > 1 {
+		t.Fatalf("synthetic calls in one tick = %d, want at most 1", got)
+	}
+	for index, sub := range rec.subs {
+		if sub.dx == 0 && sub.dy == 0 {
+			t.Fatalf("submission %d carried (0,0)", index)
+		}
+	}
+	s := c.session
+	if s.kind != scrollSessionWheel || !s.burstActive {
+		t.Fatalf("burst not retained after the replay: %+v", s)
+	}
+	sentX, sentY := rec.total()
+	if math.Abs(float64(sentX)+float64(s.queuedX)+s.pendingX-inputX) > 0.01 {
+		t.Fatalf("x ledger = %v, want %v", float64(sentX)+float64(s.queuedX)+s.pendingX, inputX)
+	}
+	if math.Abs(float64(sentY)+float64(s.queuedY)+s.pendingY-inputY) > 0.01 {
+		t.Fatalf("y ledger = %v, want %v", float64(sentY)+float64(s.queuedY)+s.pendingY, inputY)
+	}
+}
+
+func TestEngineWheelTotalsMatchAcrossFrameRates(t *testing.T) {
+	// Batching must not make delivery depend on the frame rate: the same impulse
+	// stream has to conserve exactly the same displacement whether ticks land at
+	// 60, 120 or 165 Hz.
+	const seconds = 0.5
+	totals := make(map[int]int64, 3)
+	for _, tickRate := range []int{60, 120, 165} {
+		rec := &wheelTickRecorder{}
+		c, host := newEngineController(nil)
+		c.sender = rec.send
+		denseReplay{tickRate: tickRate, seconds: seconds, dx: 1, dy: -1}.run(c, host, rec)
+		_, totals[tickRate] = rec.total()
+	}
+
+	for _, tickRate := range []int{120, 165} {
+		if totals[tickRate] != totals[60] {
+			t.Fatalf("frame-rate divergence: totals = %v", totals)
+		}
+	}
+}
+
+func TestEngineWheelDeliversAtMostOneSyntheticCallPerTick(t *testing.T) {
+	for _, tickRate := range []int{60, 120, 165} {
+		t.Run(fmt.Sprintf("tick-%d", tickRate), func(t *testing.T) {
+			rec := &wheelTickRecorder{}
+			c, host := newEngineController(nil)
+			c.sender = rec.send
+
+			inputX, inputY := denseReplay{tickRate: tickRate, seconds: 0.5, dx: 1, dy: -1}.run(c, host, rec)
+
+			assertBatchedDelivery(t, c, rec, inputX, inputY, true)
+		})
+	}
+}
+
+func TestEngineWheelBatchesDirectionChangesAtFrameBoundaries(t *testing.T) {
+	for _, tickRate := range []int{60, 165} {
+		t.Run(fmt.Sprintf("tick-%d", tickRate), func(t *testing.T) {
+			rec := &wheelTickRecorder{}
+			c, host := newEngineController(nil)
+			c.sender = rec.send
+
+			cfg := denseReplay{
+				tickRate:       tickRate,
+				seconds:        0.5,
+				dx:             0,
+				dy:             -240,
+				alternateEvery: int(denseImpulseRate) / tickRate,
+			}
+			inputX, inputY := cfg.run(c, host, rec)
+
+			assertBatchedDelivery(t, c, rec, inputX, inputY, true)
+		})
+	}
+}
+
+func TestEngineWheelCancelsOppositeImpulsesInsideOneFrame(t *testing.T) {
+	// Equal opposite impulses inside one frame may cancel in the queue; what
+	// must hold is the frame-level batching and the net displacement.
+	for _, tickRate := range []int{60, 165} {
+		t.Run(fmt.Sprintf("tick-%d", tickRate), func(t *testing.T) {
+			rec := &wheelTickRecorder{}
+			c, host := newEngineController(nil)
+			c.sender = rec.send
+
+			cfg := denseReplay{tickRate: tickRate, seconds: 0.5, dx: 240, dy: 0, alternateEvery: 1}
+			inputX, inputY := cfg.run(c, host, rec)
+
+			assertBatchedDelivery(t, c, rec, inputX, inputY, false)
+		})
+	}
+}
+
+func TestEngineWheelBatchesFractionalInput(t *testing.T) {
+	for _, tickRate := range []int{60, 165} {
+		t.Run(fmt.Sprintf("tick-%d", tickRate), func(t *testing.T) {
+			rec := &wheelTickRecorder{}
+			c, host := newEngineController(nil)
+			c.sender = rec.send
+
+			inputX, inputY := denseReplay{tickRate: tickRate, seconds: 0.5, dx: 0.25, dy: -0.1}.run(c, host, rec)
+
+			assertBatchedDelivery(t, c, rec, inputX, inputY, true)
+		})
+	}
+}
+
+func TestEngineWheelImpulsesWaitForTheFrameTick(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	stub := &stubTickBackend{}
+	c.tickBackend = stub.backend()
+	clock := 100.0
+	c.now = func() float64 { return clock }
+
+	c.impulseWheel(clock, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
+	if len(stub.regIDs) != 1 {
+		t.Fatalf("registrations = %v, want one tick for the burst", stub.regIDs)
+	}
+	clock = 100.004
+	c.impulseWheel(clock, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
+	if len(rec.subs) != 0 {
+		t.Fatalf("impulses delivered %d events before the frame tick", len(rec.subs))
+	}
+
+	clock = 100.016
+	if !c.tickFire(c.tickState.gen) {
+		t.Fatal("burst stopped ticking while displacement was pending")
+	}
+	if len(rec.subs) != 1 {
+		t.Fatalf("submissions in the tick = %d, want 1", len(rec.subs))
+	}
+	if rec.subs[0].dy == 0 {
+		t.Fatal("batched submission carried no vertical displacement")
+	}
+	if c.tickState.id == 0 {
+		t.Fatal("tick registration cleared while pending displacement remained")
+	}
+}
+
+func TestEngineWheelRepeatedStepWithEmptyQueueDoesNotResend(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, 240, c.epoch.Load())
+
+	c.step(100.05)
+	first := len(rec.subs)
+	if first == 0 {
+		t.Fatal("burst delivered nothing at the frame tick")
+	}
+	// The same instant repeated must not resend a zero or duplicate batch.
+	c.step(100.05)
+	if len(rec.subs) != first {
+		t.Fatalf("repeated step sent %d extra events", len(rec.subs)-first)
+	}
+}
+
+func TestEngineWheelFlushesQueuedShareBeforeSettling(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0.25, 0, c.epoch.Load())
+
+	// A ready share must be delivered even though the decaying remainder is
+	// already below one unit and would settle on its own.
+	c.mu.Lock()
+	c.session.queuedX = 3
+	c.mu.Unlock()
+
+	if keep := c.step(100.01); keep {
+		t.Fatal("settled burst keeps ticking after flushing its queued share")
+	}
+	if len(rec.subs) != 1 {
+		t.Fatalf("submissions = %d, want the single queued share", len(rec.subs))
+	}
+	if tx, _ := rec.total(); tx != 3 {
+		t.Fatalf("delivered total = %d, want 3", tx)
+	}
+	if c.session.queuedX != 0 {
+		t.Fatalf("queued share = %d after flush, want 0", c.session.queuedX)
+	}
+}
+
+func TestEngineWheelQueueOverflowCancelsTheBurst(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
+
+	c.mu.Lock()
+	c.session.queuedX = int64(math.MaxInt32) + 1
+	c.mu.Unlock()
+
+	if keep := c.step(100.01); keep {
+		t.Fatal("burst keeps ticking after a queue overflow")
+	}
+	if len(rec.subs) != 0 {
+		t.Fatalf("overflowing queue submitted %d events", len(rec.subs))
+	}
+	if c.overloadCompletions != 1 {
+		t.Fatalf("overload completions = %d, want 1", c.overloadCompletions)
+	}
+	if c.session.burstActive || c.session.kind != scrollSessionNone {
+		t.Fatalf("session survives a queue overflow: %+v", c.session)
+	}
+}
+
+func TestEngineWheelQueuedOutputIsDiscardedOnCancellation(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
+
+	c.mu.Lock()
+	c.session.queuedX, c.session.queuedY = 9, -4
+	c.mu.Unlock()
+	c.invalidate()
+
+	if c.step(100.01) {
+		t.Fatal("invalidated burst keeps ticking")
+	}
+	if len(rec.subs) != 0 {
+		t.Fatalf("cancelled burst submitted %d events", len(rec.subs))
+	}
+	if c.session.kind != scrollSessionNone || c.session.queuedX != 0 || c.session.queuedY != 0 {
+		t.Fatalf("queued output survives cancellation: %+v", c.session)
+	}
+}
+
+func TestEngineWheelQueuedOutputIsDiscardedOnModifierChange(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
+
+	c.mu.Lock()
+	c.session.queuedY = -7
+	c.mu.Unlock()
+	c.noteModifiers(uint(gdk.ShiftMaskValue))
+
+	if c.step(100.01) {
+		t.Fatal("interrupted burst keeps ticking")
+	}
+	if len(rec.subs) != 0 {
+		t.Fatalf("interrupted burst submitted %d events", len(rec.subs))
+	}
+	if c.session.queuedX != 0 || c.session.queuedY != 0 {
+		t.Fatalf("queued output transferred across a modifier change: %+v", c.session)
+	}
+}
+
+func TestEngineWheelCancelNowDiscardsQueuedOutput(t *testing.T) {
+	// cancelNow is the GTK-thread cancellation used for host replacement,
+	// hide/unmap and detach.
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+	c.impulseWheel(100.0, 10, 20, 1, 0, host, 0, -240, c.epoch.Load())
+
+	c.mu.Lock()
+	c.session.queuedY = -9
+	c.mu.Unlock()
+	c.cancelNow()
+
+	if len(rec.subs) != 0 {
+		t.Fatalf("cancelNow submitted %d events", len(rec.subs))
+	}
+	if c.session.kind != scrollSessionNone || c.session.queuedY != 0 {
+		t.Fatalf("queued output survives cancelNow: %+v", c.session)
+	}
+	if c.step(100.01) {
+		t.Fatal("cancelled controller keeps ticking")
+	}
+}
+
+// queueWheelImpulses feeds impulses that accrue integer shares without any frame
+// tick, and returns the queued displacement that waits for delivery.
+func queueWheelImpulses(c *scrollController, host cef.BrowserHost, count int, dx, dy float64) (queuedX, queuedY int64, inputX, inputY float64) {
+	for i := 0; i < count; i++ {
+		c.impulseWheel(100.0+float64(i)*0.004, 10, 20, 1, 0, host, dx, dy, c.epoch.Load())
+		inputX += dx
+		inputY += dy
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.session.queuedX, c.session.queuedY, inputX, inputY
+}
+
+func TestEngineWheelLedgerCoversQueuedShares(t *testing.T) {
+	// The ledger identity includes the queue: what was neither sent nor still
+	// pending waits there, and nothing is delivered before a frame tick.
+	const impulses = 20
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+
+	queuedX, queuedY, inputX, inputY := queueWheelImpulses(c, host, impulses, 1, -1)
+
+	if queuedX == 0 && queuedY == 0 {
+		t.Fatal("dense impulses accrued no queued share")
+	}
+	if len(rec.subs) != 0 {
+		t.Fatalf("impulses delivered %d events before a frame tick", len(rec.subs))
+	}
+	c.mu.Lock()
+	sentX, sentY := rec.total()
+	ledgerX := float64(sentX+queuedX) + c.session.pendingX
+	ledgerY := float64(sentY+queuedY) + c.session.pendingY
+	c.mu.Unlock()
+	if math.Abs(ledgerX-inputX) > 0.01 || math.Abs(ledgerY-inputY) > 0.01 {
+		t.Fatalf("ledger = (%v,%v), want (%v,%v)", ledgerX, ledgerY, inputX, inputY)
+	}
+}
+
+func TestEngineWheelStallDeliversTheAccruedShare(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+
+	_, queuedY, _, _ := queueWheelImpulses(c, host, 2, 0, -240)
+	if queuedY == 0 {
+		t.Fatal("impulses accrued no queued share")
+	}
+
+	// A frame gap past the stall threshold drops the pending remainder but must
+	// still deliver what accrual already took out of pending, in one call.
+	if c.step(100.2) {
+		t.Fatal("stalled burst keeps ticking")
+	}
+	if len(rec.subs) != 1 {
+		t.Fatalf("stall delivered %d calls, want one", len(rec.subs))
+	}
+	if _, ty := rec.total(); ty != queuedY {
+		t.Fatalf("stall delivered %d, want the accrued share %d", ty, queuedY)
+	}
+	if c.session.kind != scrollSessionNone || c.session.queuedY != 0 {
+		t.Fatalf("session survives the stall: %+v", c.session)
+	}
+	if c.overloadCompletions != 0 {
+		t.Fatalf("stall recorded %d overloads, want 0", c.overloadCompletions)
+	}
+}
+
+func TestEngineWheelIdleDiscardDeliversTheAccruedShare(t *testing.T) {
+	rec := &gateRecorder{}
+	c, host := newEngineController(rec)
+
+	_, queuedY, _, _ := queueWheelImpulses(c, host, 2, 0, -240)
+	if queuedY == 0 {
+		t.Fatal("impulses accrued no queued share")
+	}
+
+	// Past the idle deadline the burst is retired and its remainder recorded as
+	// one explicit overload completion; the accrued share still ships.
+	if c.step(100.31) {
+		t.Fatal("idle burst keeps ticking")
+	}
+	if len(rec.subs) != 1 {
+		t.Fatalf("idle discard delivered %d calls, want one", len(rec.subs))
+	}
+	if _, ty := rec.total(); ty != queuedY {
+		t.Fatalf("idle discard delivered %d, want the accrued share %d", ty, queuedY)
+	}
+	if c.session.kind != scrollSessionNone {
+		t.Fatalf("session survives the idle deadline: %+v", c.session)
+	}
+	if c.overloadCompletions != 1 {
+		t.Fatalf("overload completions = %d, want 1 for the discarded remainder", c.overloadCompletions)
 	}
 }

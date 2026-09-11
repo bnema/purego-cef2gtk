@@ -25,8 +25,12 @@ import (
 )
 
 const (
-	retiredTextureLimit   = 16
-	stalePendingFrameWait = 250 * time.Millisecond
+	// retiredTextureStorage is the compile-time ring size. How many entries are
+	// actually kept referenced is the runtime retireLimit, which the render-path
+	// knobs can lower.
+	retiredTextureStorage      = 16
+	defaultRetiredTextureLimit = 2
+	stalePendingFrameWait      = 250 * time.Millisecond
 )
 
 var (
@@ -44,7 +48,11 @@ type dmabufFormatSet interface {
 	Contains(uint32, uint64) bool
 }
 
-// Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters.
+// Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters. The
+// last four fields report the effective render-path configuration of the GDK
+// DMABUF backend: whether offload was asked for, whether the wrapper was
+// installed, which GLib priority frame imports use, and how many superseded
+// textures stay referenced. They stay zero on any other backend.
 type Diagnostics struct {
 	TexturesBuilt           uint64
 	TextureBuildFailures    uint64
@@ -58,6 +66,10 @@ type Diagnostics struct {
 	PendingReschedules      uint64
 	PendingScheduleFailures uint64
 	PendingIdleCallbacks    uint64
+	OffloadRequested        bool
+	OffloadInstalled        bool
+	ImportPriority          int
+	RetireLimit             int
 }
 
 type dmabufTextureBuilder interface {
@@ -74,7 +86,25 @@ type dmabufTextureBuilder interface {
 	BuildWithDestroyNotifyPointer(uintptr, uintptr) (*gdk.Texture, error)
 }
 
-type idleOnceScheduler func(*glib.SourceOnceFunc, uintptr) uint
+// idleOnceScheduler schedules a one-shot idle callback at a GLib priority.
+// glib.IdleAddOnce always uses G_PRIORITY_DEFAULT_IDLE, so a lower (numerically
+// smaller) priority has to go through an explicit idle source.
+type idleOnceScheduler func(priority int, callback *glib.SourceOnceFunc, data uintptr) uint
+
+// scheduleIdleOnce runs cb once at the given GLib priority. It is safe to pass
+// the address of a local adapter: puregotk's glib source registration copies the
+// closure into its managed registry and keeps that copy alive until the source
+// is finalized.
+func (r *Renderer) scheduleIdleOnce(priority int, callback *glib.SourceOnceFunc, data uintptr) uint {
+	if priority == glibPriorityDefaultIdle {
+		return glib.IdleAddOnce(callback, data)
+	}
+	once := glib.SourceFunc(func(d uintptr) bool {
+		(*callback)(d)
+		return false
+	})
+	return glib.IdleAddFull(priority, &once, data, nil)
+}
 
 // ownedTexture pairs a GdkTexture whose plane FD lifetime is managed by GDK's
 // native close(2) GDestroyNotify.
@@ -113,9 +143,11 @@ type Renderer struct {
 	formats             dmabufFormatSet
 	builder             dmabufTextureBuilder
 	current             *ownedTexture
-	retired             [retiredTextureLimit]*ownedTexture
+	retired             [retiredTextureStorage]*ownedTexture
 	retiredStart        int
 	retiredCount        int
+	retireLimit         int
+	offloadRequested    bool
 	pictureSetPaintable func(*gdk.Texture)
 	firstTextureSwapMu  sync.Mutex
 	firstTextureSwap    func()
@@ -127,6 +159,7 @@ type Renderer struct {
 	pendingScheduledAt time.Time
 	pendingSourceID    uint
 	pendingGeneration  uint64
+	importPriority     int
 
 	dupFD       func(int) (int, error)
 	closeFD     func(int) error
@@ -174,9 +207,96 @@ func configurePresenterPicture(picture presenterPicture) {
 	picture.SetSizeRequest(1, 1)
 }
 
+// graphicsOffloadSupportedBy reports whether a GTK major.minor exposes
+// GtkGraphicsOffload, which arrived in GTK 4.14.
+func graphicsOffloadSupportedBy(major, minor uint) bool {
+	if major != 4 {
+		return major > 4
+	}
+	return minor >= 14
+}
+
+// graphicsOffloadSupported reports whether the loaded GTK exposes
+// GtkGraphicsOffload. The probe runs before any offload symbol is touched: the
+// generated bindings panic on an unresolved symbol instead of returning an
+// error, so constructing the widget cannot be used as the capability check.
+func graphicsOffloadSupported() bool {
+	return graphicsOffloadSupportedBy(gtk.GetMajorVersion(), gtk.GetMinorVersion())
+}
+
+// offloadPresenter is the part of GtkGraphicsOffload the presenter configures,
+// so that configuration is covered without a GTK runtime.
+type offloadPresenter interface {
+	SetEnabled(gtk.GraphicsOffloadEnabled)
+	SetHexpand(bool)
+	SetVexpand(bool)
+	SetSizeRequest(int, int)
+}
+
+func configureOffloadPresenter(offload offloadPresenter) {
+	if offload == nil {
+		return
+	}
+	offload.SetEnabled(gtk.GraphicsOffloadEnabledValue)
+	offload.SetHexpand(true)
+	offload.SetVexpand(true)
+	offload.SetSizeRequest(1, 1)
+}
+
+// offloadConstructor builds the graphics-offload presenter wrapper for a child
+// widget, returning the wrapper and the widget to pack.
+type offloadConstructor func(child *gtk.Widget) (*gtk.GraphicsOffload, *gtk.Widget)
+
+// constructOffload calls construct and reports no wrapper when it panics. A
+// missing gtk_graphics_offload_new symbol panics inside the binding rather than
+// returning an error, so this recover is the fallback behind the version probe:
+// GTK may report 4.14 while a distributor omits the symbol. It covers the
+// constructor only, so a panic in the configuration below stays a real bug
+// instead of degrading silently.
+func constructOffload(construct func(*gtk.Widget) *gtk.GraphicsOffload, child *gtk.Widget) (offload *gtk.GraphicsOffload) {
+	defer func() {
+		if recover() != nil {
+			offload = nil
+		}
+	}()
+	return construct(child)
+}
+
+// newOffloadPresenter builds the configured offload wrapper from the real
+// binding, and returns nothing when the wrapper cannot be constructed.
+func newOffloadPresenter(child *gtk.Widget) (*gtk.GraphicsOffload, *gtk.Widget) {
+	created := constructOffload(gtk.NewGraphicsOffload, child)
+	if created == nil {
+		return nil, nil
+	}
+	configureOffloadPresenter(created)
+	return created, &created.Widget
+}
+
+// selectPresenterWidget returns the graphics-offload wrapper when it should be
+// used, and the child widget to pack otherwise. Capability probing and
+// construction are parameters so the unsupported and failing-constructor paths
+// are testable without a GTK runtime.
+func selectPresenterWidget(picture *gtk.Picture, useOffload bool, supported func() bool, construct offloadConstructor) (*gtk.GraphicsOffload, *gtk.Widget) {
+	child := &picture.Widget
+	if !useOffload || !supported() {
+		return nil, child
+	}
+	offload, widget := construct(child)
+	if offload == nil || widget == nil {
+		return nil, child
+	}
+	return offload, widget
+}
+
 // NewRenderer creates a GtkPicture-backed GDK DMABUF renderer. When useOffload
-// is true and GtkGraphicsOffload can be constructed, Widget returns the offload
-// wrapper; otherwise it returns the picture widget directly.
+// is true and the loaded GTK supports GtkGraphicsOffload, Widget returns the
+// offload wrapper; otherwise it returns the picture widget directly.
+//
+// GtkGraphicsOffload asks the compositor to consume the presented DMA-BUF
+// directly, but GTK may still fall back to compositing the picture (clipping,
+// transforms, formats). It is a presentation request, not a guarantee of direct
+// scanout.
 func NewRenderer(useOffload bool) (*Renderer, error) {
 	picture := gtk.NewPicture()
 	if picture == nil {
@@ -184,18 +304,7 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	}
 	configurePresenterPicture(picture)
 
-	widget := &picture.Widget
-	var offload *gtk.GraphicsOffload
-	if useOffload {
-		offload = gtk.NewGraphicsOffload(widget)
-		if offload != nil {
-			offload.SetEnabled(gtk.GraphicsOffloadEnabledValue)
-			offload.SetHexpand(true)
-			offload.SetVexpand(true)
-			offload.SetSizeRequest(1, 1)
-			widget = &offload.Widget
-		}
-	}
+	offload, widget := selectPresenterWidget(picture, useOffload, graphicsOffloadSupported, newOffloadPresenter)
 
 	builder, err := newTextureBuilder()
 	if err != nil {
@@ -209,15 +318,19 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 		return nil, fmt.Errorf("%w: %v", ErrCloseDestroyNotifyUnavailable, err)
 	}
 
-	return &Renderer{
-		widget:      widget,
-		picture:     picture,
-		offload:     offload,
-		builder:     builder,
-		dupFD:       dupFDClOExec,
-		closeFD:     unix.Close,
-		idleAddOnce: glib.IdleAddOnce,
-	}, nil
+	r := &Renderer{
+		widget:           widget,
+		picture:          picture,
+		offload:          offload,
+		builder:          builder,
+		dupFD:            dupFDClOExec,
+		closeFD:          unix.Close,
+		offloadRequested: useOffload,
+	}
+	r.idleAddOnce = r.scheduleIdleOnce
+	r.importPriority = importPriority()
+	r.retireLimit = retiredTextureLimitFromEnv()
+	return r, nil
 }
 
 func newTextureBuilder() (builder dmabufTextureBuilder, retErr error) {
@@ -437,9 +550,9 @@ func (r *Renderer) schedulePendingImport(generation uint64) {
 	})
 	scheduler := r.idleAddOnce
 	if scheduler == nil {
-		scheduler = glib.IdleAddOnce
+		scheduler = r.scheduleIdleOnce
 	}
-	sourceID := scheduler(&cb, 0)
+	sourceID := scheduler(r.importPriority, &cb, 0)
 	r.pendingMu.Lock()
 	defer r.pendingMu.Unlock()
 	if !r.pendingScheduled || r.pendingGeneration != generation {
@@ -721,18 +834,31 @@ func closeOwnedFrame(frame *ownedFrame, closeFD func(int) error) {
 	}
 }
 
+// retireLimitOrDefault bounds how many superseded textures stay referenced. A
+// zero value (unit fakes that skip the constructor) means the default.
+func (r *Renderer) retireLimitOrDefault() int {
+	if r == nil || r.retireLimit < 1 {
+		return defaultRetiredTextureLimit
+	}
+	if r.retireLimit > retiredTextureStorage {
+		return retiredTextureStorage
+	}
+	return r.retireLimit
+}
+
 func (r *Renderer) retireOwnedTexture(owned *ownedTexture) {
 	if r == nil || owned == nil {
 		return
 	}
-	if r.retiredCount == retiredTextureLimit {
+	limit := r.retireLimitOrDefault()
+	if r.retiredCount == limit {
 		oldest := r.retired[r.retiredStart]
 		r.retired[r.retiredStart] = owned
-		r.retiredStart = (r.retiredStart + 1) % retiredTextureLimit
+		r.retiredStart = (r.retiredStart + 1) % limit
 		r.releaseOwnedTexture(oldest)
 		return
 	}
-	index := (r.retiredStart + r.retiredCount) % retiredTextureLimit
+	index := (r.retiredStart + r.retiredCount) % limit
 	r.retired[index] = owned
 	r.retiredCount++
 }
@@ -741,18 +867,19 @@ func (r *Renderer) retiredAt(offset int) *ownedTexture {
 	if r == nil || offset < 0 || offset >= r.retiredCount {
 		return nil
 	}
-	return r.retired[(r.retiredStart+offset)%retiredTextureLimit]
+	return r.retired[(r.retiredStart+offset)%r.retireLimitOrDefault()]
 }
 
 func (r *Renderer) releaseRetiredTextures() {
 	if r == nil {
 		return
 	}
+	limit := r.retireLimitOrDefault()
 	for r.retiredCount > 0 {
 		index := r.retiredStart
 		r.releaseOwnedTexture(r.retired[index])
 		r.retired[index] = nil
-		r.retiredStart = (r.retiredStart + 1) % retiredTextureLimit
+		r.retiredStart = (r.retiredStart + 1) % limit
 		r.retiredCount--
 	}
 	r.retiredStart = 0
@@ -914,6 +1041,10 @@ func (r *Renderer) Diagnostics() Diagnostics {
 		PendingReschedules:      r.pendingReschedules.Load(),
 		PendingScheduleFailures: r.pendingScheduleFailures.Load(),
 		PendingIdleCallbacks:    r.pendingIdleCallbacks.Load(),
+		OffloadRequested:        r.offloadRequested,
+		OffloadInstalled:        r.offload != nil,
+		ImportPriority:          r.importPriority,
+		RetireLimit:             r.retireLimitOrDefault(),
 	}
 }
 
