@@ -389,7 +389,6 @@ func (r *Renderer) InitializeOnGTKThread() error {
 // when this returns, and GDK wraps the DMA-BUF rather than copying it, so this is
 // a borrowed frame, not a callback-independent owned one. Making the import
 // synchronous would not change that, because GSK still imports at paint time.
-// See docs/render-ownership-decision.md.
 func (r *Renderer) ImportAndQueueAsync(info *cef.AcceleratedPaintInfo, onError func(error)) error {
 	if r == nil {
 		return ErrNilRenderer
