@@ -245,12 +245,12 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	}
 
 	r := &Renderer{
-		widget:      widget,
-		picture:     picture,
-		offload:     offload,
-		builder:     builder,
-		dupFD:       dupFDClOExec,
-		closeFD:     unix.Close,
+		widget:  widget,
+		picture: picture,
+		offload: offload,
+		builder: builder,
+		dupFD:   dupFDClOExec,
+		closeFD: unix.Close,
 	}
 	r.idleAddOnce = r.scheduleIdleOnce
 	r.importPriority = importPriority()
