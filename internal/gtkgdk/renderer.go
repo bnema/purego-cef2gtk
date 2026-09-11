@@ -49,9 +49,10 @@ type dmabufFormatSet interface {
 }
 
 // Diagnostics is a point-in-time snapshot of GDK DMABUF renderer counters. The
-// last three fields report the effective render-path configuration: whether the
-// offload wrapper was installed, the GLib priority used for frame imports, and
-// how many superseded textures stay referenced.
+// last four fields report the effective render-path configuration of the GDK
+// DMABUF backend: whether offload was asked for, whether the wrapper was
+// installed, which GLib priority frame imports use, and how many superseded
+// textures stay referenced. They stay zero on any other backend.
 type Diagnostics struct {
 	TexturesBuilt           uint64
 	TextureBuildFailures    uint64
@@ -66,6 +67,7 @@ type Diagnostics struct {
 	PendingScheduleFailures uint64
 	PendingIdleCallbacks    uint64
 	OffloadRequested        bool
+	OffloadInstalled        bool
 	ImportPriority          int
 	RetireLimit             int
 }
@@ -205,45 +207,70 @@ func configurePresenterPicture(picture presenterPicture) {
 	picture.SetSizeRequest(1, 1)
 }
 
+// graphicsOffloadSupportedBy reports whether a GTK major.minor exposes
+// GtkGraphicsOffload, which arrived in GTK 4.14.
+func graphicsOffloadSupportedBy(major, minor uint) bool {
+	if major != 4 {
+		return major > 4
+	}
+	return minor >= 14
+}
+
 // graphicsOffloadSupported reports whether the loaded GTK exposes
-// GtkGraphicsOffload, which arrived in GTK 4.14. The probe runs before any
-// offload symbol is touched: the generated bindings panic on an unresolved
-// symbol instead of returning an error, so constructing the widget cannot be
-// used as the capability check.
+// GtkGraphicsOffload. The probe runs before any offload symbol is touched: the
+// generated bindings panic on an unresolved symbol instead of returning an
+// error, so constructing the widget cannot be used as the capability check.
 func graphicsOffloadSupported() bool {
-	return gtk.CheckVersion(4, 14, 0) == ""
+	return graphicsOffloadSupportedBy(gtk.GetMajorVersion(), gtk.GetMinorVersion())
+}
+
+// offloadPresenter is the part of GtkGraphicsOffload the presenter configures,
+// so that configuration is covered without a GTK runtime.
+type offloadPresenter interface {
+	SetEnabled(gtk.GraphicsOffloadEnabled)
+	SetHexpand(bool)
+	SetVexpand(bool)
+	SetSizeRequest(int, int)
+}
+
+func configureOffloadPresenter(offload offloadPresenter) {
+	if offload == nil {
+		return
+	}
+	offload.SetEnabled(gtk.GraphicsOffloadEnabledValue)
+	offload.SetHexpand(true)
+	offload.SetVexpand(true)
+	offload.SetSizeRequest(1, 1)
 }
 
 // offloadConstructor builds the graphics-offload presenter wrapper for a child
 // widget, returning the wrapper and the widget to pack.
 type offloadConstructor func(child *gtk.Widget) (*gtk.GraphicsOffload, *gtk.Widget)
 
-// newConfiguredOffload constructs and configures the graphics-offload presenter
-// around child. A constructor that panics on a missing symbol and a constructor
-// that returns nothing both yield no wrapper, leaving the GtkPicture presenter in
-// place. The recover is a defence behind the version probe, not a substitute for
-// it: GTK may advertise 4.14 while a distributor is missing the symbol.
-func newConfiguredOffload(child *gtk.Widget, construct func(*gtk.Widget) *gtk.GraphicsOffload) (offload *gtk.GraphicsOffload, widget *gtk.Widget) {
+// constructOffload calls construct and reports no wrapper when it panics. A
+// missing gtk_graphics_offload_new symbol panics inside the binding rather than
+// returning an error, so this recover is the fallback behind the version probe:
+// GTK may report 4.14 while a distributor omits the symbol. It covers the
+// constructor only, so a panic in the configuration below stays a real bug
+// instead of degrading silently.
+func constructOffload(construct func(*gtk.Widget) *gtk.GraphicsOffload, child *gtk.Widget) (offload *gtk.GraphicsOffload) {
 	defer func() {
 		if recover() != nil {
-			offload, widget = nil, nil
+			offload = nil
 		}
 	}()
-	created := construct(child)
-	if created == nil {
-		return nil, nil
-	}
-	created.SetEnabled(gtk.GraphicsOffloadEnabledValue)
-	created.SetHexpand(true)
-	created.SetVexpand(true)
-	created.SetSizeRequest(1, 1)
-	return created, &created.Widget
+	return construct(child)
 }
 
 // newOffloadPresenter builds the configured offload wrapper from the real
-// binding.
+// binding, and returns nothing when the wrapper cannot be constructed.
 func newOffloadPresenter(child *gtk.Widget) (*gtk.GraphicsOffload, *gtk.Widget) {
-	return newConfiguredOffload(child, gtk.NewGraphicsOffload)
+	created := constructOffload(gtk.NewGraphicsOffload, child)
+	if created == nil {
+		return nil, nil
+	}
+	configureOffloadPresenter(created)
+	return created, &created.Widget
 }
 
 // selectPresenterWidget returns the graphics-offload wrapper when it should be
@@ -298,7 +325,7 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 		builder:          builder,
 		dupFD:            dupFDClOExec,
 		closeFD:          unix.Close,
-		offloadRequested: offload != nil,
+		offloadRequested: useOffload,
 	}
 	r.idleAddOnce = r.scheduleIdleOnce
 	r.importPriority = importPriority()
@@ -1015,6 +1042,7 @@ func (r *Renderer) Diagnostics() Diagnostics {
 		PendingScheduleFailures: r.pendingScheduleFailures.Load(),
 		PendingIdleCallbacks:    r.pendingIdleCallbacks.Load(),
 		OffloadRequested:        r.offloadRequested,
+		OffloadInstalled:        r.offload != nil,
 		ImportPriority:          r.importPriority,
 		RetireLimit:             r.retireLimitOrDefault(),
 	}

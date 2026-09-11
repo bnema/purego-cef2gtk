@@ -105,14 +105,8 @@ func TestSchedulePendingImportPassesTheConfiguredPriority(t *testing.T) {
 
 // glibRuntimeLoadable reports whether the GLib shared library can be resolved in
 // this environment.
-func glibRuntimeLoadable() (ok bool) {
-	defer func() {
-		if recover() != nil {
-			ok = false
-		}
-	}()
-	glib.MainContextDefault()
-	return true
+func glibRuntimeLoadable() bool {
+	return runtimeLoadable(func() { glib.MainContextDefault() })
 }
 
 func TestScheduleIdleOnceAdapterRunsOnceAndRemovesItsSource(t *testing.T) {

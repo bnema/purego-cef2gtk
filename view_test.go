@@ -5,11 +5,43 @@ import (
 	"testing"
 
 	"github.com/bnema/purego-cef/cef"
+	"github.com/bnema/purego-cef2gtk/internal/gtkgdk"
 	"github.com/bnema/purego-cef2gtk/internal/gtkgl"
 	"github.com/bnema/puregotk/v4/gdk"
 	"github.com/bnema/puregotk/v4/gobject"
 	"github.com/bnema/puregotk/v4/gtk"
 )
+
+// diagRenderQueue adds the optional GDK diagnostics surface to the shared fake
+// without widening it for every handler test.
+type diagRenderQueue struct {
+	fakeRenderQueue
+	diag gtkgdk.Diagnostics
+}
+
+func (d *diagRenderQueue) Diagnostics() gtkgdk.Diagnostics { return d.diag }
+
+func TestViewDiagnosticsCopiesTheGdkRenderPathSettings(t *testing.T) {
+	want := gtkgdk.Diagnostics{
+		OffloadRequested: true,
+		OffloadInstalled: true,
+		ImportPriority:   200,
+		RetireLimit:      4,
+	}
+	v := &View{renderer: &diagRenderQueue{diag: want}, diag: newDiagnosticsRecorder()}
+
+	snap := v.Diagnostics()
+
+	if !snap.OffloadRequested || !snap.OffloadInstalled {
+		t.Fatalf("offload = (requested %v, installed %v), want both true", snap.OffloadRequested, snap.OffloadInstalled)
+	}
+	if snap.ImportPriority != want.ImportPriority {
+		t.Fatalf("import priority = %d, want %d", snap.ImportPriority, want.ImportPriority)
+	}
+	if snap.RetireLimit != want.RetireLimit {
+		t.Fatalf("retire limit = %d, want %d", snap.RetireLimit, want.RetireLimit)
+	}
+}
 
 type visibilityRecordingHost struct {
 	cef.BrowserHost
