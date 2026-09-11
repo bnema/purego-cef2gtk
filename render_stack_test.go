@@ -38,8 +38,8 @@ func TestResolveRenderStackEGL(t *testing.T) {
 	if plan.GSKRenderer != "opengl" {
 		t.Fatalf("GSKRenderer = %q, want opengl", plan.GSKRenderer)
 	}
-	if plan.OSRBackingScale != "off" {
-		t.Fatalf("OSRBackingScale = %q, want off", plan.OSRBackingScale)
+	if plan.OSRBackingScale != "auto" {
+		t.Fatalf("OSRBackingScale = %q, want auto: the GLArea presenter draws the frame into a device-pixel framebuffer, so a logical-sized view rect leaves part of the widget empty on a fractional-scale output", plan.OSRBackingScale)
 	}
 }
 

@@ -43,7 +43,7 @@ func ResolveRenderStack(stack RenderStack) (RenderStackPlan, error) {
 			Backend:         BackendGLArea,
 			ANGLEBackend:    "gl-egl",
 			GSKRenderer:     "opengl",
-			OSRBackingScale: "off",
+			OSRBackingScale: "auto",
 		}, nil
 	default:
 		return RenderStackPlan{}, fmt.Errorf("unsupported render stack %q", stack)
