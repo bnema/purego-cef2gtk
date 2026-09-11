@@ -81,16 +81,16 @@ func TestBuildInlineSinglePlaneClosesFDOnFailure(t *testing.T) {
 }
 
 func TestRetiredTextureRingRetiresInFIFOOrder(t *testing.T) {
-	r := &Renderer{}
-	textures := make([]*ownedTexture, retiredTextureLimit+1)
+	r := &Renderer{retireLimit: retiredTextureStorage}
+	textures := make([]*ownedTexture, retiredTextureStorage+1)
 	for i := range textures {
 		textures[i] = &ownedTexture{}
 		r.retireOwnedTexture(textures[i])
 	}
-	if r.retiredCount != retiredTextureLimit {
-		t.Fatalf("retired count = %d, want %d", r.retiredCount, retiredTextureLimit)
+	if r.retiredCount != retiredTextureStorage {
+		t.Fatalf("retired count = %d, want %d", r.retiredCount, retiredTextureStorage)
 	}
-	for i := 0; i < retiredTextureLimit; i++ {
+	for i := 0; i < retiredTextureStorage; i++ {
 		if got := r.retiredAt(i); got != textures[i+1] {
 			t.Fatalf("retired texture %d = %p, want %p", i, got, textures[i+1])
 		}

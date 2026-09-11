@@ -194,7 +194,7 @@ func newGLAreaView(profile ProfileOptions, scaleMultiplier float64) *View {
 }
 
 func newGDKDMABUFView(profile ProfileOptions, scaleMultiplier float64) *View {
-	renderer, err := gtkgdk.NewRenderer(false)
+	renderer, err := gtkgdk.NewRenderer(gtkgdk.GraphicsOffloadEnabled())
 	if err != nil || renderer == nil || renderer.Widget() == nil {
 		return nil
 	}
