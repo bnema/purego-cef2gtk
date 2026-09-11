@@ -1,6 +1,7 @@
 package gtkgl
 
 import (
+	"math"
 	"time"
 
 	"github.com/bnema/purego-cef/cef"
@@ -53,9 +54,14 @@ type scrollSession struct {
 	// Wheel burst phase.
 	burstActive        bool
 	pendingX, pendingY float64
-	lastImpulseT       float64
-	lastStepT          float64
-	hasClock           bool
+	// queuedX/queuedY hold accrued integer displacement that the next frame
+	// tick delivers in one synthetic submission. They are not the decay ledger:
+	// pending keeps the whole remaining displacement, and only the integer
+	// shares already taken out of it wait here.
+	queuedX, queuedY int64
+	lastImpulseT     float64
+	lastStepT        float64
+	hasClock         bool
 	// sentX/sentY tally dispatched integers for the trace.
 	sentX, sentY int64
 }
@@ -460,15 +466,16 @@ func (c *scrollController) wheelFreshLocked(s *scrollSession, now float64, mods 
 }
 
 // impulseWheel accumulates one accepted wheel impulse, advancing the burst
-// clock to the event time and emitting the accrued share before adding the
-// impulse. Same-session reversal nets against pending displacement through
-// plain addition. Bursts end (discarding pending intentionally) on session
-// changes, stalls, modifier or host mismatch, and the idle deadline.
-// Pointer motion never splits a burst: every impulse joins the live burst
-// and delivery stays at the frozen origin. The impulse carries the epoch
-// its update started under and reports acceptance: a mismatch means an
-// invalidation landed mid-flight and the impulse is dropped instead of
-// adopted by the new epoch.
+// clock to the event time and accruing the emitted integer share into the
+// session queue before adding the impulse. Nothing is delivered here: the queue
+// is flushed once per frame tick. Same-session reversal nets against pending
+// displacement through plain addition. Bursts end (discarding pending and queued
+// output intentionally) on session changes, stalls, modifier or host mismatch,
+// and the idle deadline. Pointer motion never splits a burst: every impulse joins
+// the live burst and delivery stays at the frozen origin. The impulse carries the
+// epoch its update started under and reports acceptance: a mismatch means an
+// invalidation landed mid-flight and the impulse is dropped instead of adopted by
+// the new epoch.
 func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64, mods uint, host cef.BrowserHost, fx, fy float64, epoch uint64) bool {
 	if c == nil {
 		return false
@@ -509,10 +516,11 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 		// impulse as the start of fresh motion within the same burst origin.
 		s.pendingX, s.pendingY = 0, 0
 		s.resX, s.resY = 0, 0
+		s.queuedX, s.queuedY = 0, 0
 		s.lastStepT = now
 	}
 	if s.hasClock {
-		c.emitWheelShareLocked(s, now)
+		c.accrueWheelShareLocked(s, now)
 	}
 	s.pendingX += fx
 	s.pendingY += fy
@@ -532,8 +540,9 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 	return true
 }
 
-// endBurstLocked retires a wheel burst. A remainder above one unit past the
-// idle deadline is an explicit overload completion, never conserved motion.
+// endBurstLocked retires a wheel burst, discarding its undelivered queued output
+// with its pending displacement. A pending remainder above one unit past the idle
+// deadline is an explicit overload completion, never conserved motion.
 func (c *scrollController) endBurstLocked(now float64, s *scrollSession) {
 	if s.kind != scrollSessionWheel || !s.burstActive {
 		return
@@ -543,14 +552,17 @@ func (c *scrollController) endBurstLocked(now float64, s *scrollSession) {
 	}
 	s.burstActive = false
 	s.pendingX, s.pendingY = 0, 0
+	s.queuedX, s.queuedY = 0, 0
 }
 
-// emitWheelShareLocked submits the accrued integer share of pending
-// displacement. Only dispatched integers leave pending; the unsubmitted
-// fraction carries in the session residual so decay always progresses and
-// small emissions are never silently dropped. The leftover fraction stays
-// with the session as the retained remainder.
-func (c *scrollController) emitWheelShareLocked(s *scrollSession, now float64) {
+// accrueWheelShareLocked advances the burst clock to now and moves the accrued
+// integer share of pending displacement into the session queue. Only accrued
+// integers leave pending; the unsubmitted fraction carries in the session
+// residual so decay always progresses and small emissions are never silently
+// dropped. The leftover fraction stays with the session as the retained
+// remainder, and the queued integers wait for the frame tick that delivers them.
+// The caller owns lastStepT; this helper never advances it.
+func (c *scrollController) accrueWheelShareLocked(s *scrollSession, now float64) {
 	dt := now - s.lastStepT
 	if dt <= 0 {
 		return
@@ -569,20 +581,50 @@ func (c *scrollController) emitWheelShareLocked(s *scrollSession, now float64) {
 	s.resX, s.resY = rx, ry
 	if cx == 0 && cy == 0 {
 		if c.tracing() {
-			c.tracef("wheel-emit dt=%.4f emitted=(0,0) pending=(%.1f,%.1f)", dt, s.pendingX, s.pendingY)
+			c.tracef("wheel-accrue dt=%.4f accrued=(0,0) pending=(%.1f,%.1f)", dt, s.pendingX, s.pendingY)
 		}
 		return
 	}
+	s.queuedX += int64(cx)
+	s.queuedY += int64(cy)
+	if c.tracing() {
+		c.tracef("wheel-accrue dt=%.4f accrued=(%d,%d) queued=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dt, cx, cy, s.queuedX, s.queuedY, s.pendingX, s.pendingY, s.resX, s.resY)
+	}
+}
+
+// flushWheelQueueLocked delivers the accrued queue in one synthetic submission
+// through the existing epoch/host gate. It reports whether the burst can
+// continue: a queue outside the int32 range of the CEF wheel arguments is an
+// explicit overload completion, so the burst is discarded rather than wrapped or
+// split into unbounded sends. An empty queue never sends, which keeps the tail
+// free of (0,0) submissions.
+func (c *scrollController) flushWheelQueueLocked(s *scrollSession, now float64) bool {
+	if s.queuedX == 0 && s.queuedY == 0 {
+		return true
+	}
+	if s.queuedX > math.MaxInt32 || s.queuedX < math.MinInt32 ||
+		s.queuedY > math.MaxInt32 || s.queuedY < math.MinInt32 {
+		c.tracef("wheel-flush-overflow queued=(%d,%d)", s.queuedX, s.queuedY)
+		c.overloadCompletions++
+		s.queuedX, s.queuedY = 0, 0
+		s.pendingX, s.pendingY = 0, 0
+		s.resX, s.resY = 0, 0
+		s.burstActive = false
+		return false
+	}
+	dx, dy := int32(s.queuedX), int32(s.queuedY)
+	s.queuedX, s.queuedY = 0, 0
 	evt := BuildMouseEvent(s.x, s.y, s.mods, s.scale)
 	if s.precise {
 		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 	}
 	if c.tracing() {
-		c.tracef("wheel-emit dt=%.4f emitted=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dt, cx, cy, s.pendingX, s.pendingY, s.resX, s.resY)
+		c.tracef("wheel-flush delivered=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dx, dy, s.pendingX, s.pendingY, s.resX, s.resY)
 	}
-	// Session epoch, not reloaded current: a racing invalidation
-	// must reject this submission.
-	c.submitLocked(s.epoch, s.host, &evt, cx, cy, now)
+	// Session epoch, not reloaded current: a racing invalidation must reject
+	// this submission.
+	c.submitLocked(s.epoch, s.host, &evt, dx, dy, now)
+	return true
 }
 
 // step advances animated motion to now (seconds) and reports whether frame
@@ -684,8 +726,17 @@ func (c *scrollController) stepWheelLocked(s *scrollSession, now float64) bool {
 		return false
 	}
 	if s.hasClock {
-		c.emitWheelShareLocked(s, now)
+		c.accrueWheelShareLocked(s, now)
 		s.lastStepT = now
+	}
+	// Deliver the accrued integers in one submission before deciding whether
+	// the burst still needs frames: a ready share must never be stranded behind
+	// a settled remainder.
+	if !c.flushWheelQueueLocked(s, now) {
+		c.tracef("burst-flush-overflow sent=(%d,%d)", s.sentX, s.sentY)
+		*s = scrollSession{}
+		c.stopTickLocked()
+		return false
 	}
 	if wheelRemainderSettled(s.pendingX-s.resX, s.pendingY-s.resY) {
 		// Integer delivery is finished; the fractional remainder stays with
