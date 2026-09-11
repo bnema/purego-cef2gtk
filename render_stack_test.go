@@ -68,21 +68,24 @@ func TestConfigureRenderStackEnvironmentSetsPlanHints(t *testing.T) {
 	}
 }
 
-func TestConfigureRenderStackEnvironmentSetsEGLBackingScaleOff(t *testing.T) {
+func TestConfigureRenderStackEnvironmentSetsEGLBackingScaleAuto(t *testing.T) {
 	plan, err := ResolveRenderStack(RenderStackEGL)
 	if err != nil {
 		t.Fatalf("ResolveRenderStack(egl) error = %v", err)
 	}
 	t.Setenv("GSK_RENDERER", "vulkan")
-	t.Setenv(osrBackingScaleEnvVar, "auto")
+	t.Setenv(osrBackingScaleEnvVar, "off")
 
 	ConfigureRenderStackEnvironment(plan)
 
 	if got := os.Getenv("GSK_RENDERER"); got != "opengl" {
 		t.Fatalf("GSK_RENDERER = %q, want opengl", got)
 	}
-	if got := os.Getenv(osrBackingScaleEnvVar); got != "off" {
-		t.Fatalf("%s = %q, want off", osrBackingScaleEnvVar, got)
+	// The GLArea presenter draws the frame into a device-pixel framebuffer, so
+	// the view rect must be device-sized too. See the fix commit for the empty
+	// band this caused on fractional-scale outputs.
+	if got := os.Getenv(osrBackingScaleEnvVar); got != "auto" {
+		t.Fatalf("%s = %q, want auto", osrBackingScaleEnvVar, got)
 	}
 }
 
