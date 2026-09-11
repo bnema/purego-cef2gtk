@@ -101,6 +101,10 @@ type Loader struct {
 	readPixels  func(x, y, width, height int32, format, xtype uint32, pixels unsafe.Pointer)
 	getIntegerv func(pname uint32, params *int32)
 
+	fenceSync      func(condition uint32, flags uint32) uintptr
+	clientWaitSync func(sync uintptr, flags uint32, timeout uint64) uint32
+	deleteSync     func(sync uintptr)
+
 	genQueries          func(n int32, ids *uint32)
 	deleteQueries       func(n int32, ids *uint32)
 	beginQuery          func(target uint32, id uint32)
@@ -215,6 +219,13 @@ func (l *Loader) registerAll() (retErr error) {
 	l.registerOptional("glEndQuery", &l.endQuery)
 	l.registerOptional("glGetQueryObjectuiv", &l.getQueryObjectuiv)
 	l.registerOptional("glGetQueryObjectui64v", &l.getQueryObjectui64v)
+
+	// Fences are core in desktop GL 3.2 and GLES 3.0, and extension-provided
+	// below that. They are the only way to know that a copy has finished reading
+	// a borrowed buffer before we return it to CEF.
+	l.registerOptional("glFenceSync", &l.fenceSync)
+	l.registerOptional("glClientWaitSync", &l.clientWaitSync)
+	l.registerOptional("glDeleteSync", &l.deleteSync)
 
 	// glEGLImageTargetTexture2DOES is extension-provided on some stacks. Keep the
 	// core loader usable when absent; import callers return a clear error instead.

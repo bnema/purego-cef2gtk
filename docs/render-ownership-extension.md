@@ -1,24 +1,29 @@
 # Render ownership extension: approval artifact
 
-Status: **draft for approval**. No production code is included. This is the
-artifact Phase P4 asks for: exact APIs, resource types, synchronization
-ordering, file and task scope, and the tests that would close the gate.
+Status: **approved for implementation, staged**. The owner selected variant B and
+asked for the buffer fix in place on the default `vulkan` path (2026-09-11). The
+egl copy path stays a fallback. No code beyond bindings is in place yet; the
+stages are in §8 and each one must land verified before the next.
 
 Companion record: `docs/render-ownership-decision.md` (evidence, blocked
 options, upstream check).
 
-## 1. Decision requested
+## 1. Decisions
 
 - **D1 — answered: the `vulkan` stack stays the production default.** Owner:
   human, 2026-09-11. EGL is a fallback, not a default. This selects **variant B**
   (§6) and demotes variant A (§5) to the fallback path.
-- **D2 — still open: accept the producer-visibility assumption (§4), or authorise
-  a bounded investigation to try to close it?** Accepting it means the
-  GPU-correctness criterion is amended, not satisfied: acceptance becomes
-  *conditional consumer-ownership acceptance*.
-- **D3 — new, opened by D1: what is the release signal for the client-owned
-  destination?** §12 shows that GDK and GSK expose none. Variant B cannot state a
-  completion-based pool reuse rule without deciding this.
+- **D1a — answered: the buffer fix lands in place on that default path**, staged,
+  with an A/B opt-out retained in the lab so the change can be compared against
+  the current behaviour before it is the only behaviour.
+- **D2 — accepted as stated in §4**: the producer-visibility assumption is
+  recorded, not proven. Acceptance is conditional consumer-ownership acceptance,
+  not satisfaction of the original unqualified criterion.
+- **D3 — resolved by policy (§12 option 2)**: a destination buffer is never
+  rewritten while a live texture references it; it returns to the pool only after
+  that texture is finalized, and a frame is dropped pre-submission when no buffer
+  is free. The residual read-after-release concern stays named in §12 and in the
+  risk list.
 
 Also confirmed by this artifact: the work is split into two sequential lots
 (§8), **ownership first**. Pacing-first is not approvable under the current
