@@ -161,6 +161,16 @@ func (l *Loader) GetError() uint32                           { return l.getError
 func (l *Loader) ReadPixels(x, y, width, height int32, format, xtype uint32, pixels unsafe.Pointer) {
 	l.readPixels(x, y, width, height, format, xtype, pixels)
 }
+
+// GetIntegerv reads an integer state vector. Diagnostics use it to read the
+// viewport the context was initialized with, which is the framebuffer size GTK
+// gave this widget.
+func (l *Loader) GetIntegerv(pname uint32, params *int32) {
+	if l == nil || l.getIntegerv == nil || params == nil {
+		return
+	}
+	l.getIntegerv(pname, params)
+}
 func (l *Loader) TimerQuerySupported() bool {
 	return l != nil && l.genQueries != nil && l.deleteQueries != nil && l.beginQuery != nil && l.endQuery != nil && l.getQueryObjectuiv != nil && l.getQueryObjectui64v != nil
 }

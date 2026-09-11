@@ -290,6 +290,10 @@ type viewportQuerier interface {
 
 const glViewportPname = 0x0BA2
 
+// The geometry trace asserts this at compile time: a loader that silently lost
+// the method would degrade the trace to placeholder values instead of failing.
+var _ viewportQuerier = (*gl.Loader)(nil)
+
 // traceGeometry prints, a bounded number of times, the numbers that decide
 // whether the frame we draw can cover the widget: the framebuffer GL thinks it
 // has, the widget allocation and scale GTK reports, and the frame we are about
