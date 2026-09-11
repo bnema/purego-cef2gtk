@@ -38,7 +38,12 @@ Environment overrides remain available as diagnostics/backcompat escape hatches:
 PUREGO_CEF2GTK_BACKEND=gdk-dmabuf|glarea
 PUREGO_CEF2GTK_ANGLE_BACKEND=vulkan|gl-egl|none
 PUREGO_CEF2GTK_OSR_BACKING_SCALE=auto|on|off
+PUREGO_CEF2GTK_GDK_GRAPHICS_OFFLOAD=1|true|yes|on
 ```
+
+The GDK DMABUF renderer uses `GtkPicture` by default. Graphics offload is
+experimental and must be enabled explicitly with
+`PUREGO_CEF2GTK_GDK_GRAPHICS_OFFLOAD=1`.
 
 `PUREGO_CEF2GTK_OSR_BACKING_SCALE=auto` enables the Linux accelerated-OSR
 HiDPI compatibility path only when the GTK surface scale is greater than 1. In

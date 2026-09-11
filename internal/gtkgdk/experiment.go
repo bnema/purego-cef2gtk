@@ -8,10 +8,9 @@ import (
 
 // Render-path knobs for the GDK DMA-BUF presenter.
 //
-// They exist so a single build can be compared against the previous behaviour
-// without a rebuild: every knob defaults to the experimental value and has an
-// explicit opt-out. None of them is part of the supported configuration
-// surface, and none of them establishes buffer ownership.
+// They exist so a single build can compare render-path experiments without a
+// rebuild. Experimental behaviour requires an explicit opt-in when it is not
+// safe as a general default. None of these knobs establishes buffer ownership.
 const (
 	// GraphicsOffloadEnvVar wraps the presenter picture in GtkGraphicsOffload to
 	// ask the compositor to consume the presented DMA-BUF instead of GSK
