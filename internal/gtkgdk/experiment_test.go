@@ -6,18 +6,14 @@ import (
 	"github.com/bnema/puregotk/v4/glib"
 )
 
-func TestGraphicsOffloadDefaultsToEnabled(t *testing.T) {
-	t.Setenv(GraphicsOffloadEnvVar, "")
-	if !GraphicsOffloadEnabled() {
-		t.Fatal("graphics offload should default to enabled")
-	}
-	for _, value := range []string{"0", "false", "no", "off", "OFF"} {
+func TestGraphicsOffloadDefaultsToDisabled(t *testing.T) {
+	for _, value := range []string{"", "0", "false", "no", "off", "OFF", "invalid"} {
 		t.Setenv(GraphicsOffloadEnvVar, value)
 		if GraphicsOffloadEnabled() {
 			t.Fatalf("graphics offload enabled for %q, want disabled", value)
 		}
 	}
-	for _, value := range []string{"1", "true", "yes", "on"} {
+	for _, value := range []string{"1", "true", "yes", "on", "ON"} {
 		t.Setenv(GraphicsOffloadEnvVar, value)
 		if !GraphicsOffloadEnabled() {
 			t.Fatalf("graphics offload disabled for %q, want enabled", value)

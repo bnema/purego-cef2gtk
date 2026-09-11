@@ -17,7 +17,7 @@ const (
 	// ask the compositor to consume the presented DMA-BUF instead of GSK
 	// compositing the picture contents. GTK may still fall back to compositing
 	// (clipping, transforms, formats), so this is a request, not a guarantee of
-	// direct scanout. Set to "0"/"false"/"off" to wrap nothing.
+	// direct scanout. Set to "1"/"true"/"yes"/"on" to enable it.
 	GraphicsOffloadEnvVar = "PUREGO_CEF2GTK_GDK_GRAPHICS_OFFLOAD"
 	// ImportPriorityEnvVar selects the GLib priority of the GTK-thread frame
 	// import. "default" runs it alongside ordinary main-loop work; "idle"
@@ -37,13 +37,13 @@ const (
 
 // GraphicsOffloadEnabled reports whether the presenter should hand its texture
 // to the compositor through GtkGraphicsOffload. The wrapper is only installed
-// when the loaded GTK exposes the widget (4.14+). Default: enabled.
+// when the loaded GTK exposes the widget (4.14+). Default: disabled.
 func GraphicsOffloadEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(GraphicsOffloadEnvVar))) {
-	case "0", "false", "no", "off":
-		return false
-	default:
+	case "1", "true", "yes", "on":
 		return true
+	default:
+		return false
 	}
 }
 
