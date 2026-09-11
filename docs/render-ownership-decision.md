@@ -180,3 +180,43 @@ The render lab and the frame-pipeline instrumentation ship as
 `instrumentation-only`. No ownership, pacing, stack default, or dependency
 change is included, and the GPU-correctness and pacing criteria remain
 unverified.
+
+## 7. Upstream check before extending the fix to the Vulkan stack
+
+The installed headers (CEF 150.0.17) were compared with upstream CEF master
+before considering any option that widens a safe path to the default `vulkan`
+stack:
+
+- `include/internal/cef_types_linux.h` on master still documents
+  `cef_accelerated_paint_info_t` as "Resources will be released to the underlying
+  pool for reuse when the callback returns from client code", with the same
+  fields: planes of file descriptors, `plane_count`, `modifier`, `format`, and
+  the common extra block. No generation, fence, or completion field was added.
+- `include/cef_render_handler.h` on master still declares exactly one
+  accelerated-paint method, `OnAcceleratedPaint`. There is no release, retain,
+  or fence companion, in either the C++ interface or the C API surface, which
+  exposes a single `on_accelerated_paint` callback with a `const` info pointer.
+- No fence, semaphore, or sync symbol appears anywhere in the installed C API.
+
+`shared_texture_enabled` is what enables the accelerated path here; this bridge
+sets it through `SetAsWindowless(..., true)`. Its comment still claims
+Windows-only support, which does not match the Linux DMA-BUF behaviour observed
+in this repository, so the comment is stale rather than the flag being wrong.
+
+Consequences for option C:
+
+1. Retaining the producer buffer is not expressible through any CEF release
+   entry point, and no CEF version upgrade changes that. It requires a CEF change
+   (patch or upstream feature), which the current scope excludes, plus a
+   `purego-cef` binding update afterwards to expose the new symbols.
+2. The GDK path wraps the DMA-BUF and GSK imports it later, so even a synchronous
+   callback-scoped import would not create client ownership of the contents. On
+   the `vulkan` stack the borrowed-contents problem is structural, not a
+   scheduling artifact.
+3. Only the copy path has an in-tree answer, and it exists only on the `egl`
+   stack (`gl.TexturedQuadCopier` into a client-owned texture), which still needs
+   a completion primitive that must complete before the callback returns.
+
+A `purego-cef` bindings change therefore cannot fix this on its own: it can only
+bind what libcef exports, and libcef exports nothing that retains the resource
+or orders a consumer read against it.
