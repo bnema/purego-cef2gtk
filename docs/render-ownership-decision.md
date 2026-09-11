@@ -50,7 +50,7 @@ its caller return. There is no CEF-side retention.
 | --- | --- |
 | FD close lifetime | The plane FD belongs to the SDK's buffer handle and is passed borrowed. Keeping a duplicate keeps the file open; it does not extend anything else. |
 | Buffer pool reuse lifetime | Pool-owned. Contents may be overwritten after the callback returns. Not observable from the bridge. |
-| Producer write completion | Not observable through the CEF API. No fence, event, or completion callback is exposed. |
+| Producer write completion | Not observable through the CEF API: no fence, event, or completion callback is exposed. Absence of a fence parameter does not prove the producer is unsynchronised, since implicit DMA-BUF ordering may exist; it means the bridge cannot check. |
 | Consumer read completion | Not observable today: import is a draw submission with no wait. |
 
 Descriptor identity is not buffer generation identity. `dup(2)` preserves
@@ -206,7 +206,8 @@ in this repository, so the comment is stale rather than the flag being wrong.
 Consequences for option C:
 
 1. Retaining the producer buffer is not expressible through any CEF release
-   entry point, and no CEF version upgrade changes that. It requires a CEF change
+   entry point, and no upgrade to the revision checked here changes that. It
+   requires a CEF change
    (patch or upstream feature), which the current scope excludes, plus a
    `purego-cef` binding update afterwards to expose the new symbols.
 2. The GDK path wraps the DMA-BUF and GSK imports it later, so even a synchronous

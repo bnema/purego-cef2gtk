@@ -353,8 +353,14 @@ func (r *Renderer) InitializeOnGTKThread() error {
 
 // ImportAndQueueAsync duplicates callback-scoped CEF DMABUF FDs before the CEF
 // callback returns, then posts the GDK texture import/swap to the GTK main
-// thread. This mirrors Dumber's old OnPaint staging model: CEF never waits for
-// GTK, and GTK always consumes an owned, callback-independent frame.
+// thread. CEF never waits for GTK.
+//
+// Ownership warning: duplicating the descriptor keeps it open, it does not
+// retain the contents. The callback contract releases the resource to its pool
+// when this returns, and GDK wraps the DMA-BUF rather than copying it, so this is
+// a borrowed frame, not a callback-independent owned one. Making the import
+// synchronous would not change that, because GSK still imports at paint time.
+// See docs/render-ownership-decision.md.
 func (r *Renderer) ImportAndQueueAsync(info *cef.AcceleratedPaintInfo, onError func(error)) error {
 	if r == nil {
 		return ErrNilRenderer
