@@ -532,6 +532,7 @@ func (c *scrollController) impulseWheel(now float64, x, y float64, scale float64
 	if pendingOverload(s.pendingX, s.pendingY) {
 		c.overloadCompletions++
 		s.pendingX, s.pendingY = 0, 0
+		s.queuedX, s.queuedY = 0, 0
 		s.burstActive = false
 		c.stopTickLocked()
 		return false
@@ -618,12 +619,12 @@ func (c *scrollController) flushWheelQueueLocked(s *scrollSession, now float64) 
 	if s.precise {
 		evt.Modifiers |= uint32(cef.EventFlagsEventflagPrecisionScrollingDelta)
 	}
-	if c.tracing() {
-		c.tracef("wheel-flush delivered=(%d,%d) pending=(%.1f,%.1f) res=(%.2f,%.2f)", dx, dy, s.pendingX, s.pendingY, s.resX, s.resY)
-	}
 	// Session epoch, not reloaded current: a racing invalidation must reject
 	// this submission.
-	c.submitLocked(s.epoch, s.host, &evt, dx, dy, now)
+	applied := c.submitLocked(s.epoch, s.host, &evt, dx, dy, now)
+	if c.tracing() {
+		c.tracef("wheel-flush delivered=(%d,%d) applied=%v pending=(%.1f,%.1f) res=(%.2f,%.2f)", dx, dy, applied, s.pendingX, s.pendingY, s.resX, s.resY)
+	}
 	return true
 }
 
@@ -712,6 +713,9 @@ func (c *scrollController) stepWheelLocked(s *scrollSession, now float64) bool {
 	}
 	if (now - s.lastImpulseT) > scrollWheelIdleTimeout {
 		px, py := s.pendingX, s.pendingY
+		// Deliver what accrual already took out of pending before retiring the
+		// burst; the pending remainder itself is still discarded below.
+		c.flushWheelQueueLocked(s, now)
 		c.endBurstLocked(now, s)
 		c.tracef("burst-idle discarded=(%.1f,%.1f) sent=(%d,%d) overloads=%d", px, py, s.sentX, s.sentY, c.overloadCompletions)
 		*s = scrollSession{}
@@ -720,6 +724,9 @@ func (c *scrollController) stepWheelLocked(s *scrollSession, now float64) bool {
 	}
 	if s.hasClock && now-s.lastStepT > scrollFrameStallThreshold {
 		c.tracef("burst-stall gap=%.3f discarded=(%.1f,%.1f) sent=(%d,%d)", now-s.lastStepT, s.pendingX, s.pendingY, s.sentX, s.sentY)
+		// No catch-up: the pending remainder is dropped, but the integers already
+		// accrued out of it are delivered in this one tick.
+		c.flushWheelQueueLocked(s, now)
 		s.pendingX, s.pendingY = 0, 0
 		*s = scrollSession{}
 		c.stopTickLocked()
