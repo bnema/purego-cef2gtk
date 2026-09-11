@@ -246,25 +246,39 @@ func TestFirstDMABUFTextureSwapDoesNotFireWhenBuildFails(t *testing.T) {
 }
 
 func TestRetireOwnedTextureLimitsRetiredTextures(t *testing.T) {
-	r := &Renderer{}
+	const limit = 3
+	r := &Renderer{retireLimit: limit}
 
 	// Push up to the limit.
-	for i := 0; i < retiredTextureLimit; i++ {
+	for i := 0; i < limit; i++ {
 		r.retireOwnedTexture(&ownedTexture{})
 	}
-	if got := r.retiredCount; got != retiredTextureLimit {
-		t.Fatalf("retired count after filling = %d, want %d", got, retiredTextureLimit)
+	if got := r.retiredCount; got != limit {
+		t.Fatalf("retired count after filling = %d, want %d", got, limit)
 	}
 
 	// Adding one more should release the oldest but stay at the limit.
 	r.retireOwnedTexture(&ownedTexture{})
-	if got := r.retiredCount; got != retiredTextureLimit {
-		t.Fatalf("retired count after overflow = %d, want %d", got, retiredTextureLimit)
+	if got := r.retiredCount; got != limit {
+		t.Fatalf("retired count after overflow = %d, want %d", got, limit)
 	}
 
 	r.releaseRetiredTextures()
 	if got := r.retiredCount; got != 0 {
 		t.Fatalf("retired count after release = %d, want 0", got)
+	}
+}
+
+func TestRetiredTexturesDefaultLimitBoundsRetention(t *testing.T) {
+	r := &Renderer{}
+	for i := 0; i < retiredTextureStorage; i++ {
+		r.retireOwnedTexture(&ownedTexture{})
+	}
+	if got, want := r.retiredCount, defaultRetiredTextureLimit; got != want {
+		t.Fatalf("retired count = %d, want the default limit %d", got, want)
+	}
+	if got := r.retiredAt(r.retiredCount); got != nil {
+		t.Fatalf("retiredAt past the limit = %p, want nil", got)
 	}
 }
 
@@ -334,7 +348,7 @@ func TestEnqueueOwnedFrameDoesNotDuplicateFreshPendingIdle(t *testing.T) {
 	calls := 0
 	r := &Renderer{
 		closeFD: unix.Close,
-		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+		idleAddOnce: func(int, *glib.SourceOnceFunc, uintptr) uint {
 			calls++
 			return uint(calls)
 		},
@@ -356,7 +370,7 @@ func TestEnqueueOwnedFrameReschedulesStalePendingIdle(t *testing.T) {
 	calls := 0
 	r := &Renderer{
 		closeFD: unix.Close,
-		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+		idleAddOnce: func(int, *glib.SourceOnceFunc, uintptr) uint {
 			calls++
 			return uint(calls)
 		},
@@ -380,7 +394,7 @@ func TestEnqueueOwnedFrameReschedulesStalePendingIdle(t *testing.T) {
 func TestEnqueueOwnedFrameClearsPendingScheduledWhenIdleScheduleFails(t *testing.T) {
 	r := &Renderer{
 		closeFD: unix.Close,
-		idleAddOnce: func(*glib.SourceOnceFunc, uintptr) uint {
+		idleAddOnce: func(int, *glib.SourceOnceFunc, uintptr) uint {
 			return 0
 		},
 	}

@@ -25,8 +25,12 @@ import (
 )
 
 const (
-	retiredTextureLimit   = 16
-	stalePendingFrameWait = 250 * time.Millisecond
+	// retiredTextureStorage is the compile-time ring size. How many entries are
+	// actually kept referenced is the runtime retireLimit, which the render-path
+	// knobs can lower.
+	retiredTextureStorage      = 16
+	defaultRetiredTextureLimit = 2
+	stalePendingFrameWait      = 250 * time.Millisecond
 )
 
 var (
@@ -74,7 +78,26 @@ type dmabufTextureBuilder interface {
 	BuildWithDestroyNotifyPointer(uintptr, uintptr) (*gdk.Texture, error)
 }
 
-type idleOnceScheduler func(*glib.SourceOnceFunc, uintptr) uint
+// idleOnceScheduler schedules a one-shot idle callback at a GLib priority.
+// glib.IdleAddOnce always uses G_PRIORITY_DEFAULT_IDLE, so a lower (numerically
+// smaller) priority has to go through an explicit idle source.
+type idleOnceScheduler func(priority int, callback *glib.SourceOnceFunc, data uintptr) uint
+
+// scheduleIdleOnce runs cb once at the given GLib priority. The adapter that
+// IdleAddFull keeps must outlive the schedule, so the renderer holds it.
+func (r *Renderer) scheduleIdleOnce(priority int, callback *glib.SourceOnceFunc, data uintptr) uint {
+	if priority == glibPriorityDefaultIdle {
+		return glib.IdleAddOnce(callback, data)
+	}
+	once := glib.SourceFunc(func(d uintptr) bool {
+		(*callback)(d)
+		return false
+	})
+	r.pendingMu.Lock()
+	r.pendingSourceFunc = &once
+	r.pendingMu.Unlock()
+	return glib.IdleAddFull(priority, &once, data, nil)
+}
 
 // ownedTexture pairs a GdkTexture whose plane FD lifetime is managed by GDK's
 // native close(2) GDestroyNotify.
@@ -113,9 +136,10 @@ type Renderer struct {
 	formats             dmabufFormatSet
 	builder             dmabufTextureBuilder
 	current             *ownedTexture
-	retired             [retiredTextureLimit]*ownedTexture
+	retired             [retiredTextureStorage]*ownedTexture
 	retiredStart        int
 	retiredCount        int
+	retireLimit         int
 	pictureSetPaintable func(*gdk.Texture)
 	firstTextureSwapMu  sync.Mutex
 	firstTextureSwap    func()
@@ -127,6 +151,8 @@ type Renderer struct {
 	pendingScheduledAt time.Time
 	pendingSourceID    uint
 	pendingGeneration  uint64
+	pendingSourceFunc  *glib.SourceFunc
+	importPriority     int
 
 	dupFD       func(int) (int, error)
 	closeFD     func(int) error
@@ -209,15 +235,18 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 		return nil, fmt.Errorf("%w: %v", ErrCloseDestroyNotifyUnavailable, err)
 	}
 
-	return &Renderer{
-		widget:      widget,
-		picture:     picture,
-		offload:     offload,
-		builder:     builder,
-		dupFD:       dupFDClOExec,
-		closeFD:     unix.Close,
-		idleAddOnce: glib.IdleAddOnce,
-	}, nil
+	r := &Renderer{
+		widget:  widget,
+		picture: picture,
+		offload: offload,
+		builder: builder,
+		dupFD:   dupFDClOExec,
+		closeFD: unix.Close,
+	}
+	r.idleAddOnce = r.scheduleIdleOnce
+	r.importPriority = importPriority()
+	r.retireLimit = retiredTextureLimitFromEnv()
+	return r, nil
 }
 
 func newTextureBuilder() (builder dmabufTextureBuilder, retErr error) {
@@ -437,9 +466,9 @@ func (r *Renderer) schedulePendingImport(generation uint64) {
 	})
 	scheduler := r.idleAddOnce
 	if scheduler == nil {
-		scheduler = glib.IdleAddOnce
+		scheduler = r.scheduleIdleOnce
 	}
-	sourceID := scheduler(&cb, 0)
+	sourceID := scheduler(r.importPriority, &cb, 0)
 	r.pendingMu.Lock()
 	defer r.pendingMu.Unlock()
 	if !r.pendingScheduled || r.pendingGeneration != generation {
@@ -721,18 +750,31 @@ func closeOwnedFrame(frame *ownedFrame, closeFD func(int) error) {
 	}
 }
 
+// retireLimitOrDefault bounds how many superseded textures stay referenced. A
+// zero value (unit fakes that skip the constructor) means the default.
+func (r *Renderer) retireLimitOrDefault() int {
+	if r == nil || r.retireLimit < 1 {
+		return defaultRetiredTextureLimit
+	}
+	if r.retireLimit > retiredTextureStorage {
+		return retiredTextureStorage
+	}
+	return r.retireLimit
+}
+
 func (r *Renderer) retireOwnedTexture(owned *ownedTexture) {
 	if r == nil || owned == nil {
 		return
 	}
-	if r.retiredCount == retiredTextureLimit {
+	limit := r.retireLimitOrDefault()
+	if r.retiredCount == limit {
 		oldest := r.retired[r.retiredStart]
 		r.retired[r.retiredStart] = owned
-		r.retiredStart = (r.retiredStart + 1) % retiredTextureLimit
+		r.retiredStart = (r.retiredStart + 1) % limit
 		r.releaseOwnedTexture(oldest)
 		return
 	}
-	index := (r.retiredStart + r.retiredCount) % retiredTextureLimit
+	index := (r.retiredStart + r.retiredCount) % limit
 	r.retired[index] = owned
 	r.retiredCount++
 }
@@ -741,18 +783,19 @@ func (r *Renderer) retiredAt(offset int) *ownedTexture {
 	if r == nil || offset < 0 || offset >= r.retiredCount {
 		return nil
 	}
-	return r.retired[(r.retiredStart+offset)%retiredTextureLimit]
+	return r.retired[(r.retiredStart+offset)%r.retireLimitOrDefault()]
 }
 
 func (r *Renderer) releaseRetiredTextures() {
 	if r == nil {
 		return
 	}
+	limit := r.retireLimitOrDefault()
 	for r.retiredCount > 0 {
 		index := r.retiredStart
 		r.releaseOwnedTexture(r.retired[index])
 		r.retired[index] = nil
-		r.retiredStart = (r.retiredStart + 1) % retiredTextureLimit
+		r.retiredStart = (r.retiredStart + 1) % limit
 		r.retiredCount--
 	}
 	r.retiredStart = 0
