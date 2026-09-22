@@ -84,6 +84,7 @@ type InputBridge struct {
 
 	onMiddleClick       func(x, y float64) bool
 	onClickDiagnostic   func(ClickDiagnosticEvent)
+	onPointerRelease    func()
 	middleClickConsumed bool
 	scroll              *scrollController
 	selectionText       func() string
@@ -119,6 +120,27 @@ func (ib *InputBridge) ArmDnd() {
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.ArmDnd()
 	}
+}
+
+// PointerPressed reports whether GTK still tracks a held pointer button.
+func (ib *InputBridge) PointerPressed() bool {
+	if ib == nil {
+		return false
+	}
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	return ib.pointerTracker.Phase() != PointerIdle
+}
+
+// setPointerReleaseObserver installs a GTK-thread callback run when the widget
+// receives a button release, before the release is forwarded to CEF.
+func (ib *InputBridge) setPointerReleaseObserver(fn func()) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.onPointerRelease = fn
+	ib.mu.Unlock()
 }
 
 // DisarmDnd restores pointer-cancel handling after native drag-and-drop completes.
@@ -671,11 +693,14 @@ func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCoun
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.Release(x, y, button, mods)
 	}
-	host, scale, detached := ib.host, ib.scale, ib.detached
+	host, scale, detached, onRelease := ib.host, ib.scale, ib.detached, ib.onPointerRelease
 	ib.mu.Unlock()
 	if detached {
 		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: button, ClickCount: clickCount, DropReason: ClickDropReasonDetached})
 		return
+	}
+	if onRelease != nil {
+		onRelease()
 	}
 	if host == nil {
 		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: button, ClickCount: clickCount, DropReason: ClickDropReasonMissingHost})
