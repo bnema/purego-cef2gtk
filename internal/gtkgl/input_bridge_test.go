@@ -1114,3 +1114,58 @@ func TestMirrorClipboardShortcut(t *testing.T) {
 		t.Fatalf("shortcut=(%q,%q), want copy,selected", gotAction, gotText)
 	}
 }
+
+func TestClickDiagnosticsOrderingAndRoutingOutcomes(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	var events []ClickDiagnosticEvent
+	ib.SetClickDiagnosticHandler(func(event ClickDiagnosticEvent) { events = append(events, event) })
+
+	ib.onMousePress(10, 20, 1, 0, 2)
+	ib.onMouseRelease(10, 20, 1, 0, 2)
+
+	want := []ClickDiagnosticPhase{ClickDiagnosticPressed, ClickDiagnosticForwarded, ClickDiagnosticReleased, ClickDiagnosticForwarded}
+	if len(events) != len(want) {
+		t.Fatalf("diagnostic phases = %v, want %v", events, want)
+	}
+	for i, phase := range want {
+		if events[i].Phase != phase || events[i].Button != 1 || events[i].ClickCount != 2 || events[i].DropReason != ClickDropReasonNone {
+			t.Fatalf("event %d = %+v, want phase %v and routing metadata only", i, events[i], phase)
+		}
+	}
+}
+
+func TestClickDiagnosticsReportConsumedCancelledAndDropped(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	var events []ClickDiagnosticEvent
+	ib.SetClickDiagnosticHandler(func(event ClickDiagnosticEvent) { events = append(events, event) })
+	ib.SetMiddleClickHandler(func(float64, float64) bool { return true })
+	ib.onMousePress(1, 2, 2, 0, 1)
+	ib.onMouseCancel()
+	ib.SetHost(nil)
+	ib.onMousePress(3, 4, 1, 0, 1)
+
+	want := []ClickDiagnosticPhase{ClickDiagnosticPressed, ClickDiagnosticConsumed, ClickDiagnosticCancelled, ClickDiagnosticConsumed, ClickDiagnosticPressed, ClickDiagnosticDropped}
+	if len(events) != len(want) {
+		t.Fatalf("events = %+v, want phases %v", events, want)
+	}
+	for i, phase := range want {
+		if events[i].Phase != phase {
+			t.Fatalf("event %d phase = %v, want %v", i, events[i].Phase, phase)
+		}
+	}
+	if events[len(events)-1].DropReason != ClickDropReasonMissingHost {
+		t.Fatalf("drop reason = %v, want missing host", events[len(events)-1].DropReason)
+	}
+}
+
+func TestClickDiagnosticPanicDoesNotAffectForwarding(t *testing.T) {
+	host := &recordingBrowserHost{}
+	ib := NewInputBridge(host, 1)
+	ib.SetClickDiagnosticHandler(func(ClickDiagnosticEvent) { panic("diagnostic failure") })
+	ib.onMousePress(1, 2, 1, 0, 1)
+	if len(host.clicks) != 1 {
+		t.Fatalf("forwarded clicks = %d, want 1", len(host.clicks))
+	}
+}

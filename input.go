@@ -23,6 +23,9 @@ type InputOptions struct {
 	// OnMiddleClick is invoked when GTK receives a middle-button press. Returning
 	// true consumes the event before it is forwarded to CEF.
 	OnMiddleClick func(x, y float64) bool
+	// OnClickDiagnostic observes privacy-safe click routing lifecycle events.
+	// It receives routing metadata only and cannot affect event consumption.
+	OnClickDiagnostic func(ClickDiagnosticEvent)
 	// Scroll configures GTK scroll delta translation before forwarding to CEF.
 	Scroll ScrollOptions
 	// OnScroll is invoked for scroll begin/update/end/decelerate notifications.
@@ -44,6 +47,37 @@ type InputOptions struct {
 	// OnClipboardShortcut is invoked for explicit Ctrl+C/Ctrl+X shortcuts when
 	// SelectionText returns non-empty text. action is "copy" or "cut".
 	OnClipboardShortcut func(action, text string)
+}
+
+// ClickDiagnosticPhase identifies a click routing boundary.
+type ClickDiagnosticPhase int
+
+const (
+	ClickDiagnosticPressed ClickDiagnosticPhase = iota
+	ClickDiagnosticReleased
+	ClickDiagnosticCancelled
+	ClickDiagnosticForwarded
+	ClickDiagnosticConsumed
+	ClickDiagnosticDropped
+)
+
+// ClickDropReason identifies why a received click event was not routed.
+type ClickDropReason int
+
+const (
+	ClickDropReasonNone ClickDropReason = iota
+	ClickDropReasonMissingHost
+	ClickDropReasonDetached
+	ClickDropReasonMissingInputState
+)
+
+// ClickDiagnosticEvent contains privacy-safe routing metadata. It deliberately
+// excludes coordinates, modifiers, URLs, page content, and user data.
+type ClickDiagnosticEvent struct {
+	Phase      ClickDiagnosticPhase
+	Button     uint
+	ClickCount int
+	DropReason ClickDropReason
 }
 
 // ScrollPhase identifies the stage of a GTK scroll operation.
@@ -180,6 +214,7 @@ func (v *View) AttachInputToWidget(host cef.BrowserHost, widget *gtk.Widget, opt
 	bridge := gtkgl.NewInputBridge(host, scale)
 	bridge.SetProfiler(v.profileRecorder())
 	bridge.SetMiddleClickHandler(opts.OnMiddleClick)
+	bridge.SetClickDiagnosticHandler(toGTKGLClickDiagnosticHandler(opts.OnClickDiagnostic))
 	bridge.SetScrollOptions(toGTKGLScrollOptions(opts.Scroll), toGTKGLScrollHandler(opts.OnScroll))
 	bridge.SetNavigationSwipeHandler(toGTKGLNavigationSwipeOptions(opts.NavigationSwipe), opts.CanNavigateBack, opts.CanNavigateForward, toGTKGLNavigationSwipeHandler(opts.OnNavigateSwipe))
 	bridge.SetClipboardShortcutHandler(opts.SelectionText, opts.OnClipboardShortcut)
@@ -215,6 +250,20 @@ func viewFileDropPolicy(v *View) func([]string) bool {
 	return func(paths []string) bool {
 		hook := v.snapshotHooks().OnFileDrop
 		return hook == nil || hook(paths)
+	}
+}
+
+func toGTKGLClickDiagnosticHandler(fn func(ClickDiagnosticEvent)) func(gtkgl.ClickDiagnosticEvent) {
+	if fn == nil {
+		return nil
+	}
+	return func(event gtkgl.ClickDiagnosticEvent) {
+		fn(ClickDiagnosticEvent{
+			Phase:      ClickDiagnosticPhase(event.Phase),
+			Button:     event.Button,
+			ClickCount: event.ClickCount,
+			DropReason: ClickDropReason(event.DropReason),
+		})
 	}
 }
 

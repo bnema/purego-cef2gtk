@@ -34,6 +34,33 @@ type controllerBinding struct {
 	handlers   []uint
 }
 
+type ClickDiagnosticPhase int
+
+const (
+	ClickDiagnosticPressed ClickDiagnosticPhase = iota
+	ClickDiagnosticReleased
+	ClickDiagnosticCancelled
+	ClickDiagnosticForwarded
+	ClickDiagnosticConsumed
+	ClickDiagnosticDropped
+)
+
+type ClickDropReason int
+
+const (
+	ClickDropReasonNone ClickDropReason = iota
+	ClickDropReasonMissingHost
+	ClickDropReasonDetached
+	ClickDropReasonMissingInputState
+)
+
+type ClickDiagnosticEvent struct {
+	Phase      ClickDiagnosticPhase
+	Button     uint
+	ClickCount int
+	DropReason ClickDropReason
+}
+
 type InputBridge struct {
 	mu    sync.Mutex
 	host  cef.BrowserHost
@@ -56,6 +83,7 @@ type InputBridge struct {
 	imContextCommitHandler uint
 
 	onMiddleClick       func(x, y float64) bool
+	onClickDiagnostic   func(ClickDiagnosticEvent)
 	middleClickConsumed bool
 	scroll              *scrollController
 	selectionText       func() string
@@ -113,6 +141,25 @@ func (ib *InputBridge) SetScale(scale float64) {
 	ib.mu.Lock()
 	ib.scale = normalizeScale(scale)
 	ib.mu.Unlock()
+}
+
+// SetClickDiagnosticHandler configures an observational click-routing callback.
+func (ib *InputBridge) SetClickDiagnosticHandler(fn func(ClickDiagnosticEvent)) {
+	if ib == nil {
+		return
+	}
+	ib.mu.Lock()
+	ib.onClickDiagnostic = fn
+	ib.mu.Unlock()
+}
+func (ib *InputBridge) emitClickDiagnostic(e ClickDiagnosticEvent) {
+	ib.mu.Lock()
+	fn := ib.onClickDiagnostic
+	ib.mu.Unlock()
+	if fn != nil {
+		// Diagnostics are observational and must never alter input routing.
+		func() { defer func() { _ = recover() }(); fn(e) }()
+	}
 }
 
 // SetMiddleClickHandler configures a callback for middle-button press events.
@@ -588,20 +635,26 @@ func (ib *InputBridge) onMouseMove(x, y float64, mods uint, leave bool) {
 }
 
 func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount int) {
-	// A press grabs the pointer: retire animated motion before handling it.
+	ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticPressed, Button: button, ClickCount: clickCount})
 	ib.scroll.cancelNow()
 	ib.mu.Lock()
 	ib.lastX, ib.lastY = x, y
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.Press(x, y, button, mods)
 	}
-	host, scale, consumeMiddle := ib.host, ib.scale, ib.onMiddleClick
+	host, scale, consumeMiddle, detached := ib.host, ib.scale, ib.onMiddleClick, ib.detached
 	ib.mu.Unlock()
+	if detached {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: button, ClickCount: clickCount, DropReason: ClickDropReasonDetached})
+		return
+	}
 	if host == nil {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: button, ClickCount: clickCount, DropReason: ClickDropReasonMissingHost})
 		return
 	}
 	if button == 2 && consumeMiddle != nil && consumeMiddle(x, y) {
 		ib.setMiddleClickConsumed(true)
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticConsumed, Button: button, ClickCount: clickCount})
 		return
 	}
 	if button == 2 {
@@ -609,27 +662,34 @@ func (ib *InputBridge) onMousePress(x, y float64, button, mods uint, clickCount 
 	}
 	evt := BuildMouseEvent(x, y, mods, scale)
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 0, int32(clickCount))
+	ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticForwarded, Button: button, ClickCount: clickCount})
 }
-
 func (ib *InputBridge) onMouseRelease(x, y float64, button, mods uint, clickCount int) {
+	ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticReleased, Button: button, ClickCount: clickCount})
 	ib.mu.Lock()
 	ib.lastX, ib.lastY = x, y
 	if ib.pointerTracker != nil {
 		ib.pointerTracker.Release(x, y, button, mods)
 	}
-	host, scale := ib.host, ib.scale
+	host, scale, detached := ib.host, ib.scale, ib.detached
 	ib.mu.Unlock()
+	if detached {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: button, ClickCount: clickCount, DropReason: ClickDropReasonDetached})
+		return
+	}
 	if host == nil {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: button, ClickCount: clickCount, DropReason: ClickDropReasonMissingHost})
 		return
 	}
 	if button == 2 && ib.consumeMiddleClickRelease() {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticConsumed, Button: button, ClickCount: clickCount})
 		return
 	}
 	state := mods &^ gdkButtonMask(button)
 	evt := BuildMouseEvent(x, y, state, scale)
 	host.SendMouseClickEvent(&evt, TranslateMouseButton(button), 1, int32(clickCount))
+	ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticForwarded, Button: button, ClickCount: clickCount})
 }
-
 func (ib *InputBridge) onMouseCancel() {
 	if ib == nil {
 		return
@@ -639,19 +699,30 @@ func (ib *InputBridge) onMouseCancel() {
 	tracker := ib.pointerTracker
 	if tracker == nil {
 		ib.mu.Unlock()
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticCancelled, DropReason: ClickDropReasonMissingInputState})
 		return
 	}
 	abort, _, canceled := tracker.cancel()
-	consumedMiddleClick := canceled && abort.Button == 2 && ib.middleClickConsumed
-	if consumedMiddleClick {
+	consumed := canceled && abort.Button == 2 && ib.middleClickConsumed
+	if consumed {
 		ib.middleClickConsumed = false
 	}
-	host, scale := ib.host, ib.scale
+	host, scale, detached := ib.host, ib.scale, ib.detached
 	ib.mu.Unlock()
-	if !canceled || host == nil {
+	if !canceled {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticCancelled, DropReason: ClickDropReasonMissingInputState})
 		return
 	}
-	if !consumedMiddleClick {
+	ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticCancelled, Button: abort.Button, ClickCount: 1})
+	if detached {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: abort.Button, ClickCount: 1, DropReason: ClickDropReasonDetached})
+		return
+	}
+	if host == nil {
+		ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: ClickDiagnosticDropped, Button: abort.Button, ClickCount: 1, DropReason: ClickDropReasonMissingHost})
+		return
+	}
+	if !consumed {
 		if profiler := ib.profiler.Load(); profiler != nil {
 			profiler.RecordPressWithoutMatchedRelease()
 		}
@@ -660,6 +731,11 @@ func (ib *InputBridge) onMouseCancel() {
 		host.SendMouseClickEvent(&evt, TranslateMouseButton(abort.Button), 1, 1)
 	}
 	host.SendCaptureLostEvent()
+	phase := ClickDiagnosticForwarded
+	if consumed {
+		phase = ClickDiagnosticConsumed
+	}
+	ib.emitClickDiagnostic(ClickDiagnosticEvent{Phase: phase, Button: abort.Button, ClickCount: 1})
 }
 
 func gdkButtonMask(button uint) uint {
