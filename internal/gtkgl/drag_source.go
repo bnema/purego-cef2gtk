@@ -239,6 +239,15 @@ func (b *DragBridge) Start(browser cef.Browser, data cef.DragData, offered cef.D
 		if !b.protocol.IsStarting(gen) {
 			return
 		}
+		// GTK dispatches queued pointer events before this idle callback. If the
+		// button was already released, a native drag would have no implicit grab
+		// to own and the compositor may never finish it, leaving CEF stuck in
+		// drag mode. End the CEF drag instead of starting an orphaned one.
+		if b.input != nil && !b.input.PointerPressed() {
+			traceDND("source drag cancelled before native start: pointer released")
+			b.protocol.Cancel(gen)
+			return
+		}
 		resources, err := b.startNative(payload, offered, x, y)
 		if err != nil || resources == nil || resources.Drag == nil {
 			if resources != nil {

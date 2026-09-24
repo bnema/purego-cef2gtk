@@ -1337,3 +1337,79 @@ func TestDragBridgeDetachMakesAcceptedIdleStale(t *testing.T) {
 		t.Fatalf("detach completion=%v/%d", h.ended, h.systems)
 	}
 }
+
+func newOrphanDragTestBridge(t *testing.T) (*DragBridge, *InputBridge, *dragTestHost, *func(), *int) {
+	t.Helper()
+	input := NewInputBridge(&recordingBrowserHost{}, 1)
+	h := &dragTestHost{}
+	b := NewDragBridge(nil, input, h)
+	idle := new(func())
+	starts := new(int)
+	b.schedule = func(fn func()) uint { *idle = fn; return 1 }
+	b.startNative = func(dragPayload, cef.DragOperationsMask, int32, int32) (*nativeDragResources, error) {
+		*starts++
+		return &nativeDragResources{Drag: &gdk.Drag{}}, nil
+	}
+	b.cleanupNative = func(*nativeDragResources) {}
+	return b, input, h, idle, starts
+}
+
+func TestDragBridgeReleaseBeforeNativeStartEndsCEFDrag(t *testing.T) {
+	b, input, h, idle, starts := newOrphanDragTestBridge(t)
+	input.onMousePress(1, 1, 1, 0, 1)
+	if b.Start(&dragTestBrowser{host: h}, &dragTestData{link: "https://example.invalid/"}, cef.DragOperationsMaskDragOperationLink, 1, 1) != 1 {
+		t.Fatal("start rejected")
+	}
+	input.onMouseRelease(2, 2, 1, 0, 1)
+	(*idle)()
+	if *starts != 0 {
+		t.Fatalf("native drag started after release: %d", *starts)
+	}
+	if len(h.ended) != 1 || h.ended[0].Operation != 0 || h.systems != 1 {
+		t.Fatalf("CEF drag not ended exactly once: ended=%v systems=%d", h.ended, h.systems)
+	}
+	if _, active := b.protocol.CurrentGeneration(); active {
+		t.Fatal("protocol still active")
+	}
+}
+
+func TestDragBridgeIdleSkipsNativeStartWithoutHeldPointer(t *testing.T) {
+	b, _, h, idle, starts := newOrphanDragTestBridge(t)
+	if b.Start(&dragTestBrowser{host: h}, &dragTestData{text: "card"}, cef.DragOperationsMaskDragOperationMove, 1, 1) != 1 {
+		t.Fatal("start rejected")
+	}
+	(*idle)()
+	if *starts != 0 {
+		t.Fatalf("native drag started without held pointer: %d", *starts)
+	}
+	if len(h.ended) != 1 || h.systems != 1 {
+		t.Fatalf("CEF drag not ended exactly once: ended=%v systems=%d", h.ended, h.systems)
+	}
+}
+
+func TestDragBridgeHeldPointerStartsNativeDrag(t *testing.T) {
+	b, input, h, idle, starts := newOrphanDragTestBridge(t)
+	input.onMousePress(1, 1, 1, 0, 1)
+	if b.Start(&dragTestBrowser{host: h}, &dragTestData{text: "card"}, cef.DragOperationsMaskDragOperationMove, 1, 1) != 1 {
+		t.Fatal("start rejected")
+	}
+	(*idle)()
+	if *starts != 1 {
+		t.Fatalf("native starts=%d, want 1", *starts)
+	}
+	if len(h.ended) != 0 || h.systems != 0 {
+		t.Fatalf("active drag ended early: ended=%v systems=%d", h.ended, h.systems)
+	}
+	if _, active := b.protocol.CurrentGeneration(); !active {
+		t.Fatal("protocol not active")
+	}
+}
+
+func TestDragBridgeReleaseWithoutSourceDragIsNoop(t *testing.T) {
+	_, input, h, _, _ := newOrphanDragTestBridge(t)
+	input.onMousePress(1, 1, 1, 0, 1)
+	input.onMouseRelease(1, 1, 1, 0, 1)
+	if len(h.ended) != 0 || h.systems != 0 {
+		t.Fatalf("plain click ended a drag: ended=%v systems=%d", h.ended, h.systems)
+	}
+}

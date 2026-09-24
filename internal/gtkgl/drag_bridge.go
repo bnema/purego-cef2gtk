@@ -131,7 +131,24 @@ func NewDragBridge(widget *gtk.Widget, input *InputBridge, host cef.BrowserHost)
 	b.newDragData = cef.DragDataCreate
 	b.newInboundData = gtkdnd.NewInboundDragData
 	b.newDropSource = newNativeDropSource
+	input.setPointerReleaseObserver(b.pointerReleased)
 	return b
+}
+
+// pointerReleased ends a source drag whose button release reached the widget.
+// A live native drag owns the pointer grab, so the widget never sees that
+// release; receiving it means the drag is still starting or the compositor
+// rejected the grab. Without this, CEF stays in drag mode and ignores clicks.
+func (b *DragBridge) pointerReleased() {
+	if b == nil {
+		return
+	}
+	gen, active := b.protocol.CurrentGeneration()
+	if !active {
+		return
+	}
+	traceDND("source drag cancelled: pointer released outside native grab")
+	b.protocol.Cancel(gen)
 }
 
 func (b *DragBridge) Attach() bool {
