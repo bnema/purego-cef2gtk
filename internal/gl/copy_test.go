@@ -195,6 +195,38 @@ func TestNewTexturedQuadCopierDefaultsToDesktopShaders(t *testing.T) {
 	}
 }
 
+func TestCopyImportedRegionToOwnedSamplesOnlyContentRect(t *testing.T) {
+	fd := newFakeDriver()
+	copier, err := NewTexturedQuadCopier(fd)
+	if err != nil {
+		t.Fatalf("NewTexturedQuadCopier: %v", err)
+	}
+	// 16x8 frame with 4px pillarbox bars on each side.
+	region := dmabuf.Rect{X: 4, Y: 0, Width: 8, Height: 8}
+	if _, err := copier.CopyImportedRegionToOwned(Texture(7), dmabuf.Size{Width: 16, Height: 8}, region, 0); err != nil {
+		t.Fatalf("CopyImportedRegionToOwned: %v", err)
+	}
+	assertFloat32sEqual(t, fd.lastBufferData, []float32{
+		-1, -1, 0.25, 1,
+		1, -1, 0.75, 1,
+		-1, 1, 0.25, 0,
+		1, 1, 0.75, 0,
+	})
+}
+
+func TestCopyImportedRegionToOwnedFullFrameMatchesPlainCopy(t *testing.T) {
+	fd := newFakeDriver()
+	copier, err := NewTexturedQuadCopier(fd)
+	if err != nil {
+		t.Fatalf("NewTexturedQuadCopier: %v", err)
+	}
+	size := dmabuf.Size{Width: 16, Height: 8}
+	if _, err := copier.CopyImportedRegionToOwned(Texture(7), size, dmabuf.Rect{Width: 16, Height: 8}, 0); err != nil {
+		t.Fatalf("CopyImportedRegionToOwned: %v", err)
+	}
+	assertFloat32sEqual(t, fd.lastBufferData, quadVerticesFlipY)
+}
+
 func TestCopyImportedToOwnedChecksFramebufferBeforeDraw(t *testing.T) {
 	fd := newFakeDriver()
 	copier, err := NewTexturedQuadCopier(fd)
