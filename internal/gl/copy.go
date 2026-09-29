@@ -274,6 +274,37 @@ func (c *TexturedQuadCopier) Close() {
 // zero, a new owned RGBA texture is created. No production fake-success path is
 // provided: framebuffer completeness and glGetError are mandatory checks.
 func (c *TexturedQuadCopier) CopyImportedToOwned(src Texture, size dmabuf.Size, dst Texture) (out Texture, err error) {
+	return c.copyImported(src, size, dst, quadVerticesFlipY)
+}
+
+// CopyImportedRegionToOwned is CopyImportedToOwned but stretches only the
+// region of src to the full size-sized owned texture. It drops the letterbox
+// bars CEF's capturer adds while its output size lags a resize.
+func (c *TexturedQuadCopier) CopyImportedRegionToOwned(src Texture, size dmabuf.Size, region dmabuf.Rect, dst Texture) (Texture, error) {
+	if _, ok := dmabuf.LetterboxCrop(size, region); !ok {
+		return c.copyImported(src, size, dst, quadVerticesFlipY)
+	}
+	return c.copyImported(src, size, dst, flipYRegionVertices(size, region))
+}
+
+// flipYRegionVertices maps the frame region onto the full quad with the same
+// image-origin flip as quadVerticesFlipY: V is the frame row divided by the
+// coded height, and the quad bottom samples the region's last row.
+func flipYRegionVertices(size dmabuf.Size, region dmabuf.Rect) []float32 {
+	w, h := float32(size.Width), float32(size.Height)
+	u0 := float32(region.X) / w
+	u1 := float32(region.X+region.Width) / w
+	vFirstRow := float32(region.Y) / h
+	vLastRow := float32(region.Y+region.Height) / h
+	return []float32{
+		-1, -1, u0, vLastRow,
+		1, -1, u1, vLastRow,
+		-1, 1, u0, vFirstRow,
+		1, 1, u1, vFirstRow,
+	}
+}
+
+func (c *TexturedQuadCopier) copyImported(src Texture, size dmabuf.Size, dst Texture, vertices []float32) (out Texture, err error) {
 	if src == 0 {
 		return 0, ErrInvalidTexture
 	}
@@ -308,7 +339,7 @@ func (c *TexturedQuadCopier) CopyImportedToOwned(src Texture, size dmabuf.Size, 
 	// CEF's imported NativePixmap samples use the opposite image-origin
 	// convention from GL texture coordinates. Normalize once at the import/copy
 	// boundary; the later GtkGLArea presentation keeps identity coordinates.
-	c.uploadQuadVertices(quadVerticesFlipY)
+	c.uploadQuadVertices(vertices)
 	c.gl.UseProgram(c.program)
 	c.gl.ActiveTexture(Texture0)
 	c.gl.BindTexture(Texture2D, uint32(src))

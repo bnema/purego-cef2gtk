@@ -41,6 +41,7 @@ type eglCloser interface {
 
 type textureCopier interface {
 	CopyImportedToOwned(gl.Texture, dmabuf.Size, gl.Texture) (gl.Texture, error)
+	CopyImportedRegionToOwned(gl.Texture, dmabuf.Size, dmabuf.Rect, gl.Texture) (gl.Texture, error)
 	DrawTextureToCurrentFramebuffer(gl.Texture, dmabuf.Size) error
 	Close()
 }
@@ -230,7 +231,7 @@ func (r *AcceleratedRenderer) ImportCopyAndQueue(info *cef.AcceleratedPaintInfo)
 
 	copyStart := time.Now()
 	copyQuery, copyQueryOK := r.beginTimer(r.copyTimer)
-	owned, err := r.copier.CopyImportedToOwned(imported, frame.CodedSize, 0)
+	owned, err := r.copier.CopyImportedRegionToOwned(imported, frame.CodedSize, frame.ContentRect, 0)
 	r.endTimer(r.copyTimer, copyQuery, copyQueryOK)
 	r.recordCopyCPU(time.Since(copyStart))
 	r.collectCopyGPU()
