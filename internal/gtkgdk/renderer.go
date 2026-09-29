@@ -135,9 +135,10 @@ type ownedFrame struct {
 // single-plane RGB frames. Duplicated FDs are handed to GTK with a native
 // close(2) destroy notify so they stay open until the GdkTexture is finalized.
 type Renderer struct {
-	widget  *gtk.Widget
-	picture *gtk.Picture
-	offload *gtk.GraphicsOffload
+	widget    *gtk.Widget
+	picture   *gtk.Picture
+	offload   *gtk.GraphicsOffload
+	letterbox *letterboxClip
 
 	display             *gdk.Display
 	formats             dmabufFormatSet
@@ -305,6 +306,10 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 	configurePresenterPicture(picture)
 
 	offload, widget := selectPresenterWidget(picture, useOffload, graphicsOffloadSupported, newOffloadPresenter)
+	letterbox := newLetterboxClip(widget)
+	if letterbox != nil {
+		widget = letterbox.Widget()
+	}
 
 	builder, err := newTextureBuilder()
 	if err != nil {
@@ -322,6 +327,7 @@ func NewRenderer(useOffload bool) (*Renderer, error) {
 		widget:           widget,
 		picture:          picture,
 		offload:          offload,
+		letterbox:        letterbox,
 		builder:          builder,
 		dupFD:            dupFDClOExec,
 		closeFD:          unix.Close,
@@ -625,6 +631,7 @@ func (r *Renderer) importAndSwapOwnedFrame(frame *ownedFrame) error {
 		r.picture.SetPaintable(built.texture)
 	}
 	r.current = built
+	r.letterbox.Update(frame.CodedSize, frame.ContentRect)
 	r.recordPaintableSwap()
 	r.recordFirstDMABUFTextureSwap()
 	r.retireOwnedTexture(old)

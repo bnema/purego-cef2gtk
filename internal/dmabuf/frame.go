@@ -37,6 +37,25 @@ type Rect struct {
 // Empty reports whether the rectangle has no area. Negative dimensions are treated as empty/invalid.
 func (r Rect) Empty() bool { return r.Width <= 0 || r.Height <= 0 }
 
+// LetterboxCrop returns the content region to present from a coded frame.
+// CEF's OSR video capturer keeps the previous output size until it adopts a
+// resize, and meanwhile letterboxes the page inside that stale buffer. The
+// content rect marks the real page pixels; presenting only that region avoids
+// black bars. ok is false when the full coded frame should be shown.
+func LetterboxCrop(coded Size, content Rect) (Rect, bool) {
+	if !coded.Valid() || content.Empty() || content.X < 0 || content.Y < 0 {
+		return Rect{}, false
+	}
+	if int64(content.X)+int64(content.Width) > int64(coded.Width) ||
+		int64(content.Y)+int64(content.Height) > int64(coded.Height) {
+		return Rect{}, false
+	}
+	if content.X == 0 && content.Y == 0 && content.Width == coded.Width && content.Height == coded.Height {
+		return Rect{}, false
+	}
+	return content, true
+}
+
 // Plane describes one borrowed native pixmap plane. The FD remains owned by CEF.
 type Plane struct {
 	FD     int

@@ -104,6 +104,9 @@ func (f fakeCopier) CopyImportedToOwned(src gl.Texture, size dmabuf.Size, dst gl
 	}
 	return f.texture, nil
 }
+func (f fakeCopier) CopyImportedRegionToOwned(src gl.Texture, size dmabuf.Size, _ dmabuf.Rect, dst gl.Texture) (gl.Texture, error) {
+	return f.CopyImportedToOwned(src, size, dst)
+}
 func (f fakeCopier) DrawTextureToCurrentFramebuffer(src gl.Texture, size dmabuf.Size) error {
 	*f.calls = append(*f.calls, "copier.DrawTextureToCurrentFramebuffer")
 	return f.err
