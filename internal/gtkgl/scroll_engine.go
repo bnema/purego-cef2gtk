@@ -405,7 +405,7 @@ func (c *scrollController) releaseFromDecelerate(now float64, x, y float64, scal
 	precise := normalizePreciseMultiplier(opts.PreciseMultiplier)
 	horizontal := normalizeMultiplier(opts.HorizontalMultiplier)
 	vertical := normalizeMultiplier(opts.VerticalMultiplier)
-	ovx := vx * precise * horizontal
+	ovx := -vx * precise * horizontal
 	ovy := -vy * precise * vertical
 	stop := touchpadReleaseStop(ovx, ovy)
 	if stop <= 0 {

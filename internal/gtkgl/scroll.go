@@ -489,8 +489,12 @@ func normalizedNavigationSwipeRatio(value float64) float64 {
 
 const cefScrollUnitsPerNotch = 240
 
+// TranslateScrollDeltas converts GTK scroll deltas to CEF wheel deltas. GTK
+// reports positive dx/dy for right/down scrolling while CEF (like Chromium's
+// own Linux backends) expects positive wheel deltas for left/up, so both axes
+// are negated.
 func TranslateScrollDeltas(dx, dy float64) (int32, int32) {
-	return int32(dx * cefScrollUnitsPerNotch), int32(-dy * cefScrollUnitsPerNotch)
+	return int32(-dx * cefScrollUnitsPerNotch), int32(-dy * cefScrollUnitsPerNotch)
 }
 
 func TranslateScrollDeltasWithOptions(dx, dy float64, unit gdk.ScrollUnit, opts ScrollOptions) (int32, int32) {
@@ -514,7 +518,7 @@ func translateScrollFloat(dx, dy float64, unit gdk.ScrollUnit, opts ScrollOption
 	}
 	horizontal := normalizeMultiplier(opts.HorizontalMultiplier)
 	vertical := normalizeMultiplier(opts.VerticalMultiplier)
-	return clampScrollFloat(dx*unitScale*multiplier*horizontal, opts.MaxDelta),
+	return clampScrollFloat(-dx*unitScale*multiplier*horizontal, opts.MaxDelta),
 		clampScrollFloat(-dy*unitScale*multiplier*vertical, opts.MaxDelta)
 }
 

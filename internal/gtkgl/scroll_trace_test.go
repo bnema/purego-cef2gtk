@@ -49,8 +49,8 @@ func TestBridgeUnknownUnitUsesWheelTranslation(t *testing.T) {
 	// Raw unit reports surface but unknown: floats must follow the same
 	// wheel fallback as the integer path, not precise surface scaling.
 	ib.onScrollUpdate(1, -1, gdk.ScrollUnitSurfaceValue, false, 0)
-	if ib.scroll.session.pendingX != 240 || ib.scroll.session.pendingY != 240 {
-		t.Fatalf("pending = (%v,%v), want wheel translation (240,240)",
+	if ib.scroll.session.pendingX != -240 || ib.scroll.session.pendingY != 240 {
+		t.Fatalf("pending = (%v,%v), want wheel translation (-240,240)",
 			ib.scroll.session.pendingX, ib.scroll.session.pendingY)
 	}
 }
