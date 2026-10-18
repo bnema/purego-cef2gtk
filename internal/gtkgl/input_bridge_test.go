@@ -750,8 +750,8 @@ func TestInputBridgeScrollHandlerCanConsumeUpdate(t *testing.T) {
 	if !got.UnitKnown {
 		t.Fatalf("UnitKnown = false, want true for update")
 	}
-	if got.DeltaX != 308 || got.DeltaY != 100 {
-		t.Fatalf("callback deltas = (%d,%d), want (308,100)", got.DeltaX, got.DeltaY)
+	if got.DeltaX != -308 || got.DeltaY != 100 {
+		t.Fatalf("callback deltas = (%d,%d), want (-308,100)", got.DeltaX, got.DeltaY)
 	}
 	if got.Modifiers != uint(gdk.ShiftMaskValue) {
 		t.Fatalf("modifiers = %#x, want shift", got.Modifiers)
@@ -774,8 +774,8 @@ func TestInputBridgeScrollUpdateUsesWheelTranslationWhenUnitUnknown(t *testing.T
 	if got.UnitKnown {
 		t.Fatalf("UnitKnown = true, want false")
 	}
-	if got.DeltaX != 240 || got.DeltaY != 240 {
-		t.Fatalf("unknown-unit deltas = (%d,%d), want wheel translation (240,240)", got.DeltaX, got.DeltaY)
+	if got.DeltaX != -240 || got.DeltaY != 240 {
+		t.Fatalf("unknown-unit deltas = (%d,%d), want wheel translation (-240,240)", got.DeltaX, got.DeltaY)
 	}
 }
 

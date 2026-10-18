@@ -76,8 +76,8 @@ func TestBridgeAnimatedTouchpadDirectAndRelease(t *testing.T) {
 	for _, s := range rec.subs {
 		total += int64(s.dx)
 	}
-	if math.Abs(float64(total)-410) > 6 {
-		t.Fatalf("gated total = %d, want near 410 (50 direct + 360 release)", total)
+	if math.Abs(float64(total)+410) > 6 {
+		t.Fatalf("gated total = %d, want near -410 (50 direct + 360 release, CEF sign)", total)
 	}
 	want := map[ScrollPhase]int{ScrollPhaseBegin: 1, ScrollPhaseUpdate: 2, ScrollPhaseEnd: 1, ScrollPhaseDecelerate: 1}
 	for phase, n := range want {
@@ -203,14 +203,14 @@ func TestBridgeNavigationSuppressesRelease(t *testing.T) {
 	if len(actions) != 1 || actions[0] != NavigationSwipeBack {
 		t.Fatalf("nav actions = %v, want one back", actions)
 	}
-	// Only the two direct updates (-375 each) were gated; the navigating
+	// Only the two direct updates (+375 each) were gated; the navigating
 	// swipe never flings into the new page.
 	var total int64
 	for _, s := range rec.subs {
 		total += int64(s.dx)
 	}
-	if total != -750 {
-		t.Fatalf("gated total = %d, want -750 (direct only, no release)", total)
+	if total != 750 {
+		t.Fatalf("gated total = %d, want 750 (direct only, no release)", total)
 	}
 }
 

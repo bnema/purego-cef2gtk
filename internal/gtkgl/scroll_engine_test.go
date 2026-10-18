@@ -86,8 +86,8 @@ func TestEngineTouchpadReleaseDecaysFinite(t *testing.T) {
 	tx, ty := rec.total()
 	// Output velocity is 800*2.5=2000 u/s and 400*2.5=1000 u/s; totals near
 	// v0*tau per axis minus integer quantization and the sub-threshold tail.
-	if math.Abs(float64(tx)-360) > 4 || math.Abs(float64(ty)-180) > 4 {
-		t.Fatalf("release total = (%d,%d), want near (360,180)", tx, ty)
+	if math.Abs(float64(tx)+360) > 4 || math.Abs(float64(ty)-180) > 4 {
+		t.Fatalf("release total = (%d,%d), want near (-360,180)", tx, ty)
 	}
 	for _, s := range rec.subs {
 		if s.evt.Modifiers&uint32(cef.EventFlagsEventflagPrecisionScrollingDelta) == 0 {
@@ -108,7 +108,7 @@ func TestEngineReleaseUsesUnitsPerSecond(t *testing.T) {
 	tx, _ := rec.total()
 	// 1000 u/s * 2.5 * 0.18 s = 450 output units. A mistaken extra x1000
 	// (pixels/ms confusion) would yield 450000.
-	if tx <= 0 || tx > 2000 {
+	if tx >= 0 || tx < -2000 {
 		t.Fatalf("release total = %d, want near 450 (units/s, not units/ms)", tx)
 	}
 }

@@ -8,15 +8,15 @@ import (
 
 func TestTranslateScrollDeltas(t *testing.T) {
 	x, y := TranslateScrollDeltas(1.5, -2)
-	if x != 360 || y != 480 {
-		t.Fatalf("TranslateScrollDeltas = (%d,%d), want (360,480)", x, y)
+	if x != -360 || y != 480 {
+		t.Fatalf("TranslateScrollDeltas = (%d,%d), want (-360,480)", x, y)
 	}
 }
 
 func TestTranslateScrollDeltasWithOptionsDefaultsToLegacyBehavior(t *testing.T) {
 	x, y := TranslateScrollDeltasWithOptions(1.5, -2, gdk.ScrollUnitWheelValue, ScrollOptions{})
-	if x != 360 || y != 480 {
-		t.Fatalf("TranslateScrollDeltasWithOptions = (%d,%d), want (360,480)", x, y)
+	if x != -360 || y != 480 {
+		t.Fatalf("TranslateScrollDeltasWithOptions = (%d,%d), want (-360,480)", x, y)
 	}
 }
 
@@ -31,15 +31,15 @@ func TestTranslateScrollDeltasWithOptionsUsesPreciseMultiplierForSurfaceUnits(t 
 	x, y := TranslateScrollDeltasWithOptions(123, -40, gdk.ScrollUnitSurfaceValue, ScrollOptions{
 		PreciseMultiplier: 2.5,
 	})
-	if x != 308 || y != 100 {
-		t.Fatalf("precise deltas = (%d,%d), want scaled surface pixels (308,100)", x, y)
+	if x != -308 || y != 100 {
+		t.Fatalf("precise deltas = (%d,%d), want scaled surface pixels (-308,100)", x, y)
 	}
 }
 
 func TestTranslateScrollDeltasWithOptionsDefaultsSurfaceUnitsToWebKitGTKScale(t *testing.T) {
 	x, y := TranslateScrollDeltasWithOptions(1.6, -1.6, gdk.ScrollUnitSurfaceValue, ScrollOptions{})
-	if x != 4 || y != 4 {
-		t.Fatalf("surface pixel deltas = (%d,%d), want WebKitGTK-like scale (4,4)", x, y)
+	if x != -4 || y != 4 {
+		t.Fatalf("surface pixel deltas = (%d,%d), want WebKitGTK-like scale (-4,4)", x, y)
 	}
 }
 
@@ -49,8 +49,8 @@ func TestTranslateScrollDeltasWithOptionsAppliesAxisMultipliersAndClamp(t *testi
 		VerticalMultiplier:   2,
 		MaxDelta:             300,
 	})
-	if x != 240 || y != 300 {
-		t.Fatalf("scaled/clamped deltas = (%d,%d), want (240,300)", x, y)
+	if x != -240 || y != 300 {
+		t.Fatalf("scaled/clamped deltas = (%d,%d), want (-240,300)", x, y)
 	}
 }
 
@@ -96,5 +96,18 @@ func TestInputBridgeDelegatesScrollOptionsToController(t *testing.T) {
 	opts, _ := ib.scroll.snapshot()
 	if opts.WheelMultiplier != 3 {
 		t.Fatalf("delegated multiplier = %v, want 3", opts.WheelMultiplier)
+	}
+}
+
+func TestTranslateScrollDeltasUsesCEFAxisSigns(t *testing.T) {
+	// GTK: positive dx/dy scroll content right/down. CEF wheel deltas use the
+	// Windows convention: positive deltaX scrolls left, positive deltaY up.
+	// Scrolling right must therefore produce a negative CEF deltaX, matching
+	// the vertical axis where scrolling down yields a negative deltaY.
+	for _, unit := range []gdk.ScrollUnit{gdk.ScrollUnitWheelValue, gdk.ScrollUnitSurfaceValue} {
+		x, y := TranslateScrollDeltasWithOptions(10, 10, unit, ScrollOptions{})
+		if x >= 0 || y >= 0 {
+			t.Fatalf("unit %v right/down deltas = (%d,%d), want both negative", unit, x, y)
+		}
 	}
 }
