@@ -123,6 +123,7 @@ type View struct {
 	cachedWidth                 atomic.Int32
 	cachedHeight                atomic.Int32
 	scaleBits                   atomic.Uint64
+	hasSurfaceScale             bool // Accessed only on the GTK thread.
 	scaleMultiplierBits         atomic.Uint64
 	inputScaleOverride          atomic.Uint64
 	scaleTraceCount             atomic.Uint64
@@ -451,9 +452,7 @@ func (v *View) updateCachedSizeOnGTKThread() {
 		changed = true
 	}
 	prevScale := v.observedScale()
-	obs := observeWidgetScale(v.widget)
-	scaleChanged := prevScale != obs.scale
-	v.storeObservedScale(obs.scale)
+	obs, scaleChanged := v.applyScaleObservation(observeWidgetScale(v.widget))
 	if scaleChanged {
 		if bridge := v.inputBridge(); bridge != nil {
 			bridge.SetScale(v.inputScaleForObservedScale(v.effectiveScaleForSurface(obs.scale)))
@@ -610,6 +609,21 @@ func observeWidgetScale(widget *gtk.Widget) widgetScaleObservation {
 	obs.scale = normalizeDeviceScale(obs.scale)
 	obs.surfaceScale = normalizeDeviceScale(obs.surfaceScale)
 	return obs
+}
+
+// applyScaleObservation keeps the last authoritative raw surface scale across
+// native-surface gaps. The integer widget fallback is only useful at startup;
+// it must not replace a fractional surface scale while the widget is unmapped.
+func (v *View) applyScaleObservation(obs widgetScaleObservation) (widgetScaleObservation, bool) {
+	previous := v.observedScale()
+	if obs.hasSurface {
+		v.hasSurfaceScale = true
+	} else if v.hasSurfaceScale {
+		obs.scale = previous
+	}
+	obs.scale = normalizeDeviceScale(obs.scale)
+	v.storeObservedScale(obs.scale)
+	return obs, previous != obs.scale
 }
 
 func widgetSurface(widget *gtk.Widget) *gdk.Surface {

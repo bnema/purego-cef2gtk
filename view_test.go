@@ -408,3 +408,56 @@ func TestNewViewWidgetGLAreaBasics(t *testing.T) {
 		t.Fatalf("unexpected initial diagnostics: %+v", d)
 	}
 }
+
+func TestScaleObservationKeepsSurfaceScaleWhileUnmapped(t *testing.T) {
+	setOSRBackingScaleEnv(t, "on")
+	for _, tt := range []struct {
+		name                string
+		surface, multiplier float64
+	}{
+		{"fractional surface", 1.4, 1},
+		{"application multiplier", 1, 1.4},
+		{"composed scales", 1.4, 1.4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			v := &View{}
+			v.setScaleMultiplier(tt.multiplier)
+			v.applyScaleObservation(widgetScaleObservation{
+				scale: tt.surface, surfaceScale: tt.surface, hasSurface: true,
+				widgetScaleFactor: 2,
+			})
+			want := float32(tt.surface * tt.multiplier)
+			for i := 0; i < 2; i++ {
+				obs, changed := v.applyScaleObservation(widgetScaleObservation{scale: 2, widgetScaleFactor: 2})
+				if changed || shouldEmitSizeHooks(false, changed) {
+					t.Fatal("unmapped observation emitted a scale-only change")
+				}
+				if obs.scale != tt.surface || v.observedScale() != tt.surface {
+					t.Fatalf("raw scale=%v, cached=%v, want %v", obs.scale, v.observedScale(), tt.surface)
+				}
+				if got := v.DeviceScaleFactor(); got != want {
+					t.Fatalf("effective scale=%v, want %v", got, want)
+				}
+				if got := v.PageZoomCompensation(); got != float64(want) {
+					t.Fatalf("compensation=%v, want %v", got, want)
+				}
+			}
+			_, changed := v.applyScaleObservation(widgetScaleObservation{scale: 1.75, hasSurface: true})
+			if !changed || v.observedScale() != 1.75 {
+				t.Fatal("new surface scale was not accepted on remap")
+			}
+		})
+	}
+}
+
+func TestScaleObservationUsesWidgetFallbackBeforeSurface(t *testing.T) {
+	v := &View{}
+	_, changed := v.applyScaleObservation(widgetScaleObservation{scale: 2, widgetScaleFactor: 2})
+	if !changed || v.observedScale() != 2 {
+		t.Fatal("initial widget scale fallback was not accepted")
+	}
+	v.applyScaleObservation(widgetScaleObservation{scale: 1.4, hasSurface: true})
+	if got := v.observedScale(); got != 1.4 {
+		t.Fatalf("surface scale=%v, want 1.4", got)
+	}
+}
